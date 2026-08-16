@@ -1,0 +1,31 @@
+server:
+  address: 127.0.0.1
+session-agent:
+  semantic:
+    base-url: ${SEMANTIC_BASE_URL:http://localhost:8080}
+    api-token: ${SEMANTIC_API_TOKEN:}
+  model:
+    name: ${GOOGLE_GENAI_MODEL:gemini-3.1-flash-lite}
+  worker:
+    poll-delay: 1s
+    lock-duration: 30s
+    transient-retries: 3
+    maximum-backoff: 60s
+spring:
+  jackson:
+    deserialization:
+      fail-on-unknown-properties: true
+  datasource:
+    url: ${SESSION_AGENT_DATASOURCE_URL:jdbc:postgresql://localhost:5432/session_agent}
+    username: ${SESSION_AGENT_DATASOURCE_USERNAME:session_agent}
+    password: ${SESSION_AGENT_DATASOURCE_PASSWORD:session_agent}
+  ai:
+    chat:
+      client:
+        tool-calling:
+          enabled: false
+    google:
+      genai:
+        chat:
+          options:
+            model: ${GOOGLE_GENAI_MODEL:gemini-3.1-flash-lite}

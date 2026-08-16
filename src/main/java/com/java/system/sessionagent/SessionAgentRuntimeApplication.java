@@ -1,0 +1,14 @@
+package com.java.system.sessionagent;
+
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.scheduling.annotation.EnableScheduling;
+
+@SpringBootApplication
+@EnableScheduling
+public class SessionAgentRuntimeApplication {
+
+    public static void main(String[] args) {
+        SpringApplication.run(SessionAgentRuntimeApplication.class, args);
+    }
+}

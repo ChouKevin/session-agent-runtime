@@ -1,0 +1,31 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+      - name: Repository contract
+        run: bash src/test/shell/repository-contract-test.sh
+      - name: Unit and architecture tests
+        run: mvn -q test
+      - name: PostgreSQL integration tests
+        run: mvn -q -Ppostgres-it verify
+      - name: Payment fixture
+        run: mvn -q -f fixtures/payment-service/pom.xml test
+      - name: Order fixture
+        run: mvn -q -f fixtures/order-service/pom.xml test
+      - name: Docker contract
+        run: bash src/test/shell/docker-contract-test.sh
+      - name: Docker image
+        run: docker build -t session-agent-runtime:ci .

@@ -1,0 +1,5 @@
+.env
+build/
+reports/
+target/
+fixtures/*/target/
