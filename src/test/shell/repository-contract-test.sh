@@ -13,7 +13,7 @@ for required_file in pom.xml Dockerfile README.md live-test.sh .gitignore; do
     }
 done
 
-for ignored_path in .env target build/ reports/; do
+for ignored_path in .env target/ build/ reports/; do
     git -C "${runtime_root}" check-ignore -q "${ignored_path}" || {
         printf 'generated or secret path is not ignored: %s\n' "${ignored_path}" >&2
         exit 1
