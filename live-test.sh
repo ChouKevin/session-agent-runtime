@@ -12,6 +12,7 @@ if [[ ! "${project_name}" =~ ^[a-z0-9][a-z0-9_-]*$ ]]; then
 fi
 
 : "${SEMANTIC_BASE_URL:?SEMANTIC_BASE_URL must be set for live acceptance}"
+: "${SEMANTIC_API_TOKEN:?SEMANTIC_API_TOKEN must be set for live acceptance}"
 : "${GOOGLE_API_KEY:?GOOGLE_API_KEY must be set for live acceptance}"
 : "${SESSION_AGENT_POSTGRES_PASSWORD:?SESSION_AGENT_POSTGRES_PASSWORD must be set for live acceptance}"
 

@@ -227,7 +227,7 @@ class SessionAgentLiveIT {
                     .header("Accept", "application/json");
             String token = System.getenv("SEMANTIC_API_TOKEN");
             if (url.startsWith(semanticBaseUrl) && StringUtils.hasText(token)) {
-                builder.header("Authorization", "Bearer " + token);
+                builder.header("X-Api-Token", token);
             }
             if (payload.isPresent()) {
                 JsonNode body = payload.orElseThrow();

@@ -21,8 +21,8 @@ for required_command in docker jq; do
     fi
 done
 
-SESSION_AGENT_POSTGRES_PASSWORD='contract-only-password' docker compose -f "${compose_file}" config --quiet
-compose_json="$(SESSION_AGENT_POSTGRES_PASSWORD='contract-only-password' docker compose -f "${compose_file}" config --format json)"
+SEMANTIC_API_TOKEN='contract-semantic-token' SESSION_AGENT_POSTGRES_PASSWORD='contract-only-password' docker compose -f "${compose_file}" config --quiet
+compose_json="$(SEMANTIC_API_TOKEN='contract-semantic-token' SESSION_AGENT_POSTGRES_PASSWORD='contract-only-password' docker compose -f "${compose_file}" config --format json)"
 service_names="$(jq -r '.services | keys | sort | join(",")' <<<"${compose_json}")"
 [[ "${service_names}" == "postgres,session-agent-runtime" ]] || {
     printf 'unexpected compose services: %s\n' "${service_names}" >&2
@@ -64,9 +64,17 @@ if rg -n 'SESSION_AGENT_POSTGRES_PASSWORD:-|POSTGRES_PASSWORD:.*session_agent' "
     printf 'compose password must not have a committed fallback\n' >&2
     exit 1
 fi
+if rg -n 'SEMANTIC_API_TOKEN:-' "${compose_file}" >/dev/null; then
+    printf 'compose Semantic token must not have a committed fallback\n' >&2
+    exit 1
+fi
 
 grep -Fq 'SESSION_AGENT_POSTGRES_PASSWORD must be set for live acceptance' "${live_test}" || {
     printf 'live test must require the PostgreSQL password before Compose work\n' >&2
+    exit 1
+}
+grep -Fq 'SEMANTIC_API_TOKEN must be set for live acceptance' "${live_test}" || {
+    printf 'live test must require the Semantic token before Compose work\n' >&2
     exit 1
 }
 

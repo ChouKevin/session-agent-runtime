@@ -35,7 +35,7 @@ import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
-import org.springframework.util.StringUtils;
+import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.web.client.RestClient;
 
 import javax.sql.DataSource;
@@ -72,12 +72,14 @@ public class RuntimeConfiguration {
 
     @Bean
     RestClient semanticRestClient(RuntimeProperties properties, ObservationRegistry observationRegistry) {
+        SimpleClientHttpRequestFactory requestFactory = new SimpleClientHttpRequestFactory();
+        requestFactory.setConnectTimeout(properties.semantic().connectTimeout());
+        requestFactory.setReadTimeout(properties.semantic().responseTimeout());
         RestClient.Builder builder = RestClient.builder()
                 .baseUrl(properties.semantic().baseUrl())
+                .requestFactory(requestFactory)
+                .defaultHeader("X-Api-Token", properties.semantic().apiToken())
                 .observationRegistry(observationRegistry);
-        if (StringUtils.hasText(properties.semantic().apiToken())) {
-            builder.defaultHeader("Authorization", "Bearer " + properties.semantic().apiToken());
-        }
         return builder.build();
     }
 

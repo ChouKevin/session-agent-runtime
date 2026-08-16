@@ -23,9 +23,18 @@ public record RuntimeProperties(
         Assert.notNull(worker, "Worker properties must not be null");
     }
 
-    public record Semantic(@NotBlank @DefaultValue("http://localhost:8080") String baseUrl, String apiToken) {
+    public record Semantic(
+            @NotBlank @DefaultValue("http://localhost:8080") String baseUrl,
+            @NotBlank String apiToken,
+            @DefaultValue("2s") Duration connectTimeout,
+            @DefaultValue("10s") Duration responseTimeout) {
         public Semantic {
             Assert.hasText(baseUrl, "Semantic base URL must not be blank");
+            Assert.hasText(apiToken, "Semantic API token must not be blank");
+            Assert.notNull(connectTimeout, "Semantic connect timeout must not be null");
+            Assert.notNull(responseTimeout, "Semantic response timeout must not be null");
+            Assert.isTrue(!connectTimeout.isNegative() && !connectTimeout.isZero(), "Semantic connect timeout must be positive");
+            Assert.isTrue(!responseTimeout.isNegative() && !responseTimeout.isZero(), "Semantic response timeout must be positive");
         }
     }
 
@@ -52,9 +61,10 @@ public record RuntimeProperties(
 
     @Validated
     @ConfigurationProperties("spring.datasource")
-    public record Datasource(@NotBlank String url) {
+    public record Datasource(@NotBlank String url, @NotBlank String password) {
         public Datasource {
             Assert.hasText(url, "Datasource URL must not be blank");
+            Assert.hasText(password, "Datasource password must not be blank");
         }
     }
 }

@@ -47,7 +47,10 @@ class ApplicationStartupTest {
 
     private final ApplicationContextRunner contextRunner = new ApplicationContextRunner()
             .withUserConfiguration(RuntimeConfiguration.class, TestDependencies.class)
-            .withPropertyValues("spring.datasource.url=jdbc:postgresql://localhost:5432/session_agent");
+            .withPropertyValues(
+                    "spring.datasource.url=jdbc:postgresql://localhost:5432/session_agent",
+                    "spring.datasource.password=test-datasource-password",
+                    "session-agent.semantic.api-token=test-semantic-token");
 
     @Test
     void createsOneOfEachStandaloneRuntimeAssemblyAndTheFullToolSet() {
@@ -104,9 +107,13 @@ class ApplicationStartupTest {
     @ParameterizedTest
     @ValueSource(strings = {
             "session-agent.semantic.base-url= ",
+            "session-agent.semantic.api-token= ",
+            "session-agent.semantic.connect-timeout=0s",
+            "session-agent.semantic.response-timeout=-1s",
             "session-agent.model.name= ",
             "session-agent.worker.lock-duration=0s",
-            "spring.datasource.url= "
+            "spring.datasource.url= ",
+            "spring.datasource.password= "
     })
     void failsEagerlyForEachInvalidRuntimePropertyBeforeConversationPortsAreUsable(String invalidProperty) {
         contextRunner.withPropertyValues(invalidProperty)
@@ -115,6 +122,22 @@ class ApplicationStartupTest {
                     assertThatThrownBy(() -> context.getBean(com.java.system.sessionagent.conversation.port.in.MessageIntakePort.class))
                             .isInstanceOf(IllegalStateException.class);
                 });
+    }
+
+    @Test
+    void failsEagerlyWhenRequiredSemanticTokenOrDatasourcePasswordIsMissing() {
+        new ApplicationContextRunner()
+                .withUserConfiguration(RuntimeConfiguration.class, TestDependencies.class)
+                .withPropertyValues(
+                        "spring.datasource.url=jdbc:postgresql://localhost:5432/session_agent",
+                        "spring.datasource.password=test-datasource-password")
+                .run(context -> assertThat(context).hasFailed());
+        new ApplicationContextRunner()
+                .withUserConfiguration(RuntimeConfiguration.class, TestDependencies.class)
+                .withPropertyValues(
+                        "spring.datasource.url=jdbc:postgresql://localhost:5432/session_agent",
+                        "session-agent.semantic.api-token=test-semantic-token")
+                .run(context -> assertThat(context).hasFailed());
     }
 
     @Configuration(proxyBeanMethods = false)
