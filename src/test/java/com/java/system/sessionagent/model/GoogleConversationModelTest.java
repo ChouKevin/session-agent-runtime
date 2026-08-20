@@ -154,7 +154,10 @@ class GoogleConversationModelTest {
         assertThat(options.getResponseSchema())
                 .contains("\"message\"")
                 .contains("\"citations\"")
-                .contains("\"value\"");
+                .contains("\"value\"")
+                .contains("\"required\":[\"citations\",\"message\"]")
+                .contains("\"minItems\":1")
+                .contains("\"required\":[\"value\"]");
         assertThat(options.getToolCallbacks()).isEmpty();
     }
 
