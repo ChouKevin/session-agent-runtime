@@ -26,6 +26,10 @@ class PromptResourceTest {
                 .contains("`list_repositories`")
                 .contains("catalog result is not citeable")
                 .contains("Never repeat a rejected tool request with the same tool name and arguments")
+                .contains("Follow-up operations are optional")
+                .contains("copy the complete sourceFile and range exactly")
+                .contains("stop querying and answer")
+                .contains("runtime value is unavailable")
                 .contains("\"message\":\"<answer>\"")
                 .contains("\"citations\":[{\"value\":\"<resultId>\"}]")
                 .contains("Do not wrap the JSON in Markdown");
