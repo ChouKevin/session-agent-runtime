@@ -402,7 +402,8 @@ public final class SemanticSourceClient {
                 .filter("REPOSITORY_NOT_FOUND"::equals).isPresent()) {
             return SemanticFailure.unknownRepository();
         }
-        if (statusCode.value() == 404 && error.map(ProviderDtos.ApiErrorResponse::errorCode)
+        if ((statusCode.value() == 404 || statusCode.value() == 422)
+                && error.map(ProviderDtos.ApiErrorResponse::errorCode)
                 .filter(code -> code.endsWith("_NOT_FOUND")).isPresent()) {
             return SemanticFailure.invalidInput();
         }

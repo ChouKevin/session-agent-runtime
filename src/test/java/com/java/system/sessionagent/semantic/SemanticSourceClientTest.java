@@ -164,6 +164,24 @@ class SemanticSourceClientTest {
         fixture.server().verify();
     }
 
+    @Test
+    void classifies_a_missing_semantic_target_as_correctable_input() {
+        ClientFixture fixture = fixture();
+        fixture.server().expect(once(), requestTo("https://semantic.test/v1/discovery/method-source"))
+                .andExpect(method(POST))
+                .andRespond(withStatus(HttpStatus.UNPROCESSABLE_ENTITY).contentType(MediaType.APPLICATION_JSON).body("""
+                        {"errorCode":"SEMANTIC_TARGET_NOT_FOUND","message":"target was not found",
+                        "repoId":"payment-service","expectedRevision":"revision-42","currentRevision":null,
+                        "target":null,"candidates":[],"requestId":"request-1"}
+                        """));
+
+        SemanticFailure failure = assertThrows(SemanticFailure.class,
+                () -> fixture.client().getMethodSource(new GetMethodSourceInput("payment-service", target())));
+
+        assertEquals(SemanticFailure.Kind.INVALID_INPUT, failure.kind());
+        fixture.server().verify();
+    }
+
     @TestFactory
     Stream<DynamicTest> uses_the_provider_wire_contract_for_every_source_operation() {
         MethodTarget target = target();
