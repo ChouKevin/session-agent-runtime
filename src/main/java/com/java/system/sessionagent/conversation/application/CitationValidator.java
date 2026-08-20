@@ -30,13 +30,19 @@ public final class CitationValidator {
         Assert.notNull(sessionId, "Session ID must not be null");
         Assert.notNull(citations, "Citations must not be null");
         if (citations.isEmpty() || !unique(citations)) {
-            return new Validation.Correctable();
+            return new Validation.Correctable(CorrectionReason.EMPTY_OR_DUPLICATE);
         }
         Map<String, List<ConversationStore.ResultProjection>> byRepository = new HashMap<>();
         for (ResultId citation : citations) {
             Optional<ConversationStore.ResultProjection> result = conversationStore.readResult(citation);
-            if (result.isEmpty() || !result.get().sessionId().equals(sessionId) || !result.get().citeable()) {
-                return new Validation.Correctable();
+            if (result.isEmpty()) {
+                return new Validation.Correctable(CorrectionReason.RESULT_NOT_FOUND);
+            }
+            if (!result.get().sessionId().equals(sessionId)) {
+                return new Validation.Correctable(CorrectionReason.WRONG_SESSION);
+            }
+            if (!result.get().citeable()) {
+                return new Validation.Correctable(CorrectionReason.NOT_CITEABLE);
             }
             ConversationStore.ResultProjection projection = result.get();
             String repositoryId = projection.repositoryId().orElseThrow();
@@ -45,7 +51,7 @@ public final class CitationValidator {
         for (Map.Entry<String, List<ConversationStore.ResultProjection>> entry : byRepository.entrySet()) {
             RevisionLookup lookup = revisionReader.read(entry.getKey());
             if (lookup instanceof RevisionLookup.UnknownRepository) {
-                return new Validation.Correctable();
+                return new Validation.Correctable(CorrectionReason.UNKNOWN_REPOSITORY);
             }
             if (lookup instanceof RevisionLookup.TemporaryFailure) {
                 return new Validation.Retry(Optional.empty());
@@ -57,7 +63,7 @@ public final class CitationValidator {
             boolean current = entry.getValue().stream()
                     .allMatch(result -> currentRevision.equals(result.revision().orElseThrow()));
             if (!current) {
-                return new Validation.Correctable();
+                return new Validation.Correctable(CorrectionReason.REVISION_CHANGED);
             }
         }
         return new Validation.Accepted(List.copyOf(citations));
@@ -68,9 +74,22 @@ public final class CitationValidator {
         return values.size() == citations.size();
     }
 
+    public enum CorrectionReason {
+        EMPTY_OR_DUPLICATE,
+        RESULT_NOT_FOUND,
+        WRONG_SESSION,
+        NOT_CITEABLE,
+        UNKNOWN_REPOSITORY,
+        REVISION_CHANGED
+    }
+
     public sealed interface Validation permits Validation.Accepted, Validation.Correctable, Validation.Retry, Validation.Terminal {
         record Accepted(List<ResultId> citations) implements Validation { }
-        record Correctable() implements Validation { }
+        record Correctable(CorrectionReason reason) implements Validation {
+            public Correctable {
+                Objects.requireNonNull(reason, "Citation correction reason must not be null");
+            }
+        }
         record Retry(Optional<Duration> retryAfter) implements Validation { }
         record Terminal() implements Validation { }
     }

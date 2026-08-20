@@ -238,7 +238,8 @@ public final class MessageJobService implements MessageJobPort {
             }
             return true;
         }
-        if (validation instanceof CitationValidator.Validation.Correctable) {
+        if (validation instanceof CitationValidator.Validation.Correctable correctable) {
+            logCitationRejected(claim, replyOnly, correctable.reason(), reply.citations().size());
             if (replyOnly) {
                 appendFeedback(claim, guard, FeedbackCode.CALL_LIMIT_REACHED, true, ToolFeedbackDetails.empty());
                 return true;
@@ -343,6 +344,12 @@ public final class MessageJobService implements MessageJobPort {
     private static void logModelCallFailed(MessageWorkClaim claim, int ordinal, ModelCallFailure.Kind kind) {
         LOGGER.info("model_call_failed sessionId={} messageJobId={} ordinal={} closedFailureKind={}",
                 claim.sessionId().value(), claim.messageJobId().value(), ordinal, kind);
+    }
+
+    private static void logCitationRejected(MessageWorkClaim claim, boolean replyOnly,
+                                            CitationValidator.CorrectionReason reason, int citationCount) {
+        LOGGER.info("assistant_citation_rejected sessionId={} messageJobId={} replyOnly={} reason={} citationCount={}",
+                claim.sessionId().value(), claim.messageJobId().value(), replyOnly, reason, citationCount);
     }
 
     private static ToolFeedbackDetails toolDetails(ModelDecision.UseTool toolCall) {

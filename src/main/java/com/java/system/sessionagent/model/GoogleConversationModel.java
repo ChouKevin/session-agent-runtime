@@ -4,6 +4,7 @@ import com.java.system.sessionagent.conversation.domain.AssistantReply;
 import com.java.system.sessionagent.conversation.domain.ModelDecision;
 import com.java.system.sessionagent.conversation.domain.ModelRequest;
 import com.java.system.sessionagent.conversation.domain.ModelUsage;
+import com.java.system.sessionagent.conversation.domain.ToolMessage;
 import com.java.system.sessionagent.conversation.port.out.ModelCallFailure;
 import com.java.system.sessionagent.conversation.port.out.ConversationTelemetry;
 import com.java.system.sessionagent.conversation.port.out.NoOpConversationTelemetry;
@@ -147,6 +148,19 @@ public final class GoogleConversationModel implements com.java.system.sessionage
         List<Message> messages = new ArrayList<>();
         messages.add(new org.springframework.ai.chat.messages.SystemMessage(promptResource.content()));
         messages.addAll(historyProjector.project(request.history()));
+        if (request.replyOnly()) {
+            List<String> resultIds = request.history().stream()
+                    .filter(ToolMessage.class::isInstance)
+                    .map(ToolMessage.class::cast)
+                    .filter(ToolMessage::citeable)
+                    .map(message -> message.resultId().value())
+                    .distinct()
+                    .toList();
+            messages.add(new org.springframework.ai.chat.messages.UserMessage(
+                    "Runtime final reply requirement: no tools are available. Return only the final JSON object described "
+                            + "by the system instruction. Every citation value must be chosen from this exact list: "
+                            + jsonCodec.canonicalize(resultIds)));
+        }
         return List.copyOf(messages);
     }
 

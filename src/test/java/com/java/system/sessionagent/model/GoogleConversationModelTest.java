@@ -1,12 +1,15 @@
 package com.java.system.sessionagent.model;
 
 import com.java.system.sessionagent.conversation.domain.AssistantReply;
+import com.java.system.sessionagent.conversation.domain.MessageJobId;
 import com.java.system.sessionagent.conversation.domain.ModelDecision;
 import com.java.system.sessionagent.conversation.domain.ModelRequest;
 import com.java.system.sessionagent.conversation.domain.ModelUsage;
 import com.java.system.sessionagent.conversation.domain.ResultId;
+import com.java.system.sessionagent.conversation.domain.SessionMessage;
 import com.java.system.sessionagent.conversation.domain.SessionId;
 import com.java.system.sessionagent.conversation.domain.SessionSequence;
+import com.java.system.sessionagent.conversation.domain.ToolMessage;
 import com.java.system.sessionagent.conversation.domain.UserMessage;
 import com.java.system.sessionagent.conversation.domain.MessageRole;
 import com.java.system.sessionagent.conversation.port.out.ModelCallFailure;
@@ -103,6 +106,35 @@ class GoogleConversationModelTest {
         ToolCallingChatOptions options = (ToolCallingChatOptions) chatModel.prompt.getOptions();
         assertThat(CollectionUtils.isEmpty(options.getToolCallbacks())).isTrue();
         assertThat(observedUsage).containsExactly(new ModelUsage(0, 0, 0, false));
+    }
+
+    @Test
+    void appends_exact_citeable_result_ids_to_the_reply_only_request() {
+        RecordingChatModel chatModel = new RecordingChatModel(response(
+                new AssistantMessage("{\"citations\":[{\"value\":\"source-result\"}],\"message\":\"Answer\"}"), null));
+        GoogleConversationModel model = new GoogleConversationModel(chatModel, new PromptResource());
+        SessionId sessionId = new SessionId("session-1");
+        MessageJobId jobId = new MessageJobId("job-1");
+        Instant createdAt = Instant.parse("2026-08-15T10:15:30Z");
+        List<SessionMessage> history = List.of(
+                new UserMessage(sessionId, new SessionSequence(1), Optional.of(jobId), createdAt,
+                        MessageRole.USER, "Alice", "Question"),
+                new ToolMessage(sessionId, new SessionSequence(2), Optional.of(jobId), createdAt,
+                        MessageRole.TOOL, new ResultId("catalog-result"), "catalog-call", MODEL_CONTEXT,
+                        "list_repositories", "1", "{}", Optional.empty(), Optional.empty(),
+                        "{\"resultId\":\"catalog-result\",\"data\":{\"secret\":\"catalog-payload\"}}", false),
+                new ToolMessage(sessionId, new SessionSequence(3), Optional.of(jobId), createdAt,
+                        MessageRole.TOOL, new ResultId("source-result"), "source-call", MODEL_CONTEXT,
+                        "codebase_get_method_source", "1", "{}", Optional.of("payment-service"), Optional.of("revision-1"),
+                        "{\"resultId\":\"source-result\",\"data\":{\"source\":\"private-source-payload\"}}", true));
+
+        model.decide(new ModelRequest(history, snapshot("catalog"), true), usage -> { });
+
+        org.springframework.ai.chat.messages.Message finalInstruction = chatModel.prompt.getInstructions().getLast();
+        assertThat(finalInstruction).isInstanceOf(org.springframework.ai.chat.messages.UserMessage.class);
+        assertThat(finalInstruction.getText())
+                .contains("source-result")
+                .doesNotContain("catalog-result", "catalog-payload", "private-source-payload");
     }
 
     @Test

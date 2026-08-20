@@ -46,11 +46,16 @@ class CitationValidatorTest {
                 catalog, result(catalog, session, "", "", false)));
         CitationValidator validator = new CitationValidator(store, repository -> { throw new AssertionError("revision read"); });
 
-        assertThat(validator.validate(session, List.of(new ResultId("missing")))).isInstanceOf(CitationValidator.Validation.Correctable.class);
-        assertThat(validator.validate(session, List.of(crossSession))).isInstanceOf(CitationValidator.Validation.Correctable.class);
-        assertThat(validator.validate(session, List.of(catalog))).isInstanceOf(CitationValidator.Validation.Correctable.class);
-        assertThat(validator.validate(session, List.of())).isInstanceOf(CitationValidator.Validation.Correctable.class);
-        assertThat(validator.validate(session, List.of(crossSession, crossSession))).isInstanceOf(CitationValidator.Validation.Correctable.class);
+        assertThat(validator.validate(session, List.of(new ResultId("missing"))))
+                .isEqualTo(new CitationValidator.Validation.Correctable(CitationValidator.CorrectionReason.RESULT_NOT_FOUND));
+        assertThat(validator.validate(session, List.of(crossSession)))
+                .isEqualTo(new CitationValidator.Validation.Correctable(CitationValidator.CorrectionReason.WRONG_SESSION));
+        assertThat(validator.validate(session, List.of(catalog)))
+                .isEqualTo(new CitationValidator.Validation.Correctable(CitationValidator.CorrectionReason.NOT_CITEABLE));
+        assertThat(validator.validate(session, List.of()))
+                .isEqualTo(new CitationValidator.Validation.Correctable(CitationValidator.CorrectionReason.EMPTY_OR_DUPLICATE));
+        assertThat(validator.validate(session, List.of(crossSession, crossSession)))
+                .isEqualTo(new CitationValidator.Validation.Correctable(CitationValidator.CorrectionReason.EMPTY_OR_DUPLICATE));
     }
 
     @Test
@@ -60,9 +65,9 @@ class CitationValidatorTest {
         ResultsStore store = new ResultsStore(Map.of(resultId, result(resultId, session, "payment", "rev-1", true)));
 
         assertThat(new CitationValidator(store, repository -> new RevisionLookup.CurrentRevision("rev-2")).validate(session, List.of(resultId)))
-                .isInstanceOf(CitationValidator.Validation.Correctable.class);
+                .isEqualTo(new CitationValidator.Validation.Correctable(CitationValidator.CorrectionReason.REVISION_CHANGED));
         assertThat(new CitationValidator(store, repository -> new RevisionLookup.UnknownRepository()).validate(session, List.of(resultId)))
-                .isInstanceOf(CitationValidator.Validation.Correctable.class);
+                .isEqualTo(new CitationValidator.Validation.Correctable(CitationValidator.CorrectionReason.UNKNOWN_REPOSITORY));
         assertThat(new CitationValidator(store, repository -> new RevisionLookup.TemporaryFailure()).validate(session, List.of(resultId)))
                 .isInstanceOf(CitationValidator.Validation.Retry.class);
         assertThat(new CitationValidator(store, repository -> new RevisionLookup.Forbidden()).validate(session, List.of(resultId)))

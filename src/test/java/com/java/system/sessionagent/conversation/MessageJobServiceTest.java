@@ -204,11 +204,20 @@ class MessageJobServiceTest {
                 new AssistantReply("bad", List.of(new ResultId("unknown-result"))));
         MessageJobService service = new MessageJobService(store, model, new DirectToolRegistry(List.of()),
                 repositoryId -> new RevisionLookup.CurrentRevision("rev-a"), Clock.fixed(Instant.parse("2026-08-16T00:00:00Z"), ZoneOffset.UTC));
+        ListAppender<ILoggingEvent> appender = attachAppender(MessageJobService.class);
 
-        service.process(store.claim, () -> true);
+        try {
+            service.process(store.claim, () -> true);
 
-        assertThat(store.feedbackCodes).containsExactly("CALL_LIMIT_REACHED");
-        assertThat(store.feedbackMessages).singleElement().extracting(FeedbackMessage::terminal).isEqualTo(true);
+            assertThat(store.feedbackCodes).containsExactly("CALL_LIMIT_REACHED");
+            assertThat(store.feedbackMessages).singleElement().extracting(FeedbackMessage::terminal).isEqualTo(true);
+            assertThat(appender.list).extracting(ILoggingEvent::getFormattedMessage)
+                    .contains("assistant_citation_rejected sessionId=session-1 messageJobId=job-1 replyOnly=true "
+                            + "reason=RESULT_NOT_FOUND citationCount=1");
+            assertThat(logTemplatesAndArguments(appender)).doesNotContain("unknown-result");
+        } finally {
+            detachAppender(MessageJobService.class, appender);
+        }
     }
 
     @Test
