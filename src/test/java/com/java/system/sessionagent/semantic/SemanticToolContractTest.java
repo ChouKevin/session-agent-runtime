@@ -8,6 +8,7 @@ import com.java.system.sessionagent.tool.application.ToolRegistration;
 import com.java.system.sessionagent.tool.application.ToolExecutionFailure;
 import com.java.system.sessionagent.tool.domain.ToolName;
 import org.junit.jupiter.api.Test;
+import org.springframework.ai.google.genai.schema.JsonSchemaConverter;
 import org.springframework.test.web.client.MockRestServiceServer;
 import org.springframework.web.client.RestClient;
 
@@ -47,6 +48,20 @@ class SemanticToolContractTest {
             assertFalse(registration.definition().inputSchema().contains("handles"));
         });
         assertEquals(new ToolName("codebase_list_entry_points"), registrations.get(1).definition().name());
+    }
+
+    @Test
+    void every_tool_schema_is_convertible_by_the_google_model_adapter() {
+        RestClient restClient = RestClient.create();
+        SemanticToolProvider provider = new SemanticToolProvider(
+                List::of, new SemanticSourceClient(restClient, new SemanticRepositoryClient(restClient)));
+
+        provider.registrations().forEach(registration -> {
+            assertFalse(registration.definition().inputSchema().contains("\"type\":["),
+                    () -> registration.definition().name().value() + " must not expose nullable type arrays");
+            JsonSchemaConverter.convertToOpenApiSchema(
+                    JsonSchemaConverter.fromJson(registration.definition().inputSchema()));
+        });
     }
 
     @Test

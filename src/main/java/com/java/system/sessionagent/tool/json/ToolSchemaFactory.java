@@ -22,6 +22,8 @@ public final class ToolSchemaFactory {
                         JacksonOption.RESPECT_JSONPROPERTY_ORDER,
                         JacksonOption.RESPECT_JSONPROPERTY_REQUIRED))
                 .with(new JakartaValidationModule())
+                .without(Option.FLATTENED_OPTIONALS)
+                .with(Option.SIMPLIFIED_OPTIONALS)
                 .with(Option.FORBIDDEN_ADDITIONAL_PROPERTIES_BY_DEFAULT)
                 .with(Option.INLINE_ALL_SCHEMAS);
         SchemaGeneratorConfig config = builder.build();
