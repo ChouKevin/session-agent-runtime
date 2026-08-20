@@ -28,10 +28,12 @@ import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.ai.google.genai.GoogleGenAiChatModel;
 import org.springframework.ai.google.genai.GoogleGenAiChatOptions;
+import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.io.ClassPathResource;
+import org.springframework.util.ClassUtils;
 
 import javax.sql.DataSource;
 
@@ -44,6 +46,9 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.when;
 
 class ApplicationStartupTest {
+
+    private static final String DATA_SOURCE_AUTO_CONFIGURATION =
+            "org.springframework.boot.jdbc.autoconfigure.DataSourceAutoConfiguration";
 
     private final ApplicationContextRunner contextRunner = new ApplicationContextRunner()
             .withUserConfiguration(RuntimeConfiguration.class, TestDependencies.class)
@@ -63,6 +68,26 @@ class ApplicationStartupTest {
             assertThat(context.getBeansOfType(com.java.system.sessionagent.conversation.application.MessageJobService.class)).hasSize(1);
             assertThat(context.getBeansOfType(com.java.system.sessionagent.worker.MessageJobWorker.class)).hasSize(1);
         });
+    }
+
+    @Test
+    void createsAProductionDataSourceFromConfiguredProperties() {
+        ClassLoader classLoader = getClass().getClassLoader();
+        assertThat(ClassUtils.isPresent(DATA_SOURCE_AUTO_CONFIGURATION, classLoader))
+                .as("production JDBC auto-configuration must be available")
+                .isTrue();
+        Class<?> dataSourceAutoConfiguration = ClassUtils.resolveClassName(DATA_SOURCE_AUTO_CONFIGURATION, classLoader);
+
+        new ApplicationContextRunner()
+                .withConfiguration(AutoConfigurations.of(dataSourceAutoConfiguration))
+                .withPropertyValues(
+                        "spring.datasource.url=jdbc:postgresql://localhost:5432/session_agent",
+                        "spring.datasource.username=session_agent",
+                        "spring.datasource.password=test-datasource-password")
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    assertThat(context).hasSingleBean(DataSource.class);
+                });
     }
 
     @Test
