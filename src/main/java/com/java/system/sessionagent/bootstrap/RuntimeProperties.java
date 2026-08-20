@@ -27,7 +27,7 @@ public record RuntimeProperties(
             @NotBlank @DefaultValue("http://localhost:8080") String baseUrl,
             @NotBlank String apiToken,
             @DefaultValue("2s") Duration connectTimeout,
-            @DefaultValue("10s") Duration responseTimeout) {
+            @DefaultValue("120s") Duration responseTimeout) {
         public Semantic {
             Assert.hasText(baseUrl, "Semantic base URL must not be blank");
             Assert.hasText(apiToken, "Semantic API token must not be blank");

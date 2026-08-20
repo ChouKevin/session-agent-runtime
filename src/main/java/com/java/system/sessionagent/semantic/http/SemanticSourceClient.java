@@ -91,6 +91,7 @@ public final class SemanticSourceClient {
         } catch (SemanticFailure exception) { throw exception; }
         catch (RestClientResponseException exception) { throw classify(exception, input.repositoryId(), revision); }
         catch (ResourceAccessException exception) { throw SemanticFailure.transientFailure(Optional.empty(), exception); }
+        catch (RestClientException exception) { throw SemanticHttpFailures.classify(exception); }
         catch (RuntimeException exception) { throw SemanticFailure.invalidResponse(); }
     }
 
@@ -183,6 +184,7 @@ public final class SemanticSourceClient {
         } catch (SemanticFailure exception) { throw exception; }
         catch (RestClientResponseException exception) { throw classify(exception, repositoryId, revision); }
         catch (ResourceAccessException exception) { throw SemanticFailure.transientFailure(Optional.empty(), exception); }
+        catch (RestClientException exception) { throw SemanticHttpFailures.classify(exception); }
         catch (RuntimeException exception) { throw SemanticFailure.invalidResponse(); }
     }
 
@@ -198,6 +200,7 @@ public final class SemanticSourceClient {
         } catch (SemanticFailure exception) { throw exception; }
         catch (RestClientResponseException exception) { throw classify(exception, repositoryId, revision); }
         catch (ResourceAccessException exception) { throw SemanticFailure.transientFailure(Optional.empty(), exception); }
+        catch (RestClientException exception) { throw SemanticHttpFailures.classify(exception); }
         catch (RuntimeException exception) { throw SemanticFailure.invalidResponse(); }
     }
 

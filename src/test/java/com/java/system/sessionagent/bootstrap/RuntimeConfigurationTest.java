@@ -4,7 +4,10 @@ import com.java.system.sessionagent.conversation.application.MessageJobRetryPoli
 import com.java.system.sessionagent.conversation.port.out.RepositoryRevisionReader;
 import com.java.system.sessionagent.conversation.port.out.RevisionLookup;
 import com.java.system.sessionagent.semantic.SemanticFailure;
+import com.java.system.sessionagent.semantic.dto.MethodTarget;
 import com.java.system.sessionagent.semantic.http.SemanticRepositoryClient;
+import com.java.system.sessionagent.semantic.http.SemanticSourceClient;
+import com.java.system.sessionagent.semantic.tool.input.IncomingCallGraphInput;
 import com.java.system.sessionagent.worker.WorkerProperties;
 import org.junit.jupiter.api.Test;
 import org.springframework.core.io.ClassPathResource;
@@ -18,6 +21,7 @@ import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.time.Duration;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException;
@@ -33,6 +37,7 @@ class RuntimeConfigurationTest {
         String configuration = new ClassPathResource("application.yml").getContentAsString(StandardCharsets.UTF_8);
 
         assertThat(configuration).contains("server:\n  address: 127.0.0.1");
+        assertThat(configuration).contains("response-timeout: ${SEMANTIC_RESPONSE_TIMEOUT:120s}");
     }
 
     @Test
@@ -101,6 +106,56 @@ class RuntimeConfigurationTest {
                     .isInstanceOf(com.java.system.sessionagent.semantic.SemanticFailure.class)
                     .satisfies(exception -> assertThat(((com.java.system.sessionagent.semantic.SemanticFailure) exception).kind())
                             .isEqualTo(com.java.system.sessionagent.semantic.SemanticFailure.Kind.TRANSIENT));
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void turnsAStalledSemanticSourceResponseIntoTransientFailureWithinConfiguredTimeout() throws Exception {
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        try {
+            server.createContext("/v1/repositories/repository-a", exchange -> {
+                byte[] response = "{\"repoId\":\"repository-a\",\"mode\":\"REMOTE\",\"displayName\":\"Repository A\","
+                        .concat("\"currentBranch\":\"main\",\"currentRevision\":\"revision-1\",\"cloned\":true}")
+                        .getBytes(StandardCharsets.UTF_8);
+                exchange.getResponseHeaders().add("Content-Type", "application/json");
+                exchange.sendResponseHeaders(200, response.length);
+                exchange.getResponseBody().write(response);
+                exchange.close();
+            });
+            server.createContext("/v1/analyses/call-graphs/incoming", exchange -> {
+                try {
+                    exchange.getResponseHeaders().add("Content-Type", "application/json");
+                    exchange.sendResponseHeaders(200, 128);
+                    exchange.getResponseBody().flush();
+                    Thread.sleep(Duration.ofMillis(500));
+                } catch (InterruptedException exception) {
+                    Thread.currentThread().interrupt();
+                } finally {
+                    exchange.close();
+                }
+            });
+            server.start();
+            RuntimeConfiguration configuration = new RuntimeConfiguration();
+            RuntimeProperties properties = new RuntimeProperties(
+                    new RuntimeProperties.Semantic("http://127.0.0.1:" + server.getAddress().getPort(), "configured-token", Duration.ofSeconds(1), Duration.ofMillis(50)),
+                    new RuntimeProperties.Model("gemini-3.1-flash-lite"),
+                    new RuntimeProperties.Worker(Duration.ofSeconds(1), Duration.ofSeconds(30), 3, Duration.ofSeconds(60)));
+            RestClient restClient = configuration.semanticRestClient(
+                    properties, io.micrometer.observation.ObservationRegistry.NOOP);
+            SemanticRepositoryClient repositoryClient = configuration.semanticRepositoryClient(restClient);
+            SemanticSourceClient semanticClient = configuration.semanticSourceClient(
+                    restClient, repositoryClient);
+            MethodTarget target = new MethodTarget(new MethodTarget.SourceType(
+                    new MethodTarget.JavaType("com.example", "OrderService"),
+                    "src/main/java/com/example/OrderService.java"), "cancel", List.of("java.lang.String"));
+
+            assertThatThrownBy(() -> semanticClient.incomingCallGraph(
+                    new IncomingCallGraphInput("repository-a", target, 2)))
+                    .isInstanceOf(SemanticFailure.class)
+                    .satisfies(exception -> assertThat(((SemanticFailure) exception).kind())
+                            .isEqualTo(SemanticFailure.Kind.TRANSIENT));
         } finally {
             server.stop(0);
         }

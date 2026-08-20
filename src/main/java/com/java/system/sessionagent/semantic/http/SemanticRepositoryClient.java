@@ -72,7 +72,9 @@ public final class SemanticRepositoryClient implements RepositoryCatalog {
             throw classifyCatalogResponse(exception);
         } catch (ResourceAccessException exception) {
             throw SemanticFailure.transientFailure(Optional.empty(), exception);
-        } catch (RestClientException | IllegalArgumentException exception) {
+        } catch (RestClientException exception) {
+            throw SemanticHttpFailures.classify(exception);
+        } catch (IllegalArgumentException exception) {
             throw SemanticFailure.invalidResponse();
         }
     }
@@ -95,7 +97,9 @@ public final class SemanticRepositoryClient implements RepositoryCatalog {
             throw classifyRepositoryResponse(exception);
         } catch (ResourceAccessException exception) {
             throw SemanticFailure.transientFailure(Optional.empty(), exception);
-        } catch (RestClientException | IllegalArgumentException exception) {
+        } catch (RestClientException exception) {
+            throw SemanticHttpFailures.classify(exception);
+        } catch (IllegalArgumentException exception) {
             throw SemanticFailure.invalidResponse();
         }
     }

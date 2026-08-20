@@ -5,7 +5,7 @@ session-agent:
     base-url: ${SEMANTIC_BASE_URL:http://localhost:8080}
     api-token: ${SEMANTIC_API_TOKEN}
     connect-timeout: ${SEMANTIC_CONNECT_TIMEOUT:2s}
-    response-timeout: ${SEMANTIC_RESPONSE_TIMEOUT:10s}
+    response-timeout: ${SEMANTIC_RESPONSE_TIMEOUT:120s}
   model:
     name: ${GOOGLE_GENAI_MODEL:gemini-3.1-flash-lite}
   worker:
