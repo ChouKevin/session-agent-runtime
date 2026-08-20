@@ -9,6 +9,8 @@ import com.java.system.sessionagent.tool.application.ToolExecutionFailure;
 import com.java.system.sessionagent.tool.domain.ToolName;
 import org.junit.jupiter.api.Test;
 import org.springframework.ai.google.genai.schema.JsonSchemaConverter;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
 import org.springframework.test.web.client.MockRestServiceServer;
 import org.springframework.web.client.RestClient;
 
@@ -18,6 +20,12 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.springframework.http.HttpMethod.POST;
+import static org.springframework.test.web.client.ExpectedCount.once;
+import static org.springframework.test.web.client.match.MockRestRequestMatchers.method;
+import static org.springframework.test.web.client.match.MockRestRequestMatchers.requestTo;
+import static org.springframework.test.web.client.response.MockRestResponseCreators.withStatus;
+import static org.springframework.test.web.client.response.MockRestResponseCreators.withSuccess;
 
 class SemanticToolContractTest {
 
@@ -48,6 +56,11 @@ class SemanticToolContractTest {
             assertFalse(registration.definition().inputSchema().contains("handles"));
         });
         assertEquals(new ToolName("codebase_list_entry_points"), registrations.get(1).definition().name());
+        ToolRegistration<?> sourceSegment = registrations.stream()
+                .filter(registration -> registration.definition().name().value().equals("codebase_get_source_segment"))
+                .findFirst()
+                .orElseThrow();
+        assertTrue(sourceSegment.definition().description().contains("exact location returned by a prior source result"));
     }
 
     @Test
@@ -143,5 +156,36 @@ class SemanticToolContractTest {
                 registry.snapshot(false), new ToolName("list_repositories"), "{}"));
 
         assertEquals(ToolExecutionFailure.Kind.TRANSIENT, failure.kind());
+    }
+
+    @Test
+    void translates_a_missing_source_segment_to_correctable_invalid_input() {
+        RestClient.Builder builder = RestClient.builder().baseUrl("https://semantic.test");
+        MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+        RestClient restClient = builder.build();
+        SemanticToolProvider provider = new SemanticToolProvider(
+                List::of, new SemanticSourceClient(restClient, new SemanticRepositoryClient(restClient)));
+        DirectToolRegistry registry = new DirectToolRegistry(provider.registrations());
+        server.expect(once(), requestTo("https://semantic.test/v1/repositories/payment-service"))
+                .andRespond(withSuccess("""
+                        {"repoId":"payment-service","mode":"REMOTE","displayName":"Payment Service",
+                        "currentBranch":"main","currentRevision":"revision-42","cloned":true}
+                        """, MediaType.APPLICATION_JSON));
+        server.expect(once(), requestTo("https://semantic.test/v1/discovery/source-segment"))
+                .andExpect(method(POST))
+                .andRespond(withStatus(HttpStatus.NOT_FOUND).contentType(MediaType.APPLICATION_JSON).body("""
+                        {"errorCode":"SOURCE_SEGMENT_NOT_FOUND","message":"source segment was not found",
+                        "repoId":null,"expectedRevision":null,"currentRevision":null,"target":null,
+                        "candidates":[],"requestId":"request-1"}
+                        """));
+
+        ToolExecutionFailure failure = assertThrows(ToolExecutionFailure.class, () -> registry.execute(
+                registry.snapshot(true), new ToolName("codebase_get_source_segment"), """
+                        {"repositoryId":"payment-service","location":{"sourceFile":"src/Payments.java",
+                        "range":{"start":{"line":0,"character":0},"end":{"line":20,"character":100}}}}
+                        """));
+
+        assertEquals(ToolExecutionFailure.Kind.INVALID_INPUT, failure.kind());
+        server.verify();
     }
 }

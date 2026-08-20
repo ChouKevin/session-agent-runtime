@@ -121,6 +121,7 @@ public class RuntimeConfiguration {
                 return new RevisionLookup.CurrentRevision(semanticRepositoryClient.currentRevision(new RepositoryId(repositoryId)).value());
             } catch (SemanticFailure failure) {
                 return switch (failure.kind()) {
+                    case INVALID_INPUT -> new RevisionLookup.InvalidResponse();
                     case UNKNOWN_REPOSITORY -> new RevisionLookup.UnknownRepository();
                     case TRANSIENT -> new RevisionLookup.TemporaryFailure();
                     case FORBIDDEN -> new RevisionLookup.Forbidden();

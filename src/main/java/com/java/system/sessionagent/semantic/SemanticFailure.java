@@ -9,6 +9,7 @@ import java.util.Optional;
 public final class SemanticFailure extends RuntimeException {
 
     public enum Kind {
+        INVALID_INPUT,
         UNKNOWN_REPOSITORY,
         REVISION_CHANGED,
         TRANSIENT,
@@ -31,6 +32,10 @@ public final class SemanticFailure extends RuntimeException {
 
     public static SemanticFailure unknownRepository() {
         return new SemanticFailure(Kind.UNKNOWN_REPOSITORY, Optional.empty(), null);
+    }
+
+    public static SemanticFailure invalidInput() {
+        return new SemanticFailure(Kind.INVALID_INPUT, Optional.empty(), null);
     }
 
     public static SemanticFailure transientFailure(Optional<Duration> retryAfter) {
@@ -63,6 +68,7 @@ public final class SemanticFailure extends RuntimeException {
 
     private static String messageFor(Kind kind) {
         return switch (kind) {
+            case INVALID_INPUT -> "Semantic request input was rejected";
             case UNKNOWN_REPOSITORY -> "Semantic repository was not found";
             case REVISION_CHANGED -> "Semantic repository revision changed";
             case TRANSIENT -> "Semantic service is temporarily unavailable";

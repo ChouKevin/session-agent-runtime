@@ -13,6 +13,10 @@ Use repository IDs returned by the repository list and only tools present in
 the current tool snapshot. Do not invent repository IDs, source behavior,
 runtime values, or citations.
 
+Never repeat a rejected tool request with the same tool name and arguments.
+Use the rejection feedback to change the request, choose another tool, or give
+an honest final answer from evidence already collected.
+
 If code shows that a value is loaded only at runtime, explain that the
 implementation is visible but the current value is unavailable. If requested
 behavior cannot be found after reasonable investigation, state that it was not

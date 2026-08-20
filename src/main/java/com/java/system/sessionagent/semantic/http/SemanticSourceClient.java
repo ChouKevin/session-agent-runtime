@@ -394,25 +394,40 @@ public final class SemanticSourceClient {
 
     private static SemanticFailure classify(RestClientResponseException exception, String repositoryId, RepositoryRevision revision) {
         HttpStatusCode statusCode = exception.getStatusCode();
-        if (statusCode.value() == 404) { return SemanticFailure.unknownRepository(); }
+        Optional<ProviderDtos.ApiErrorResponse> error = apiError(exception);
+        if (statusCode.value() == 404 && error.map(ProviderDtos.ApiErrorResponse::errorCode)
+                .filter("REPOSITORY_NOT_FOUND"::equals).isPresent()) {
+            return SemanticFailure.unknownRepository();
+        }
+        if (statusCode.value() == 404 && error.map(ProviderDtos.ApiErrorResponse::errorCode)
+                .filter(code -> code.endsWith("_NOT_FOUND")).isPresent()) {
+            return SemanticFailure.invalidInput();
+        }
         if (statusCode.value() == 401 || statusCode.value() == 403) { return SemanticFailure.forbidden(); }
         if (statusCode.value() == 429 || statusCode.value() == 503) { return SemanticFailure.transientFailure(retryAfter(exception.getResponseHeaders()), exception); }
         if (statusCode.value() == 409 && isRevisionMismatch(exception, repositoryId, revision)) { return SemanticFailure.revisionChanged(); }
         return SemanticFailure.invalidResponse();
     }
 
-    private static boolean isRevisionMismatch(RestClientResponseException exception, String repositoryId, RepositoryRevision revision) {
+    private static Optional<ProviderDtos.ApiErrorResponse> apiError(RestClientResponseException exception) {
         try {
-            ProviderDtos.ApiErrorResponse error = RESPONSE_MAPPER.readValue(exception.getResponseBodyAsString(), ProviderDtos.ApiErrorResponse.class);
-            return "REPOSITORY_REVISION_MISMATCH".equals(error.errorCode())
-                    && (Objects.isNull(error.repoId()) || repositoryId.equals(error.repoId()))
-                    && org.springframework.util.StringUtils.hasText(error.expectedRevision())
-                    && revision.value().equals(error.expectedRevision())
-                    && org.springframework.util.StringUtils.hasText(error.currentRevision())
-                    && !revision.value().equals(error.currentRevision());
+            ProviderDtos.ApiErrorResponse error = RESPONSE_MAPPER.readValue(
+                    exception.getResponseBodyAsString(), ProviderDtos.ApiErrorResponse.class);
+            return Optional.of(error).filter(value -> org.springframework.util.StringUtils.hasText(value.errorCode()));
         } catch (Exception ignored) {
-            return false;
+            return Optional.empty();
         }
+    }
+
+    private static boolean isRevisionMismatch(RestClientResponseException exception, String repositoryId, RepositoryRevision revision) {
+        return apiError(exception)
+                .filter(error -> "REPOSITORY_REVISION_MISMATCH".equals(error.errorCode()))
+                .filter(error -> Objects.isNull(error.repoId()) || repositoryId.equals(error.repoId()))
+                .filter(error -> org.springframework.util.StringUtils.hasText(error.expectedRevision()))
+                .filter(error -> revision.value().equals(error.expectedRevision()))
+                .filter(error -> org.springframework.util.StringUtils.hasText(error.currentRevision()))
+                .filter(error -> !revision.value().equals(error.currentRevision()))
+                .isPresent();
     }
 
     private static Optional<Duration> retryAfter(HttpHeaders headers) {

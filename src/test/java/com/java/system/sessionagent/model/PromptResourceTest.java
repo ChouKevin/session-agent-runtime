@@ -25,6 +25,7 @@ class PromptResourceTest {
         assertThat(promptResource.content())
                 .contains("`list_repositories`")
                 .contains("catalog result is not citeable")
+                .contains("Never repeat a rejected tool request with the same tool name and arguments")
                 .contains("\"message\":\"<answer>\"")
                 .contains("\"citations\":[{\"value\":\"<resultId>\"}]")
                 .contains("Do not wrap the JSON in Markdown");

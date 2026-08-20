@@ -59,8 +59,9 @@ final class FakeSemanticService implements AutoCloseable {
             return;
         }
         if (path.equals("/v1/api-routes/lookup")) {
-            if (!PAYMENT_SERVICE.equals(repositoryId(body)) || !hasExpectedRevision(body, PAYMENT_REVISION)) {
-                respond(exchange, 404, "{}");
+            String repositoryId = repositoryId(body);
+            if (!PAYMENT_SERVICE.equals(repositoryId) || !hasExpectedRevision(body, PAYMENT_REVISION)) {
+                respond(exchange, 404, repositoryNotFound());
                 return;
             }
             respond(exchange, 200, "{\"candidates\":[],\"observations\":[{\"code\":\"NOT_FOUND\",\"description\":\"No BNPL route was found\"}]}");
@@ -99,6 +100,12 @@ final class FakeSemanticService implements AutoCloseable {
         String revision = revision(repositoryId);
         return "{\"repoId\":\"%s\",\"mode\":\"REMOTE\",\"displayName\":\"%s\",\"currentBranch\":\"main\",\"currentRevision\":\"%s\",\"cloned\":true}"
                 .formatted(repositoryId, displayName, revision);
+    }
+
+    private static String repositoryNotFound() {
+        return """
+                {"errorCode":"REPOSITORY_NOT_FOUND","message":"repository is not configured","repoId":null,"expectedRevision":null,"currentRevision":null,"target":null,"candidates":[],"requestId":"fake-request-1"}
+                """;
     }
 
     private static String entryPoints(String repositoryId) {

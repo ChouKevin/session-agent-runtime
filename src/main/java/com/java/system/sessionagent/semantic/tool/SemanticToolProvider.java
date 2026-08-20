@@ -111,7 +111,9 @@ public final class SemanticToolProvider {
                 source(SemanticToolName.FIND_INTERNAL_REFERENCES, "Find internal references", FindInternalReferencesInput.class, FindInternalReferencesInput::repositoryId, client::findInternalReferences),
                 source(SemanticToolName.GET_EVIDENCE_SOURCE, "Get evidence source", GetEvidenceSourceInput.class, GetEvidenceSourceInput::repositoryId, client::getEvidenceSource),
                 source(SemanticToolName.GET_METHOD_SOURCE, "Get method source", GetMethodSourceInput.class, GetMethodSourceInput::repositoryId, client::getMethodSource),
-                source(SemanticToolName.GET_SOURCE_SEGMENT, "Get a source segment", GetSourceSegmentInput.class, GetSourceSegmentInput::repositoryId, client::getSourceSegment),
+                source(SemanticToolName.GET_SOURCE_SEGMENT,
+                        "Get source text using an exact location returned by a prior source result",
+                        GetSourceSegmentInput.class, GetSourceSegmentInput::repositoryId, client::getSourceSegment),
                 source(SemanticToolName.RESOLVE_SOURCE_SYMBOL, "Resolve a source symbol", ResolveSourceSymbolInput.class, ResolveSourceSymbolInput::repositoryId, client::resolveSourceSymbol));
     }
 
@@ -136,6 +138,7 @@ public final class SemanticToolProvider {
 
     private static ToolExecutionFailure translate(com.java.system.sessionagent.semantic.SemanticFailure failure) {
         return switch (failure.kind()) {
+            case INVALID_INPUT -> ToolExecutionFailure.invalidInput();
             case UNKNOWN_REPOSITORY -> ToolExecutionFailure.unknownRepository();
             case REVISION_CHANGED -> ToolExecutionFailure.revisionChanged();
             case TRANSIENT -> ToolExecutionFailure.transientFailure(failure.retryAfter());
