@@ -51,12 +51,15 @@ import static org.mockito.Mockito.verify;
 
 class MessageJobServiceTest {
 
+    private static final String MODEL_CONTEXT = "dGVzdA==";
+
     @Test
     void issues_catalog_then_full_snapshot_and_commits_the_valid_cited_reply() {
         RecordingStore store = new RecordingStore();
         ScriptedModel model = new ScriptedModel(store,
-                new ModelDecision.UseTool("catalog-call", new ToolName("list_repositories"), "{}"),
-                new ModelDecision.UseTool("source-call", new ToolName("source"), "{\"repositoryId\":\"payment-service\"}"));
+                new ModelDecision.UseTool("catalog-call", new ToolName("list_repositories"), "{}", MODEL_CONTEXT),
+                new ModelDecision.UseTool("source-call", new ToolName("source"),
+                        "{\"repositoryId\":\"payment-service\"}", MODEL_CONTEXT));
         DirectToolRegistry registry = new DirectToolRegistry(List.of(
                 registration("list_repositories", ToolKind.CATALOG, Optional.empty(), Optional.empty(), "{\"repositories\":[]}"),
                 registration("source", ToolKind.SOURCE, Optional.of("payment-service"), Optional.of("rev-a"), "{\"members\":[]}")));
@@ -76,8 +79,9 @@ class MessageJobServiceTest {
         RecordingStore store = new RecordingStore();
         store.seedCatalog();
         ScriptedModel model = new ScriptedModel(store,
-                new ModelDecision.UseTool("unknown-call", new ToolName("not-issued"), "{}"),
-                new ModelDecision.UseTool("source-call", new ToolName("source"), "{\"repositoryId\":\"payment-service\"}"));
+                new ModelDecision.UseTool("unknown-call", new ToolName("not-issued"), "{}", MODEL_CONTEXT),
+                new ModelDecision.UseTool("source-call", new ToolName("source"),
+                        "{\"repositoryId\":\"payment-service\"}", MODEL_CONTEXT));
         DirectToolRegistry registry = new DirectToolRegistry(List.of(
                 registration("list_repositories", ToolKind.CATALOG, Optional.empty(), Optional.empty(), "{\"repositories\":[]}"),
                 registration("source", ToolKind.SOURCE, Optional.of("payment-service"), Optional.of("rev-a"), "{\"members\":[]}")));
@@ -164,7 +168,8 @@ class MessageJobServiceTest {
         RecordingStore store = new RecordingStore();
         store.seedSource();
         AtomicInteger sourceExecutions = new AtomicInteger();
-        ModelDecision.UseTool rejected = new ModelDecision.UseTool("source-before-catalog", new ToolName("source"), "{not-json}");
+        ModelDecision.UseTool rejected = new ModelDecision.UseTool(
+                "source-before-catalog", new ToolName("source"), "{not-json}", MODEL_CONTEXT);
         ScriptedModel model = new ScriptedModel(store, rejected,
                 new ModelDecision.Reply(new AssistantReply("done", List.of(new ResultId("source-result")))));
         DirectToolRegistry registry = new DirectToolRegistry(List.of(
@@ -233,7 +238,7 @@ class MessageJobServiceTest {
         store.seedCatalog();
         AtomicInteger executions = new AtomicInteger();
         ConversationModel model = (request, usageObserver) -> new ModelDecision.UseTool(
-                "catalog-call", new ToolName("list_repositories"), arguments);
+                "catalog-call", new ToolName("list_repositories"), arguments, MODEL_CONTEXT);
         DirectToolRegistry registry = new DirectToolRegistry(List.of(countedRegistration("list_repositories", ToolKind.CATALOG, executions)));
         MessageJobService service = new MessageJobService(store, model, registry,
                 repositoryId -> new RevisionLookup.CurrentRevision("rev-a"), Clock.fixed(Instant.parse("2026-08-16T00:00:00Z"), ZoneOffset.UTC));
@@ -255,7 +260,8 @@ class MessageJobServiceTest {
         RecordingStore store = new RecordingStore();
         store.job = Optional.of(new ConversationStore.MessageJobProjection(store.claim.messageJobId(), store.claim.sessionId(),
                 com.java.system.sessionagent.conversation.domain.JobStatus.WORKING, 0, 0, Optional.empty()));
-        ModelDecision.UseTool request = new ModelDecision.UseTool("catalog-call", new ToolName("list_repositories"), "{}");
+        ModelDecision.UseTool request = new ModelDecision.UseTool(
+                "catalog-call", new ToolName("list_repositories"), "{}", MODEL_CONTEXT);
         ScriptedModel model = new ScriptedModel(store, request);
         ToolDefinition definition = new ToolDefinition(new ToolName("list_repositories"), "v1", "catalog", "{\"type\":\"object\"}", ToolKind.CATALOG);
         DirectToolRegistry registry = new DirectToolRegistry(List.of(new ToolRegistration<>(definition, Object.class,
@@ -297,7 +303,8 @@ class MessageJobServiceTest {
         RecordingStore store = new RecordingStore();
         store.job = Optional.of(new ConversationStore.MessageJobProjection(store.claim.messageJobId(), store.claim.sessionId(),
                 com.java.system.sessionagent.conversation.domain.JobStatus.WORKING, 3, 0, Optional.empty()));
-        ModelDecision.UseTool toolRequest = new ModelDecision.UseTool("tool-call", new ToolName("list_repositories"), "{\"repositoryId\":\"payment-service\"}");
+        ModelDecision.UseTool toolRequest = new ModelDecision.UseTool(
+                "tool-call", new ToolName("list_repositories"), "{\"repositoryId\":\"payment-service\"}", MODEL_CONTEXT);
         ScriptedModel model = new ScriptedModel(store, toolRequest);
         ToolDefinition definition = new ToolDefinition(new ToolName("list_repositories"), "v1", "catalog", "{\"type\":\"object\"}", ToolKind.CATALOG);
         DirectToolRegistry registry = new DirectToolRegistry(List.of(new ToolRegistration<>(definition, Object.class,
@@ -405,7 +412,7 @@ class MessageJobServiceTest {
         RecordingStore store = new RecordingStore();
         store.seedCatalog();
         ScriptedModel model = new ScriptedModel(store,
-                new ModelDecision.UseTool("catalog-call", new ToolName("list_repositories"), "{}"));
+                new ModelDecision.UseTool("catalog-call", new ToolName("list_repositories"), "{}", MODEL_CONTEXT));
         ToolDefinition definition = new ToolDefinition(new ToolName("list_repositories"), "v1", "catalog", "{\"type\":\"object\"}", ToolKind.CATALOG);
         DirectToolRegistry registry = new DirectToolRegistry(List.of(new ToolRegistration<>(definition, Object.class,
                 ignored -> { throw new IllegalStateException("provider secret"); })));
@@ -426,7 +433,7 @@ class MessageJobServiceTest {
     void emitsAnInvalidResponseToolOutcomeWhenEnvelopeValidationRejectsToolData() {
         RecordingStore store = new RecordingStore();
         ScriptedModel model = new ScriptedModel(store,
-                new ModelDecision.UseTool("catalog-call", new ToolName("list_repositories"), "{}"));
+                new ModelDecision.UseTool("catalog-call", new ToolName("list_repositories"), "{}", MODEL_CONTEXT));
         DirectToolRegistry registry = new DirectToolRegistry(List.of(
                 registration("list_repositories", ToolKind.CATALOG, Optional.empty(), Optional.empty(), "not-json")));
         ConversationTelemetry telemetry = mock(ConversationTelemetry.class);
@@ -447,7 +454,8 @@ class MessageJobServiceTest {
         store.calls = 11;
         ConversationModel model = (request, usageObserver) -> {
             usageObserver.accept(new com.java.system.sessionagent.conversation.domain.ModelUsage(5, 4, 9, true));
-            return new ModelDecision.UseTool("tool-call", new ToolName("list_repositories"), "{\"apiKey\":\"runtime-secret\"}");
+            return new ModelDecision.UseTool(
+                    "tool-call", new ToolName("list_repositories"), "{\"apiKey\":\"runtime-secret\"}", MODEL_CONTEXT);
         };
         MessageJobService service = new MessageJobService(store, model, new DirectToolRegistry(List.of()),
                 repositoryId -> new RevisionLookup.CurrentRevision("rev-a"), Clock.fixed(Instant.parse("2026-08-16T00:00:00Z"), ZoneOffset.UTC));
@@ -544,24 +552,24 @@ class MessageJobServiceTest {
         @Override public List<com.java.system.sessionagent.conversation.domain.SessionMessage> loadHistory(SessionId sessionId) { if (loadFailure.isPresent()) { throw loadFailure.get(); } java.util.List<com.java.system.sessionagent.conversation.domain.SessionMessage> history = new java.util.ArrayList<>(toolMessages); history.addAll(feedbackMessages); history.sort(java.util.Comparator.comparingLong(message -> message.sequence().value())); return history; }
         @Override public List<com.java.system.sessionagent.conversation.domain.SessionMessage> loadHistory(SessionId sessionId, com.java.system.sessionagent.conversation.domain.MessageJobId messageJobId) { return loadHistory(sessionId).stream().filter(message -> message.messageJobId().map(messageJobId::equals).orElse(true)).toList(); }
         @Override public java.util.OptionalInt reserveModelCall(MessageWorkClaim ignored, Instant now) { return java.util.OptionalInt.of(++calls); }
-        @Override public com.java.system.sessionagent.conversation.domain.ToolMessage appendTool(MessageWorkClaim ignored, ResultId resultId, String modelCallId, ToolData data, Instant now) {
-            com.java.system.sessionagent.conversation.domain.ToolMessage message = new com.java.system.sessionagent.conversation.domain.ToolMessage(claim.sessionId(), new SessionSequence(toolMessages.size() + 1), Optional.of(claim.messageJobId()), now, MessageRole.TOOL, resultId, modelCallId, data.toolName(), data.toolVersion(), data.canonicalArguments(), data.repositoryId(), data.revision(), data.resultJson(), data.citeable());
+        @Override public com.java.system.sessionagent.conversation.domain.ToolMessage appendTool(MessageWorkClaim ignored, ResultId resultId, String modelCallId, String modelContext, ToolData data, Instant now) {
+            com.java.system.sessionagent.conversation.domain.ToolMessage message = new com.java.system.sessionagent.conversation.domain.ToolMessage(claim.sessionId(), new SessionSequence(toolMessages.size() + 1), Optional.of(claim.messageJobId()), now, MessageRole.TOOL, resultId, modelCallId, modelContext, data.toolName(), data.toolVersion(), data.canonicalArguments(), data.repositoryId(), data.revision(), data.resultJson(), data.citeable());
             toolMessages.add(message); return message;
         }
         private void seedCatalog() {
             toolMessages.add(new com.java.system.sessionagent.conversation.domain.ToolMessage(claim.sessionId(), new SessionSequence(1), Optional.of(claim.messageJobId()), claim.claimedAt(), MessageRole.TOOL,
-                    new ResultId("catalog-result"), "catalog-call", "list_repositories", "v1", "{}", Optional.empty(), Optional.empty(), "{\"resultId\":\"catalog-result\",\"toolName\":\"list_repositories\",\"data\":{}}", false));
+                    new ResultId("catalog-result"), "catalog-call", MODEL_CONTEXT, "list_repositories", "v1", "{}", Optional.empty(), Optional.empty(), "{\"resultId\":\"catalog-result\",\"toolName\":\"list_repositories\",\"data\":{}}", false));
         }
         private void seedSource() {
             toolMessages.add(new com.java.system.sessionagent.conversation.domain.ToolMessage(claim.sessionId(), new SessionSequence(1), Optional.of(claim.messageJobId()), claim.claimedAt(), MessageRole.TOOL,
-                    new ResultId("source-result"), "source-call", "source", "v1", "{\"repositoryId\":\"payment-service\"}", Optional.of("payment-service"), Optional.of("rev-a"), "{\"resultId\":\"source-result\",\"toolName\":\"source\",\"repositoryId\":\"payment-service\",\"revision\":\"rev-a\",\"data\":{}}", true));
+                    new ResultId("source-result"), "source-call", MODEL_CONTEXT, "source", "v1", "{\"repositoryId\":\"payment-service\"}", Optional.of("payment-service"), Optional.of("rev-a"), "{\"resultId\":\"source-result\",\"toolName\":\"source\",\"repositoryId\":\"payment-service\",\"revision\":\"rev-a\",\"data\":{}}", true));
         }
         @Override public com.java.system.sessionagent.conversation.domain.AssistantMessage appendAssistant(MessageWorkClaim ignored, AssistantReply reply, Instant now) { assistantReply = reply; return new com.java.system.sessionagent.conversation.domain.AssistantMessage(claim.sessionId(), new SessionSequence(3), Optional.of(claim.messageJobId()), now, MessageRole.ASSISTANT, reply.message(), reply.citations()); }
         @Override public Optional<ResultProjection> readResult(ResultId resultId) { return toolMessages.stream().filter(message -> message.resultId().equals(resultId)).findFirst().map(message -> new ResultProjection(message.resultId(), message.sessionId(), message.toolName(), message.toolVersion(), message.arguments(), message.repositoryId(), message.revision(), message.resultJson(), message.citeable())); }
         @Override public com.java.system.sessionagent.conversation.domain.MessageReceipt receive(com.java.system.sessionagent.conversation.domain.IncomingMessage message) { throw new UnsupportedOperationException(); }
         @Override public Optional<MessageWorkClaim> claimNext(String workerId, java.time.Duration leaseDuration) { throw new UnsupportedOperationException(); }
         @Override public boolean extendClaim(MessageWorkClaim claim, java.time.Duration leaseDuration) { throw new UnsupportedOperationException(); }
-        @Override public com.java.system.sessionagent.conversation.domain.FeedbackMessage appendFeedback(MessageWorkClaim claim, String code, String message, boolean terminal, Optional<String> modelCallId, Optional<String> toolName, Optional<String> rejectedArguments, Instant createdAt) { if (feedbackFailure.isPresent()) { throw feedbackFailure.get(); } feedbackCodes.add(code); terminalFeedbackWritten = terminal; FeedbackMessage feedback = new FeedbackMessage(claim.sessionId(), new SessionSequence(toolMessages.size() + feedbackCodes.size() + 1), Optional.of(claim.messageJobId()), createdAt, MessageRole.FEEDBACK, code, message, terminal, modelCallId, toolName, rejectedArguments); feedbackMessages.add(feedback); return feedback; }
+        @Override public com.java.system.sessionagent.conversation.domain.FeedbackMessage appendFeedback(MessageWorkClaim claim, String code, String message, boolean terminal, Optional<String> modelCallId, Optional<String> toolName, Optional<String> rejectedArguments, Optional<String> modelContext, Instant createdAt) { if (feedbackFailure.isPresent()) { throw feedbackFailure.get(); } feedbackCodes.add(code); terminalFeedbackWritten = terminal; FeedbackMessage feedback = new FeedbackMessage(claim.sessionId(), new SessionSequence(toolMessages.size() + feedbackCodes.size() + 1), Optional.of(claim.messageJobId()), createdAt, MessageRole.FEEDBACK, code, message, terminal, modelCallId, toolName, rejectedArguments, modelContext); feedbackMessages.add(feedback); return feedback; }
         @Override public boolean scheduleRetry(MessageWorkClaim claim, java.time.Duration retryDelay) { scheduledAt = Optional.of(claim.claimedAt().plus(retryDelay)); return true; }
         @Override public Optional<MessageJobProjection> readJob(com.java.system.sessionagent.conversation.domain.MessageJobId messageJobId) { return job; }
     }

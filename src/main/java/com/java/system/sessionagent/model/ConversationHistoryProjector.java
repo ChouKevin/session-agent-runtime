@@ -10,10 +10,13 @@ import org.springframework.ai.chat.messages.ToolResponseMessage;
 import org.springframework.util.Assert;
 
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 
 public final class ConversationHistoryProjector {
+
+    private static final String THOUGHT_SIGNATURES = "thoughtSignatures";
 
     public List<Message> project(List<SessionMessage> history) {
         Assert.notNull(history, "Conversation history must not be null");
@@ -33,8 +36,8 @@ public final class ConversationHistoryProjector {
             return;
         }
         if (message instanceof ToolMessage toolMessage) {
-            addToolProjection(projected, toolMessage.modelCallId(), toolMessage.toolName(), toolMessage.arguments(),
-                    toolMessage.resultJson());
+            addToolProjection(projected, toolMessage.modelCallId(), toolMessage.modelContext(), toolMessage.toolName(),
+                    toolMessage.arguments(), toolMessage.resultJson());
             return;
         }
         if (message instanceof FeedbackMessage feedbackMessage) {
@@ -52,6 +55,7 @@ public final class ConversationHistoryProjector {
         if (feedbackMessage.modelCallId().isPresent()) {
             addToolProjection(projected,
                     feedbackMessage.modelCallId().orElseThrow(),
+                    feedbackMessage.modelContext().orElseThrow(),
                     feedbackMessage.toolName().orElseThrow(),
                     feedbackMessage.rejectedArguments().orElseThrow(),
                     "Tool request was rejected [" + feedbackMessage.code() + "]: " + feedbackMessage.message());
@@ -62,10 +66,12 @@ public final class ConversationHistoryProjector {
     }
 
     private static void addToolProjection(
-            List<Message> projected, String callId, String toolName, String arguments, String result) {
+            List<Message> projected, String callId, String modelContext, String toolName, String arguments, String result) {
         org.springframework.ai.chat.messages.AssistantMessage toolRequest =
                 org.springframework.ai.chat.messages.AssistantMessage.builder()
                         .content("")
+                        .properties(Map.of(THOUGHT_SIGNATURES,
+                                List.of(Base64.getDecoder().decode(modelContext))))
                         .toolCalls(List.of(new org.springframework.ai.chat.messages.AssistantMessage.ToolCall(
                                 callId, "function", toolName, arguments)))
                         .build();

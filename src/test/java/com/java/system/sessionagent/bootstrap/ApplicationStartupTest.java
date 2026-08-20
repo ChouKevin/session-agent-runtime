@@ -39,6 +39,7 @@ import javax.sql.DataSource;
 
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -134,6 +135,7 @@ class ApplicationStartupTest {
                     GoogleGenAiChatOptions options = (GoogleGenAiChatOptions) chatModel.prompt.getOptions();
                     assertThat(options.getModel()).isEqualTo("gemini-3.1-flash-lite");
                     assertThat(options.getMaxOutputTokens()).isEqualTo(19);
+                    assertThat(options.getIncludeThoughts()).isTrue();
                     assertThat(options.getIncludeServerSideToolInvocations()).isFalse();
                     assertThat(options.getToolCallbacks()).extracting(callback -> callback.getToolDefinition().name())
                             .containsExactly("catalog");
@@ -226,8 +228,11 @@ class ApplicationStartupTest {
         @Override
         public ChatResponse call(Prompt prompt) {
             this.prompt = prompt;
-            return new ChatResponse(List.of(new Generation(AssistantMessage.builder().toolCalls(List.of(
-                    new AssistantMessage.ToolCall("catalog-call", "function", "catalog", "{}"))).build())));
+            return new ChatResponse(List.of(new Generation(AssistantMessage.builder()
+                    .properties(Map.of("thoughtSignatures", List.of(new byte[]{1, 2, 3, 4})))
+                    .toolCalls(List.of(new AssistantMessage.ToolCall(
+                            "catalog-call", "function", "catalog", "{}")))
+                    .build())));
         }
 
         @Override

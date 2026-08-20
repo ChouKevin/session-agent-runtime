@@ -85,6 +85,6 @@ final class FakeConversationModel implements ConversationModel {
     }
 
     private static ModelDecision.UseTool tool(String callId, ToolName toolName, String arguments) {
-        return new ModelDecision.UseTool(callId, toolName, arguments);
+        return new ModelDecision.UseTool(callId, toolName, arguments, "dGVzdA==");
     }
 }

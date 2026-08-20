@@ -13,6 +13,7 @@ public record ToolMessage(
         MessageRole role,
         ResultId resultId,
         String modelCallId,
+        String modelContext,
         String toolName,
         String toolVersion,
         String arguments,
@@ -30,6 +31,7 @@ public record ToolMessage(
         Assert.isTrue(role == MessageRole.TOOL, "Message role must match TOOL message type");
         Assert.notNull(resultId, "Result ID must not be null");
         Assert.hasText(modelCallId, "Model call ID must not be blank");
+        Assert.hasText(modelContext, "Model context must not be blank");
         Assert.hasText(toolName, "Tool name must not be blank");
         Assert.hasText(toolVersion, "Tool version must not be blank");
         Assert.hasText(arguments, "Tool arguments must not be blank");

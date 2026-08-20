@@ -36,6 +36,7 @@ class ConversationDomainTest {
     private static final SessionId SESSION_ID = new SessionId("session-1");
     private static final MessageJobId JOB_ID = new MessageJobId("job-1");
     private static final SessionSequence SEQUENCE = new SessionSequence(1);
+    private static final String MODEL_CONTEXT = "dGVzdA==";
 
     @Test
     void preservesExactNonblankIdentifiers() {
@@ -145,7 +146,7 @@ class ConversationDomainTest {
                 SESSION_ID, SEQUENCE, Optional.of(JOB_ID), CREATED_AT, MessageRole.FEEDBACK, "answer", List.of(new ResultId("result-1"))));
         assertThatIllegalArgumentException().isThrownBy(() -> new FeedbackMessage(
                 SESSION_ID, SEQUENCE, Optional.of(JOB_ID), CREATED_AT, MessageRole.ASSISTANT,
-                "INVALID_REPLY", "message", false, Optional.empty(), Optional.empty(), Optional.empty()));
+                "INVALID_REPLY", "message", false, Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty()));
     }
 
     @Test
@@ -158,6 +159,7 @@ class ConversationDomainTest {
                 MessageRole.TOOL,
                 new ResultId("result-1"),
                 "call-1",
+                MODEL_CONTEXT,
                 "list_repositories",
                 "v1",
                 "{}",
@@ -184,6 +186,7 @@ class ConversationDomainTest {
                 false,
                 Optional.empty(),
                 Optional.empty(),
+                Optional.empty(),
                 Optional.empty()));
     }
 
@@ -200,7 +203,8 @@ class ConversationDomainTest {
                 false,
                 Optional.of("call-1"),
                 Optional.of("list_repositories"),
-                Optional.empty()));
+                Optional.empty(),
+                Optional.of(MODEL_CONTEXT)));
 
         FeedbackMessage feedbackMessage = new FeedbackMessage(
                 SESSION_ID,
@@ -213,7 +217,8 @@ class ConversationDomainTest {
                 false,
                 Optional.of("call-1"),
                 Optional.of("list_repositories"),
-                Optional.of(" {\"repositoryId\":\"payment-service\"} "));
+                Optional.of(" {\"repositoryId\":\"payment-service\"} "),
+                Optional.of(MODEL_CONTEXT));
 
         assertThat(feedbackMessage.rejectedArguments()).contains(" {\"repositoryId\":\"payment-service\"} ");
         assertThat(new FeedbackMessage(
@@ -225,6 +230,7 @@ class ConversationDomainTest {
                 "INVALID_REPLY",
                 "message",
                 false,
+                Optional.empty(),
                 Optional.empty(),
                 Optional.empty(),
                 Optional.empty()).rejectedArguments()).isEmpty();
@@ -258,6 +264,7 @@ class ConversationDomainTest {
                 MessageRole.TOOL,
                 new ResultId("result-1"),
                 "call-1",
+                MODEL_CONTEXT,
                 toolName,
                 "v1",
                 "{}",

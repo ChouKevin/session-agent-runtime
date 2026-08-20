@@ -34,6 +34,7 @@ import org.springframework.util.StringUtils;
 
 import java.net.SocketTimeoutException;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
@@ -43,6 +44,7 @@ import java.util.function.Consumer;
 public final class GoogleConversationModel implements com.java.system.sessionagent.conversation.port.out.ConversationModel {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(GoogleConversationModel.class);
+    private static final String THOUGHT_SIGNATURES = "thoughtSignatures";
     private final ChatClient chatClient;
     private final PromptResource promptResource;
     private final SpringAiToolCallbackFactory callbackFactory;
@@ -168,6 +170,7 @@ public final class GoogleConversationModel implements com.java.system.sessionage
         GoogleGenAiChatOptions configuredOptions = (GoogleGenAiChatOptions) chatModel.getOptions();
         return configuredOptions.mutate()
                 .model(modelName)
+                .includeThoughts(true)
                 .includeServerSideToolInvocations(false)
                 .toolCallbacks(List.of())
                 .build();
@@ -194,10 +197,21 @@ public final class GoogleConversationModel implements com.java.system.sessionage
         try {
             ToolName toolName = new ToolName(toolCall.name());
             String callId = StringUtils.hasText(toolCall.id()) ? toolCall.id() : "runtime-" + UUID.randomUUID();
-            return new ModelDecision.UseTool(callId, toolName, toolCall.arguments());
+            return new ModelDecision.UseTool(callId, toolName, toolCall.arguments(), modelContext(message));
         } catch (IllegalArgumentException exception) {
             throw ModelCallFailure.correctable();
         }
+    }
+
+    private static String modelContext(AssistantMessage message) {
+        Object value = message.getMetadata().get(THOUGHT_SIGNATURES);
+        if (!(value instanceof List<?> signatures)
+                || signatures.isEmpty()
+                || !(signatures.getFirst() instanceof byte[] signature)
+                || signature.length == 0) {
+            throw ModelCallFailure.correctable();
+        }
+        return Base64.getEncoder().encodeToString(signature);
     }
 
     private ModelDecision replyDecision(String content) {

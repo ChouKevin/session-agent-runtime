@@ -132,6 +132,7 @@ class ConversationMessageServiceTest {
                 MessageWorkClaim claim,
                 ResultId resultId,
                 String modelCallId,
+                String modelContext,
                 ToolData toolData,
                 Instant createdAt) {
             throw new UnsupportedOperationException("Tool persistence is not part of message intake");
@@ -146,6 +147,7 @@ class ConversationMessageServiceTest {
                 Optional<String> modelCallId,
                 Optional<String> toolName,
                 Optional<String> rejectedArguments,
+                Optional<String> modelContext,
                 Instant createdAt) {
             throw new UnsupportedOperationException("Feedback persistence is not part of message intake");
         }

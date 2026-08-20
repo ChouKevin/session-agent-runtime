@@ -91,7 +91,7 @@ public final class MessageJobService implements MessageJobPort {
             boolean catalogComplete = catalogComplete(history, claim.messageJobId());
             OptionalIntReservation reservation = reserve(claim, workGuard);
             if (!reservation.reserved()) {
-                appendFeedback(claim, workGuard, FeedbackCode.CALL_LIMIT_REACHED, true, Optional.empty(), Optional.empty(), Optional.empty());
+                appendFeedback(claim, workGuard, FeedbackCode.CALL_LIMIT_REACHED, true, ToolFeedbackDetails.empty());
                 return;
             }
             ToolSnapshot snapshot = toolRegistry.snapshot(catalogComplete);
@@ -108,7 +108,7 @@ public final class MessageJobService implements MessageJobPort {
                     return;
                 }
                 if (replyOnly && failure.kind() == ModelCallFailure.Kind.CORRECTABLE) {
-                    appendFeedback(claim, workGuard, FeedbackCode.CALL_LIMIT_REACHED, true, Optional.empty(), Optional.empty(), Optional.empty());
+                    appendFeedback(claim, workGuard, FeedbackCode.CALL_LIMIT_REACHED, true, ToolFeedbackDetails.empty());
                     return;
                 }
                 if (!handleFailure(claim, workGuard, ConversationFailurePolicy.model(failure), ToolFeedbackDetails.empty(), "MODEL")) { return; }
@@ -166,7 +166,7 @@ public final class MessageJobService implements MessageJobPort {
         }
         try {
             conversationStore.appendFeedback(claim, code.name(), safeMessage(code), true,
-                    Optional.empty(), Optional.empty(), Optional.empty(), clock.instant());
+                    Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(), clock.instant());
             telemetry.feedback(code.name());
         } catch (RuntimeException ignored) {
             return;
@@ -217,7 +217,7 @@ public final class MessageJobService implements MessageJobPort {
         ConversationStore.ToolData data = new ConversationStore.ToolData(execution.name().value(), execution.version(), execution.kind(),
                 execution.canonicalArguments(), execution.repositoryId(), execution.revision(), resultJson, execution.citeable());
         try {
-            conversationStore.appendTool(claim, resultId, toolCall.callId(), data, clock.instant());
+            conversationStore.appendTool(claim, resultId, toolCall.callId(), toolCall.modelContext(), data, clock.instant());
             telemetry.tool(execution.name().value(), "SUCCESS", execution.repositoryId(), execution.revision());
             return guard.stillOwned();
         } catch (StaleWorkClaimException exception) {
@@ -240,10 +240,10 @@ public final class MessageJobService implements MessageJobPort {
         }
         if (validation instanceof CitationValidator.Validation.Correctable) {
             if (replyOnly) {
-                appendFeedback(claim, guard, FeedbackCode.CALL_LIMIT_REACHED, true, Optional.empty(), Optional.empty(), Optional.empty());
+                appendFeedback(claim, guard, FeedbackCode.CALL_LIMIT_REACHED, true, ToolFeedbackDetails.empty());
                 return true;
             }
-            return !appendFeedback(claim, guard, FeedbackCode.INVALID_CITATION, false, Optional.empty(), Optional.empty(), Optional.empty());
+            return !appendFeedback(claim, guard, FeedbackCode.INVALID_CITATION, false, ToolFeedbackDetails.empty());
         }
         if (validation instanceof CitationValidator.Validation.Retry retry) {
             if (replyOnly) {
@@ -253,7 +253,7 @@ public final class MessageJobService implements MessageJobPort {
             scheduleRetry(claim, guard, retry.retryAfter(), ToolFeedbackDetails.empty(), "DEPENDENCY");
             return true;
         }
-        appendFeedback(claim, guard, FeedbackCode.DEPENDENCY_INVALID_RESPONSE, true, Optional.empty(), Optional.empty(), Optional.empty());
+        appendFeedback(claim, guard, FeedbackCode.DEPENDENCY_INVALID_RESPONSE, true, ToolFeedbackDetails.empty());
         return true;
     }
 
@@ -299,23 +299,18 @@ public final class MessageJobService implements MessageJobPort {
     }
 
     private boolean appendFeedback(MessageWorkClaim claim, WorkGuard guard, FeedbackCode code, boolean terminal,
-                                Optional<String> modelCallId, Optional<String> toolName, Optional<String> arguments) {
+                                   ToolFeedbackDetails toolDetails) {
         if (!guard.stillOwned()) {
             return false;
         }
         try {
-            conversationStore.appendFeedback(claim, code.name(), safeMessage(code), terminal, modelCallId, toolName, arguments, clock.instant());
+            conversationStore.appendFeedback(claim, code.name(), safeMessage(code), terminal,
+                    toolDetails.modelCallId(), toolDetails.toolName(), toolDetails.arguments(), toolDetails.modelContext(), clock.instant());
             telemetry.feedback(code.name());
             return guard.stillOwned();
         } catch (StaleWorkClaimException exception) {
             return false;
         }
-    }
-
-    private boolean appendFeedback(MessageWorkClaim claim, WorkGuard guard, FeedbackCode code, boolean terminal,
-                                   ToolFeedbackDetails toolDetails) {
-        return appendFeedback(claim, guard, code, terminal, toolDetails.modelCallId(), toolDetails.toolName(),
-                toolDetails.arguments());
     }
 
     private static boolean catalogComplete(List<SessionMessage> history, MessageJobId jobId) {
@@ -352,18 +347,23 @@ public final class MessageJobService implements MessageJobPort {
 
     private static ToolFeedbackDetails toolDetails(ModelDecision.UseTool toolCall) {
         return new ToolFeedbackDetails(Optional.of(toolCall.callId()), Optional.of(toolCall.toolName().value()),
-                Optional.of(toolCall.arguments()));
+                Optional.of(toolCall.arguments()), Optional.of(toolCall.modelContext()));
     }
 
-    private record ToolFeedbackDetails(Optional<String> modelCallId, Optional<String> toolName, Optional<String> arguments) {
+    private record ToolFeedbackDetails(
+            Optional<String> modelCallId,
+            Optional<String> toolName,
+            Optional<String> arguments,
+            Optional<String> modelContext) {
         private ToolFeedbackDetails {
             Objects.requireNonNull(modelCallId, "Model call ID must not be null");
             Objects.requireNonNull(toolName, "Tool name must not be null");
             Objects.requireNonNull(arguments, "Tool arguments must not be null");
+            Objects.requireNonNull(modelContext, "Model context must not be null");
         }
 
         private static ToolFeedbackDetails empty() {
-            return new ToolFeedbackDetails(Optional.empty(), Optional.empty(), Optional.empty());
+            return new ToolFeedbackDetails(Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty());
         }
     }
 

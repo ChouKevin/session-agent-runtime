@@ -16,7 +16,8 @@ public record FeedbackMessage(
         boolean terminal,
         Optional<String> modelCallId,
         Optional<String> toolName,
-        Optional<String> rejectedArguments) implements SessionMessage {
+        Optional<String> rejectedArguments,
+        Optional<String> modelContext) implements SessionMessage {
 
     public FeedbackMessage {
         Assert.notNull(sessionId, "Session ID must not be null");
@@ -30,17 +31,21 @@ public record FeedbackMessage(
         Assert.notNull(modelCallId, "Model call ID must not be null");
         Assert.notNull(toolName, "Tool name must not be null");
         Assert.notNull(rejectedArguments, "Rejected arguments must not be null");
+        Assert.notNull(modelContext, "Model context must not be null");
         modelCallId.ifPresent(value -> Assert.hasText(value, "Model call ID must not be blank"));
         toolName.ifPresent(value -> Assert.hasText(value, "Tool name must not be blank"));
         rejectedArguments.ifPresent(value -> Assert.hasText(value, "Rejected arguments must not be blank"));
-        if (modelCallId.isPresent() != toolName.isPresent()) {
-            throw new IllegalArgumentException("Tool feedback requires model call ID and tool name together");
-        }
-        if (modelCallId.isPresent() && rejectedArguments.isEmpty()) {
-            throw new IllegalArgumentException("Tool feedback requires rejected arguments");
-        }
-        if (modelCallId.isEmpty() && rejectedArguments.isPresent()) {
-            throw new IllegalArgumentException("General feedback must not contain rejected arguments");
+        modelContext.ifPresent(value -> Assert.hasText(value, "Model context must not be blank"));
+        boolean toolFeedback = modelCallId.isPresent()
+                && toolName.isPresent()
+                && rejectedArguments.isPresent()
+                && modelContext.isPresent();
+        boolean generalFeedback = modelCallId.isEmpty()
+                && toolName.isEmpty()
+                && rejectedArguments.isEmpty()
+                && modelContext.isEmpty();
+        if (!toolFeedback && !generalFeedback) {
+            throw new IllegalArgumentException("Tool feedback requires complete model call context");
         }
     }
 }

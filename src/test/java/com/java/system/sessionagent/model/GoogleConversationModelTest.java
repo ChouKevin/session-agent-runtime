@@ -38,7 +38,9 @@ import org.springframework.util.CollectionUtils;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Base64;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
@@ -53,6 +55,9 @@ import static org.mockito.Mockito.verify;
 
 class GoogleConversationModelTest {
 
+    private static final byte[] THOUGHT_SIGNATURE = new byte[]{1, 2, 3, 4};
+    private static final String MODEL_CONTEXT = Base64.getEncoder().encodeToString(THOUGHT_SIGNATURE);
+
     @Test
     void advertises_only_the_issued_snapshot_and_returns_one_tool_request_without_executing_it() {
         RecordingChatModel chatModel = new RecordingChatModel(response(toolResponse("call-1", "catalog", "{}"), new DefaultUsage(7, 3, 10)));
@@ -61,7 +66,7 @@ class GoogleConversationModelTest {
 
         ModelDecision decision = model.decide(request(snapshot("catalog"), false), observedUsage::add);
 
-        assertThat(decision).isEqualTo(new ModelDecision.UseTool("call-1", new ToolName("catalog"), "{}"));
+        assertThat(decision).isEqualTo(new ModelDecision.UseTool("call-1", new ToolName("catalog"), "{}", MODEL_CONTEXT));
         assertThat(chatModel.prompt.getInstructions().getFirst()).isInstanceOf(org.springframework.ai.chat.messages.SystemMessage.class);
         assertThat(chatModel.prompt.getInstructions()).hasSize(2);
         assertThat(chatModel.prompt.getOptions()).isInstanceOf(ToolCallingChatOptions.class);
@@ -81,6 +86,7 @@ class GoogleConversationModelTest {
             assertThat(tool.callId()).startsWith("runtime-").hasSize(44);
             assertThat(tool.toolName()).isEqualTo(new ToolName("catalog"));
             assertThat(tool.arguments()).isEqualTo("{}");
+            assertThat(tool.modelContext()).isEqualTo(MODEL_CONTEXT);
         });
     }
 
@@ -106,7 +112,7 @@ class GoogleConversationModelTest {
 
         ModelDecision decision = model.decide(request(snapshot("catalog"), true), usage -> { });
 
-        assertThat(decision).isEqualTo(new ModelDecision.UseTool("call-1", new ToolName("catalog"), "{}"));
+        assertThat(decision).isEqualTo(new ModelDecision.UseTool("call-1", new ToolName("catalog"), "{}", MODEL_CONTEXT));
         ToolCallingChatOptions options = (ToolCallingChatOptions) chatModel.prompt.getOptions();
         assertThat(CollectionUtils.isEmpty(options.getToolCallbacks())).isTrue();
     }
@@ -119,6 +125,7 @@ class GoogleConversationModelTest {
                         .toolCalls(List.of(new AssistantMessage.ToolCall("call-1", "function", "catalog", "{}"))).build()),
                 response(new AssistantMessage("not-json")),
                 response(new AssistantMessage("{\"citations\":[],\"message\":\"Answer\"}")),
+                response(unsignedToolResponse("call-1", "catalog", "{}")),
                 responseWithNullOutput());
 
         for (ChatResponse invalidResponse : invalidResponses) {
@@ -151,7 +158,8 @@ class GoogleConversationModelTest {
 
         ModelDecision decision = model.decide(request(snapshot("catalog"), false), usage -> { });
 
-        assertThat(decision).isEqualTo(new ModelDecision.UseTool("unissued-call", new ToolName("not-issued"), "{\"value\":1}"));
+        assertThat(decision).isEqualTo(new ModelDecision.UseTool(
+                "unissued-call", new ToolName("not-issued"), "{\"value\":1}", MODEL_CONTEXT));
         ToolCallingChatOptions options = (ToolCallingChatOptions) chatModel.prompt.getOptions();
         assertThat(options.getToolCallbacks()).extracting(callback -> callback.getToolDefinition().name()).containsExactly("catalog");
     }
@@ -232,7 +240,16 @@ class GoogleConversationModelTest {
     }
 
     private static AssistantMessage toolResponse(String callId, String name, String arguments) {
-        return AssistantMessage.builder().toolCalls(List.of(new AssistantMessage.ToolCall(callId, "function", name, arguments))).build();
+        return AssistantMessage.builder()
+                .properties(Map.of("thoughtSignatures", List.of(THOUGHT_SIGNATURE)))
+                .toolCalls(List.of(new AssistantMessage.ToolCall(callId, "function", name, arguments)))
+                .build();
+    }
+
+    private static AssistantMessage unsignedToolResponse(String callId, String name, String arguments) {
+        return AssistantMessage.builder()
+                .toolCalls(List.of(new AssistantMessage.ToolCall(callId, "function", name, arguments)))
+                .build();
     }
 
     private static ChatResponse response(AssistantMessage... messages) {

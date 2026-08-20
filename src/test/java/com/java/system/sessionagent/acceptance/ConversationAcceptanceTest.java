@@ -268,10 +268,16 @@ class ConversationAcceptanceTest {
         }
 
         @Override
-        public ToolMessage appendTool(MessageWorkClaim claim, ResultId resultId, String modelCallId, ToolData data, Instant createdAt) {
+        public ToolMessage appendTool(
+                MessageWorkClaim claim,
+                ResultId resultId,
+                String modelCallId,
+                String modelContext,
+                ToolData data,
+                Instant createdAt) {
             List<SessionMessage> history = messages.get(claim.sessionId());
             ToolMessage message = new ToolMessage(claim.sessionId(), sequence(history), Optional.of(claim.messageJobId()), createdAt,
-                    MessageRole.TOOL, resultId, modelCallId, data.toolName(), data.toolVersion(), data.canonicalArguments(), data.repositoryId(),
+                    MessageRole.TOOL, resultId, modelCallId, modelContext, data.toolName(), data.toolVersion(), data.canonicalArguments(), data.repositoryId(),
                     data.revision(), data.resultJson(), data.citeable());
             history.add(message);
             results.put(resultId, new ResultProjection(resultId, claim.sessionId(), data.toolName(), data.toolVersion(), data.canonicalArguments(),
@@ -281,10 +287,11 @@ class ConversationAcceptanceTest {
 
         @Override
         public FeedbackMessage appendFeedback(MessageWorkClaim claim, String code, String message, boolean terminal, Optional<String> modelCallId,
-                                               Optional<String> toolName, Optional<String> rejectedArguments, Instant createdAt) {
+                                               Optional<String> toolName, Optional<String> rejectedArguments,
+                                               Optional<String> modelContext, Instant createdAt) {
             List<SessionMessage> history = messages.get(claim.sessionId());
             FeedbackMessage feedback = new FeedbackMessage(claim.sessionId(), sequence(history), Optional.of(claim.messageJobId()), createdAt,
-                    MessageRole.FEEDBACK, code, message, terminal, modelCallId, toolName, rejectedArguments);
+                    MessageRole.FEEDBACK, code, message, terminal, modelCallId, toolName, rejectedArguments, modelContext);
             history.add(feedback);
             return feedback;
         }

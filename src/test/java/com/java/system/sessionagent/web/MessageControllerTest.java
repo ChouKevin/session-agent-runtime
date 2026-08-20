@@ -135,7 +135,7 @@ class MessageControllerTest {
         when(queries.messages(sessionId)).thenReturn(Optional.of(List.of(new com.java.system.sessionagent.conversation.domain.ToolMessage(
                 new SessionId(sessionId), new com.java.system.sessionagent.conversation.domain.SessionSequence(2), Optional.of(new MessageJobId(jobId)),
                 java.time.Instant.parse("2026-08-16T00:00:00Z"), com.java.system.sessionagent.conversation.domain.MessageRole.TOOL,
-                new com.java.system.sessionagent.conversation.domain.ResultId("4455b5ba-7b93-44cf-bd76-0d756e325eb5"), "call", "source", "v1",
+                new com.java.system.sessionagent.conversation.domain.ResultId("4455b5ba-7b93-44cf-bd76-0d756e325eb5"), "call", "dGVzdA==", "source", "v1",
                 "{\"secret\":\"raw-argument\"}", Optional.of("repo-a"), Optional.of("rev-a"), "{\"secret\":\"raw-result\"}", true))));
         MockMvc mvc = mvc(intake, queries);
 

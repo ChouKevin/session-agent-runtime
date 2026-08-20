@@ -385,11 +385,13 @@ public final class PostgresConversationStore implements ConversationStore {
             MessageWorkClaim claim,
             ResultId resultId,
             String modelCallId,
+            String modelContext,
             ToolData toolData,
             Instant createdAt) {
         MessageWorkClaim requiredClaim = Objects.requireNonNull(claim, "Message work claim must not be null");
         ResultId requiredResultId = Objects.requireNonNull(resultId, "Result ID must not be null");
         Assert.hasText(modelCallId, "Model call ID must not be blank");
+        Assert.hasText(modelContext, "Model context must not be blank");
         ToolData requiredData = Objects.requireNonNull(toolData, "Tool data must not be null");
         Instant requiredCreatedAt = Objects.requireNonNull(createdAt, "Message creation time must not be null");
         return inTransaction(() -> {
@@ -398,14 +400,14 @@ public final class PostgresConversationStore implements ConversationStore {
             long sequence = allocateSequence(sessionId);
             insertSessionMessage(sessionId, sequence, UUID.fromString(requiredClaim.messageJobId().value()), "TOOL", requiredCreatedAt);
             jdbcTemplate.update("""
-                    insert into tool_message(session_id, sequence, result_id, model_call_id, tool_name, tool_version, tool_kind,
+                    insert into tool_message(session_id, sequence, result_id, model_call_id, model_context, tool_name, tool_version, tool_kind,
                         arguments_json, repository_id, revision, result_json, citeable)
-                    values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """, sessionId, sequence, UUID.fromString(requiredResultId.value()), modelCallId, requiredData.toolName(),
+                    values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, sessionId, sequence, UUID.fromString(requiredResultId.value()), modelCallId, modelContext, requiredData.toolName(),
                     requiredData.toolVersion(), requiredData.persistedKind(), requiredData.canonicalArguments(),
                     requiredData.repositoryId().orElse(null), requiredData.revision().orElse(null), requiredData.resultJson(), requiredData.citeable());
             return new ToolMessage(requiredClaim.sessionId(), new SessionSequence(sequence), Optional.of(requiredClaim.messageJobId()),
-                    requiredCreatedAt, MessageRole.TOOL, requiredResultId, modelCallId, requiredData.toolName(), requiredData.toolVersion(),
+                    requiredCreatedAt, MessageRole.TOOL, requiredResultId, modelCallId, modelContext, requiredData.toolName(), requiredData.toolVersion(),
                     requiredData.canonicalArguments(), requiredData.repositoryId(), requiredData.revision(), requiredData.resultJson(), requiredData.citeable());
         });
     }
@@ -419,6 +421,7 @@ public final class PostgresConversationStore implements ConversationStore {
             Optional<String> modelCallId,
             Optional<String> toolName,
             Optional<String> rejectedArguments,
+            Optional<String> modelContext,
             Instant createdAt) {
         MessageWorkClaim requiredClaim = Objects.requireNonNull(claim, "Message work claim must not be null");
         Assert.hasText(code, "Feedback code must not be blank");
@@ -426,6 +429,7 @@ public final class PostgresConversationStore implements ConversationStore {
         Optional<String> requiredModelCallId = Objects.requireNonNull(modelCallId, "Model call ID must not be null");
         Optional<String> requiredToolName = Objects.requireNonNull(toolName, "Tool name must not be null");
         Optional<String> requiredArguments = Objects.requireNonNull(rejectedArguments, "Rejected arguments must not be null");
+        Optional<String> requiredModelContext = Objects.requireNonNull(modelContext, "Model context must not be null");
         Instant requiredCreatedAt = Objects.requireNonNull(createdAt, "Message creation time must not be null");
         return inTransaction(() -> {
             requireLiveClaim(requiredClaim);
@@ -433,13 +437,15 @@ public final class PostgresConversationStore implements ConversationStore {
             long sequence = allocateSequence(sessionId);
             insertSessionMessage(sessionId, sequence, UUID.fromString(requiredClaim.messageJobId().value()), "FEEDBACK", requiredCreatedAt);
             jdbcTemplate.update("""
-                    insert into feedback_message(session_id, sequence, code, message, terminal, model_call_id, tool_name, rejected_arguments_json)
-                    values (?, ?, ?, ?, ?, ?, ?, ?)
+                    insert into feedback_message(session_id, sequence, code, message, terminal, model_call_id, tool_name,
+                        rejected_arguments_json, model_context)
+                    values (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """, sessionId, sequence, code, message, terminal, requiredModelCallId.orElse(null), requiredToolName.orElse(null),
-                    requiredArguments.orElse(null));
+                    requiredArguments.orElse(null), requiredModelContext.orElse(null));
             if (terminal) { completeJob(requiredClaim, sequence, clock.instant()); }
             return new FeedbackMessage(requiredClaim.sessionId(), new SessionSequence(sequence), Optional.of(requiredClaim.messageJobId()),
-                    requiredCreatedAt, MessageRole.FEEDBACK, code, message, terminal, requiredModelCallId, requiredToolName, requiredArguments);
+                    requiredCreatedAt, MessageRole.FEEDBACK, code, message, terminal, requiredModelCallId, requiredToolName,
+                    requiredArguments, requiredModelContext);
         });
     }
 
@@ -575,14 +581,15 @@ public final class PostgresConversationStore implements ConversationStore {
 
     private List<SessionMessage> loadToolMessages(UUID sessionId) {
         return jdbcTemplate.query("""
-                select message.sequence, message.message_job_id, message.created_at, detail.result_id, detail.model_call_id, detail.tool_name,
+                select message.sequence, message.message_job_id, message.created_at, detail.result_id, detail.model_call_id, detail.model_context, detail.tool_name,
                        detail.tool_version, detail.arguments_json, detail.repository_id, detail.revision, detail.result_json, detail.citeable
                 from session_message message join tool_message detail on detail.session_id = message.session_id and detail.sequence = message.sequence
                 where message.session_id = ?
                 """, (resultSet, rowNumber) -> new ToolMessage(new SessionId(sessionId.toString()), new SessionSequence(resultSet.getLong("sequence")),
                 Optional.of(new MessageJobId(resultSet.getObject("message_job_id", UUID.class).toString())),
                 resultSet.getObject("created_at", OffsetDateTime.class).toInstant(), MessageRole.TOOL,
-                new ResultId(resultSet.getObject("result_id", UUID.class).toString()), resultSet.getString("model_call_id"), resultSet.getString("tool_name"),
+                new ResultId(resultSet.getObject("result_id", UUID.class).toString()), resultSet.getString("model_call_id"),
+                resultSet.getString("model_context"), resultSet.getString("tool_name"),
                 resultSet.getString("tool_version"), resultSet.getString("arguments_json"), Optional.ofNullable(resultSet.getString("repository_id")),
                 Optional.ofNullable(resultSet.getString("revision")), resultSet.getString("result_json"), resultSet.getBoolean("citeable")), sessionId);
     }
@@ -590,14 +597,15 @@ public final class PostgresConversationStore implements ConversationStore {
     private List<SessionMessage> loadFeedbackMessages(UUID sessionId) {
         return jdbcTemplate.query("""
                 select message.sequence, message.message_job_id, message.created_at, detail.code, detail.message, detail.terminal,
-                       detail.model_call_id, detail.tool_name, detail.rejected_arguments_json
+                       detail.model_call_id, detail.tool_name, detail.rejected_arguments_json, detail.model_context
                 from session_message message join feedback_message detail on detail.session_id = message.session_id and detail.sequence = message.sequence
                 where message.session_id = ?
                 """, (resultSet, rowNumber) -> new FeedbackMessage(new SessionId(sessionId.toString()), new SessionSequence(resultSet.getLong("sequence")),
                 Optional.of(new MessageJobId(resultSet.getObject("message_job_id", UUID.class).toString())),
                 resultSet.getObject("created_at", OffsetDateTime.class).toInstant(), MessageRole.FEEDBACK, resultSet.getString("code"),
                 resultSet.getString("message"), resultSet.getBoolean("terminal"), Optional.ofNullable(resultSet.getString("model_call_id")),
-                Optional.ofNullable(resultSet.getString("tool_name")), Optional.ofNullable(resultSet.getString("rejected_arguments_json"))), sessionId);
+                Optional.ofNullable(resultSet.getString("tool_name")), Optional.ofNullable(resultSet.getString("rejected_arguments_json")),
+                Optional.ofNullable(resultSet.getString("model_context"))), sessionId);
     }
 
     private List<SessionMessage> loadAssistantMessages(UUID sessionId) {

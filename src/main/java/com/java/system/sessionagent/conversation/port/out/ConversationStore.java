@@ -40,6 +40,7 @@ public interface ConversationStore {
             MessageWorkClaim claim,
             ResultId resultId,
             String modelCallId,
+            String modelContext,
             ToolData toolData,
             Instant createdAt);
 
@@ -51,6 +52,7 @@ public interface ConversationStore {
             Optional<String> modelCallId,
             Optional<String> toolName,
             Optional<String> rejectedArguments,
+            Optional<String> modelContext,
             Instant createdAt);
 
     AssistantMessage appendAssistant(MessageWorkClaim claim, AssistantReply reply, Instant createdAt);

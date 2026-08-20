@@ -43,6 +43,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class PostgresConversationCommitPostgresIT {
+    private static final String MODEL_CONTEXT = "dGVzdA==";
 
     private static final Instant NOW = Instant.parse("2026-08-16T03:00:00Z");
     private static final PostgreSQLContainer<?> POSTGRES = new PostgreSQLContainer<>("postgres:17-alpine");
@@ -103,7 +104,7 @@ class PostgresConversationCommitPostgresIT {
         ConversationStore store = newStore();
         MessageReceipt first = store.receive(new IncomingMessage("thread-1", "alice", "source-1", "first"));
         MessageWorkClaim firstClaim = store.claimNext("worker-1", Duration.ofSeconds(30)).orElseThrow();
-        store.appendFeedback(firstClaim, "COMPLETE", "safe", true, Optional.empty(), Optional.empty(), Optional.empty(), NOW);
+        store.appendFeedback(firstClaim, "COMPLETE", "safe", true, Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(), NOW);
         MessageReceipt second = store.receive(new IncomingMessage("thread-1", "alice", "source-2", "second"));
         MessageWorkClaim secondClaim = store.claimNext("worker-1", Duration.ofSeconds(30)).orElseThrow();
         store.receive(new IncomingMessage("thread-1", "alice", "source-3", "later"));
@@ -127,7 +128,7 @@ class PostgresConversationCommitPostgresIT {
         store.claimNext("worker-2", Duration.ofSeconds(30)).orElseThrow();
 
         assertThatThrownBy(() -> store.appendFeedback(original, "INVALID_CITATION", "safe", false,
-                Optional.empty(), Optional.empty(), Optional.empty(), NOW))
+                Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(), NOW))
                 .isExactlyInstanceOf(StaleWorkClaimException.class);
 
         assertThat(jdbcTemplate.queryForObject("select count(*) from session_message", Integer.class)).isEqualTo(1);
@@ -168,9 +169,9 @@ class PostgresConversationCommitPostgresIT {
         MessageReceipt receipt = store.receive(new IncomingMessage("thread-1", "alice", "source-1", "hello"));
         MessageWorkClaim claim = store.claimNext("worker-1", Duration.ofSeconds(30)).orElseThrow();
 
-        store.appendFeedback(claim, "INVALID_CITATION", "safe", false, Optional.empty(), Optional.empty(), Optional.empty(), NOW);
+        store.appendFeedback(claim, "INVALID_CITATION", "safe", false, Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(), NOW);
         assertThat(jdbcTemplate.queryForObject("select status from message_job where message_job_id = ?", String.class, id(receipt))).isEqualTo("WORKING");
-        store.appendFeedback(claim, "CALL_LIMIT_REACHED", "safe", true, Optional.empty(), Optional.empty(), Optional.empty(), NOW);
+        store.appendFeedback(claim, "CALL_LIMIT_REACHED", "safe", true, Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(), NOW);
 
         assertThat(jdbcTemplate.queryForObject("select status from message_job where message_job_id = ?", String.class, id(receipt))).isEqualTo("DONE");
         assertThat(jdbcTemplate.queryForObject("select count(*) from feedback_message", Integer.class)).isEqualTo(2);
@@ -189,11 +190,11 @@ class PostgresConversationCommitPostgresIT {
         ToolResultEnvelopeFactory envelopeFactory = new ToolResultEnvelopeFactory();
         String result = envelopeFactory.envelope(resultId.value(), envelopeFactory.validate(execution));
 
-        ToolMessage appended = store.appendTool(claim, resultId, "source-call", new ConversationStore.ToolData(
+        ToolMessage appended = store.appendTool(claim, resultId, "source-call", MODEL_CONTEXT, new ConversationStore.ToolData(
                 "source", "v1", ToolKind.SOURCE, arguments, Optional.of("payment"), Optional.of("rev-1"), result, true), NOW);
         String rejectedArguments = "{not-json}";
         store.appendFeedback(claim, "INVALID_TOOL_INPUT", "safe", false, Optional.of("rejected-call"),
-                Optional.of("source"), Optional.of(rejectedArguments), NOW);
+                Optional.of("source"), Optional.of(rejectedArguments), Optional.of(MODEL_CONTEXT), NOW);
         java.util.List<SessionMessage> history = store.loadHistory(receipt.sessionId());
         ToolMessage reloaded = (ToolMessage) history.get(1);
         FeedbackMessage feedback = (FeedbackMessage) history.get(2);
@@ -204,10 +205,13 @@ class PostgresConversationCommitPostgresIT {
                 .isEqualTo("SOURCE");
         assertThat(jdbcTemplate.queryForObject("select data_type from information_schema.columns where table_name = 'feedback_message' and column_name = 'rejected_arguments_json'", String.class)).isEqualTo("text");
         assertThat(appended.arguments()).isEqualTo(arguments);
+        assertThat(appended.modelContext()).isEqualTo(MODEL_CONTEXT);
         assertThat(appended.resultJson()).isEqualTo(result);
         assertThat(reloaded.arguments()).isEqualTo(arguments);
+        assertThat(reloaded.modelContext()).isEqualTo(MODEL_CONTEXT);
         assertThat(reloaded.resultJson()).isEqualTo(result);
         assertThat(feedback.rejectedArguments()).contains(rejectedArguments);
+        assertThat(feedback.modelContext()).contains(MODEL_CONTEXT);
         assertThat(store.readResult(resultId)).hasValueSatisfying(projection -> {
             assertThat(projection.canonicalArguments()).isEqualTo(arguments);
             assertThat(projection.resultJson()).isEqualTo(result);
@@ -220,7 +224,7 @@ class PostgresConversationCommitPostgresIT {
         MessageReceipt receipt = store.receive(new IncomingMessage("thread-1", "alice", "source-1", "hello"));
         MessageWorkClaim claim = store.claimNext("worker-1", Duration.ofSeconds(30)).orElseThrow();
 
-        assertThatThrownBy(() -> store.appendTool(claim, new ResultId(UUID.randomUUID().toString()), "source-call",
+        assertThatThrownBy(() -> store.appendTool(claim, new ResultId(UUID.randomUUID().toString()), "source-call", MODEL_CONTEXT,
                 new ConversationStore.ToolData("source", "v1", ToolKind.SOURCE, "{not-json}", Optional.of("payment"), Optional.of("rev-1"), "{\"data\":{}}", true), NOW))
                 .isInstanceOf(ConversationStoreFailure.class)
                 .extracting(exception -> ((ConversationStoreFailure) exception).kind())
@@ -241,7 +245,7 @@ class PostgresConversationCommitPostgresIT {
                 id(receipt));
 
         assertThatThrownBy(() -> store.appendFeedback(claim, "INVALID_CITATION", "safe", false,
-                Optional.empty(), Optional.empty(), Optional.empty(), NOW.plusSeconds(31)))
+                Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(), NOW.plusSeconds(31)))
                 .isExactlyInstanceOf(StaleWorkClaimException.class);
 
         assertThat(jdbcTemplate.queryForObject("select count(*) from session_message", Integer.class)).isEqualTo(1);
@@ -262,7 +266,7 @@ class PostgresConversationCommitPostgresIT {
                 statement.executeQuery();
             }
             Future<?> append = executor.submit(() -> store.appendFeedback(claim, "INVALID_CITATION", "safe", false,
-                    Optional.empty(), Optional.empty(), Optional.empty(), NOW));
+                    Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(), NOW));
             awaitSessionLockWait();
             try (java.sql.PreparedStatement statement = connection.prepareStatement("select pg_sleep(0.05)")) {
                 statement.executeQuery();
@@ -294,7 +298,7 @@ class PostgresConversationCommitPostgresIT {
 
     private ResultId appendSource(ConversationStore store, MessageWorkClaim claim) {
         ResultId resultId = new ResultId(UUID.randomUUID().toString());
-        store.appendTool(claim, resultId, "source-call", new ConversationStore.ToolData(
+        store.appendTool(claim, resultId, "source-call", MODEL_CONTEXT, new ConversationStore.ToolData(
                 "source", "v1", ToolKind.SOURCE, "{\"repositoryId\":\"payment\"}", Optional.of("payment"), Optional.of("rev-1"), "{}", true), NOW);
         return resultId;
     }

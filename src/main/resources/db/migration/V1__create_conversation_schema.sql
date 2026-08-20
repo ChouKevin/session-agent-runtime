@@ -79,6 +79,7 @@ create table tool_message (
     role varchar(16) not null default 'TOOL' check (role = 'TOOL'),
     result_id uuid not null,
     model_call_id varchar(256) not null,
+    model_context text not null check (length(model_context) > 0),
     tool_name varchar(128) not null,
     tool_version varchar(32) not null,
     tool_kind varchar(16) not null check (tool_kind in ('CATALOG','SOURCE')),
@@ -135,13 +136,14 @@ create table feedback_message (
     model_call_id varchar(256),
     tool_name varchar(128),
     rejected_arguments_json text,
+    model_context text,
     primary key (session_id, sequence),
     foreign key (session_id, sequence, role)
         references session_message(session_id, sequence, role),
     check (
-        (model_call_id is null and tool_name is null and rejected_arguments_json is null)
+        (model_call_id is null and tool_name is null and rejected_arguments_json is null and model_context is null)
         or
-        (model_call_id is not null and tool_name is not null and rejected_arguments_json is not null)
+        (model_call_id is not null and tool_name is not null and rejected_arguments_json is not null and model_context is not null)
     )
 );
 
