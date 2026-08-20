@@ -166,6 +166,7 @@ class GoogleConversationModelTest {
 
             assertThat(appender.list).extracting(ILoggingEvent::getMessage)
                     .contains("google_model_request replyOnly={} messageCount={} callbackCount={}",
+                            "google_model_response_shape resultCount={} outputPresent={} toolCallCount={} textPresent={}",
                             "google_model_response replyOnly={} resultCategory={} resultCount={} usageAvailable={}",
                             "google_model_failed replyOnly={} closedFailureKind={}");
             assertThat(logTemplatesAndArguments(appender)).doesNotContain("Question", "Alice", "provider-secret", "apiKey",

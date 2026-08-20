@@ -124,6 +124,7 @@ public final class GoogleConversationModel implements com.java.system.sessionage
         LOGGER.info("google_model_request replyOnly={} messageCount={} callbackCount={}", request.replyOnly(), messages.size(), callbacks.size());
         try {
             ChatResponse response = call(messages, callbacks);
+            logResponseShape(response);
             ModelUsage modelUsage = usage(response);
             ModelDecision modelDecision = decision(response);
             LOGGER.info("google_model_response replyOnly={} resultCategory={} resultCount={} usageAvailable={}", request.replyOnly(), resultCategory(response),
@@ -247,6 +248,17 @@ public final class GoogleConversationModel implements com.java.system.sessionage
     private static int resultCount(ChatResponse response) {
         List<Generation> results = response.getResults();
         return CollectionUtils.isEmpty(results) ? 0 : results.size();
+    }
+
+    private static void logResponseShape(ChatResponse response) {
+        List<Generation> results = response.getResults();
+        Optional<AssistantMessage> output = CollectionUtils.isEmpty(results)
+                ? Optional.empty()
+                : Optional.ofNullable(results.getFirst().getOutput());
+        int toolCallCount = output.map(message -> message.getToolCalls().size()).orElse(0);
+        boolean textPresent = output.map(AssistantMessage::getText).filter(StringUtils::hasText).isPresent();
+        LOGGER.info("google_model_response_shape resultCount={} outputPresent={} toolCallCount={} textPresent={}",
+                resultCount(response), output.isPresent(), toolCallCount, textPresent);
     }
 
     private static ModelCallFailure classifyProviderFailure(RuntimeException exception) {
