@@ -65,6 +65,24 @@ class SemanticToolContractTest {
     }
 
     @Test
+    void concept_search_schema_uses_only_semantic_provider_match_modes() {
+        RestClient restClient = RestClient.create();
+        SemanticToolProvider provider = new SemanticToolProvider(
+                List::of, new SemanticSourceClient(restClient, new SemanticRepositoryClient(restClient)));
+
+        String schema = provider.registrations().stream()
+                .filter(registration -> registration.definition().name().value().equals("codebase_discover_concepts"))
+                .findFirst()
+                .orElseThrow()
+                .definition()
+                .inputSchema();
+
+        assertTrue(schema.contains("TOKEN_EXACT"));
+        assertTrue(schema.contains("TOKEN_PREFIX"));
+        assertFalse(schema.contains("CONTAINS"));
+    }
+
+    @Test
     void rejects_windows_and_backslash_source_paths_before_any_source_http_request() {
         RestClient.Builder builder = RestClient.builder().baseUrl("https://semantic.test");
         MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
