@@ -37,6 +37,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
+import java.util.UUID;
 import java.util.function.Consumer;
 
 public final class GoogleConversationModel implements com.java.system.sessionagent.conversation.port.out.ConversationModel {
@@ -192,7 +193,8 @@ public final class GoogleConversationModel implements com.java.system.sessionage
         AssistantMessage.ToolCall toolCall = message.getToolCalls().getFirst();
         try {
             ToolName toolName = new ToolName(toolCall.name());
-            return new ModelDecision.UseTool(toolCall.id(), toolName, toolCall.arguments());
+            String callId = StringUtils.hasText(toolCall.id()) ? toolCall.id() : "runtime-" + UUID.randomUUID();
+            return new ModelDecision.UseTool(callId, toolName, toolCall.arguments());
         } catch (IllegalArgumentException exception) {
             throw ModelCallFailure.correctable();
         }

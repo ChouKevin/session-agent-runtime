@@ -71,6 +71,20 @@ class GoogleConversationModelTest {
     }
 
     @Test
+    void assigns_a_runtime_id_when_google_omits_the_tool_call_id() {
+        RecordingChatModel chatModel = new RecordingChatModel(response(toolResponse("", "catalog", "{}")));
+        GoogleConversationModel model = new GoogleConversationModel(chatModel, new PromptResource());
+
+        ModelDecision decision = model.decide(request(snapshot("catalog"), false), usage -> { });
+
+        assertThat(decision).isInstanceOfSatisfying(ModelDecision.UseTool.class, tool -> {
+            assertThat(tool.callId()).startsWith("runtime-").hasSize(44);
+            assertThat(tool.toolName()).isEqualTo(new ToolName("catalog"));
+            assertThat(tool.arguments()).isEqualTo("{}");
+        });
+    }
+
+    @Test
     void decodes_a_strict_final_reply_and_uses_no_callbacks_when_reply_only() {
         RecordingChatModel chatModel = new RecordingChatModel(response(
                 new AssistantMessage("{\"citations\":[{\"value\":\"result-1\"}],\"message\":\"Answer\"}"), null));
