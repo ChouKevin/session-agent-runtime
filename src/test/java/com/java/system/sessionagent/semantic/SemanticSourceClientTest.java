@@ -564,7 +564,10 @@ class SemanticSourceClientTest {
         return "{\"status\":\"COMPLETE\",\"analyzedRevision\":\"revision-42\",\"rootNodeId\":\"root\","
                 + "\"traversal\":{\"requestedDepth\":2,\"expandedNodeCount\":1,\"nodeBudget\":100,\"rootDirectCallsComplete\":true,\"limitReason\":null},"
                 + "\"nodes\":[{\"nodeId\":\"root\",\"target\":" + target + ",\"externalSymbol\":null,\"contentState\":\"RESOLVED\",\"traversalState\":\"EXPANDED\",\"dispatchKind\":\"DIRECT\",\"declarationRange\":" + range + ",\"availableFollowUps\":[]}],"
-                + "\"edges\":[],\"warnings\":[],\"errors\":[]}";
+                + "\"edges\":[],\"warnings\":[{\"code\":\"INCOMING_CALLER_REJECTED\","
+                + "\"message\":\"incoming caller rejection count: 2\",\"nodeId\":\"root\","
+                + "\"callExpression\":null,\"callSite\":null,\"candidates\":[],\"availableFollowUps\":[]}],"
+                + "\"errors\":[]}";
     }
 
     private static SemanticLocation location() {

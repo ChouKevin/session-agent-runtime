@@ -212,10 +212,11 @@ public final class ProviderDtos {
     }
 
     public record GraphWarning(String code, String message, String nodeId, String callExpression,
-                               SourceRangePayload callSite, List<MethodTargetPayload> candidates,
+                               Optional<SourceRangePayload> callSite, List<MethodTargetPayload> candidates,
                                List<AvailableFollowUp> availableFollowUps) {
 
         public GraphWarning {
+            callSite = optional(callSite);
             candidates = List.copyOf(Objects.requireNonNull(candidates, "candidates are required"));
             availableFollowUps = List.copyOf(Objects.requireNonNull(
                     availableFollowUps, "availableFollowUps are required"));
