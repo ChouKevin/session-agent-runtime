@@ -33,6 +33,7 @@ import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.io.ClassPathResource;
+import org.springframework.scheduling.TaskScheduler;
 import org.springframework.util.ClassUtils;
 
 import javax.sql.DataSource;
@@ -41,6 +42,7 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.ScheduledExecutorService;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -70,6 +72,16 @@ class ApplicationStartupTest {
             assertThat(context.getBeansOfType(com.java.system.sessionagent.model.GoogleConversationModel.class)).hasSize(1);
             assertThat(context.getBeansOfType(com.java.system.sessionagent.conversation.application.MessageJobService.class)).hasSize(1);
             assertThat(context.getBeansOfType(com.java.system.sessionagent.worker.MessageJobWorker.class)).hasSize(1);
+        });
+    }
+
+    @Test
+    void keepsScheduledPollingOffTheClaimRenewalExecutor() {
+        contextRunner.run(context -> {
+            assertThat(context).hasNotFailed();
+            assertThat(context).hasSingleBean(TaskScheduler.class);
+            assertThat(context).hasSingleBean(ScheduledExecutorService.class);
+            assertThat(context.getBean("taskScheduler")).isNotSameAs(context.getBean("workerScheduler"));
         });
     }
 

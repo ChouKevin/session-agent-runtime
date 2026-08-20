@@ -36,6 +36,8 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
+import org.springframework.scheduling.TaskScheduler;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
 import org.springframework.web.client.RestClient;
 
 import javax.sql.DataSource;
@@ -165,6 +167,14 @@ public class RuntimeConfiguration {
     WorkerProperties workerProperties(RuntimeProperties properties) {
         Duration renewalInterval = properties.worker().lockDuration().dividedBy(3);
         return new WorkerProperties(properties.worker().lockDuration(), renewalInterval);
+    }
+
+    @Bean
+    TaskScheduler taskScheduler() {
+        ThreadPoolTaskScheduler scheduler = new ThreadPoolTaskScheduler();
+        scheduler.setPoolSize(1);
+        scheduler.setThreadNamePrefix("session-agent-poll-");
+        return scheduler;
     }
 
     @Bean(destroyMethod = "shutdown")
