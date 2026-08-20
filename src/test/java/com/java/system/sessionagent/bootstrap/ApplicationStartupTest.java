@@ -49,6 +49,8 @@ class ApplicationStartupTest {
 
     private static final String DATA_SOURCE_AUTO_CONFIGURATION =
             "org.springframework.boot.jdbc.autoconfigure.DataSourceAutoConfiguration";
+    private static final String FLYWAY_AUTO_CONFIGURATION =
+            "org.springframework.boot.flyway.autoconfigure.FlywayAutoConfiguration";
 
     private final ApplicationContextRunner contextRunner = new ApplicationContextRunner()
             .withUserConfiguration(RuntimeConfiguration.class, TestDependencies.class)
@@ -88,6 +90,15 @@ class ApplicationStartupTest {
                     assertThat(context).hasNotFailed();
                     assertThat(context).hasSingleBean(DataSource.class);
                 });
+    }
+
+    @Test
+    void makesProductionDatabaseMigrationsAvailableAtStartup() {
+        ClassLoader classLoader = getClass().getClassLoader();
+
+        assertThat(ClassUtils.isPresent(FLYWAY_AUTO_CONFIGURATION, classLoader))
+                .as("production Flyway auto-configuration must be available")
+                .isTrue();
     }
 
     @Test
