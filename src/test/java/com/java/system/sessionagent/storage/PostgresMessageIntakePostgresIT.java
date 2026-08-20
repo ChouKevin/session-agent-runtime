@@ -335,7 +335,7 @@ class PostgresMessageIntakePostgresIT {
             UUID jobId = UUID.randomUUID();
             insertSession(connection, sessionId, "thread-model-only");
             insertUserJob(connection, sessionId, jobId, 1L, "source-model-only");
-            insertFeedbackMessage(connection, sessionId, jobId, 2L, "model-call-1", "tool", null);
+            insertFeedbackMessage(connection, sessionId, jobId, 2L, "model-call-1", "tool", null, "AQIDBA==");
         })).isInstanceOf(SQLException.class);
 
         assertThatThrownBy(() -> inTransaction(connection -> {
@@ -343,7 +343,7 @@ class PostgresMessageIntakePostgresIT {
             UUID jobId = UUID.randomUUID();
             insertSession(connection, sessionId, "thread-arguments-only");
             insertUserJob(connection, sessionId, jobId, 1L, "source-arguments-only");
-            insertFeedbackMessage(connection, sessionId, jobId, 2L, null, null, "{}");
+            insertFeedbackMessage(connection, sessionId, jobId, 2L, null, null, "{}", null);
         })).isInstanceOf(SQLException.class);
 
         assertThatCode(() -> inTransaction(connection -> {
@@ -351,15 +351,23 @@ class PostgresMessageIntakePostgresIT {
             UUID jobId = UUID.randomUUID();
             insertSession(connection, sessionId, "thread-general-feedback");
             insertUserJob(connection, sessionId, jobId, 1L, "source-general-feedback");
-            insertFeedbackMessage(connection, sessionId, jobId, 2L, null, null, null);
+            insertFeedbackMessage(connection, sessionId, jobId, 2L, null, null, null, null);
         })).doesNotThrowAnyException();
+
+        assertThatThrownBy(() -> inTransaction(connection -> {
+            UUID sessionId = UUID.randomUUID();
+            UUID jobId = UUID.randomUUID();
+            insertSession(connection, sessionId, "thread-tool-feedback-without-context");
+            insertUserJob(connection, sessionId, jobId, 1L, "source-tool-feedback-without-context");
+            insertFeedbackMessage(connection, sessionId, jobId, 2L, "model-call-2", "tool", "{}", null);
+        })).isInstanceOf(SQLException.class);
 
         assertThatCode(() -> inTransaction(connection -> {
             UUID sessionId = UUID.randomUUID();
             UUID jobId = UUID.randomUUID();
             insertSession(connection, sessionId, "thread-tool-feedback");
             insertUserJob(connection, sessionId, jobId, 1L, "source-tool-feedback");
-            insertFeedbackMessage(connection, sessionId, jobId, 2L, "model-call-2", "tool", "{}");
+            insertFeedbackMessage(connection, sessionId, jobId, 2L, "model-call-3", "tool", "{}", "AQIDBA==");
         })).doesNotThrowAnyException();
     }
 
@@ -500,8 +508,8 @@ class PostgresMessageIntakePostgresIT {
         try (PreparedStatement statement = connection.prepareStatement("""
                 insert into tool_message(
                     session_id, sequence, result_id, model_call_id, tool_name, tool_version, tool_kind,
-                    arguments_json, result_json, citeable)
-                values (?, ?, ?, ?, ?, ?, 'CATALOG', cast(? as jsonb), cast(? as jsonb), false)
+                    arguments_json, result_json, model_context, citeable)
+                values (?, ?, ?, ?, ?, ?, 'CATALOG', cast(? as jsonb), cast(? as jsonb), ?, false)
                 """)) {
             statement.setObject(1, sessionId);
             statement.setLong(2, sequence);
@@ -511,6 +519,7 @@ class PostgresMessageIntakePostgresIT {
             statement.setString(6, "v1");
             statement.setString(7, "{}");
             statement.setString(8, "{}");
+            statement.setString(9, "AQIDBA==");
             statement.executeUpdate();
         }
     }
@@ -522,12 +531,13 @@ class PostgresMessageIntakePostgresIT {
             long sequence,
             String modelCallId,
             String toolName,
-            String rejectedArgumentsJson) throws SQLException {
+            String rejectedArgumentsJson,
+            String modelContext) throws SQLException {
         insertBaseMessage(connection, sessionId, sequence, jobId, "FEEDBACK");
         try (PreparedStatement statement = connection.prepareStatement("""
                 insert into feedback_message(
-                    session_id, sequence, code, message, terminal, model_call_id, tool_name, rejected_arguments_json)
-                values (?, ?, ?, ?, false, ?, ?, cast(? as jsonb))
+                    session_id, sequence, code, message, terminal, model_call_id, tool_name, rejected_arguments_json, model_context)
+                values (?, ?, ?, ?, false, ?, ?, cast(? as jsonb), ?)
                 """)) {
             statement.setObject(1, sessionId);
             statement.setLong(2, sequence);
@@ -536,6 +546,7 @@ class PostgresMessageIntakePostgresIT {
             statement.setString(5, modelCallId);
             statement.setString(6, toolName);
             statement.setString(7, rejectedArgumentsJson);
+            statement.setString(8, modelContext);
             statement.executeUpdate();
         }
     }

@@ -106,6 +106,25 @@ class GoogleConversationModelTest {
     }
 
     @Test
+    void ignores_google_thought_summary_and_decodes_the_single_actionable_reply() {
+        AssistantMessage thought = AssistantMessage.builder()
+                .properties(Map.of("isThought", true))
+                .content("internal summary")
+                .build();
+        AssistantMessage reply = AssistantMessage.builder()
+                .properties(Map.of("isThought", false))
+                .content("{\"citations\":[{\"value\":\"result-1\"}],\"message\":\"Answer\"}")
+                .build();
+        RecordingChatModel chatModel = new RecordingChatModel(response(thought, reply));
+        GoogleConversationModel model = new GoogleConversationModel(chatModel, new PromptResource());
+
+        ModelDecision decision = model.decide(request(snapshot("catalog"), true), usage -> { });
+
+        assertThat(decision).isEqualTo(new ModelDecision.Reply(
+                new AssistantReply("Answer", List.of(new ResultId("result-1")))));
+    }
+
+    @Test
     void decodes_a_tool_call_when_reply_only_so_the_service_can_apply_terminal_policy() {
         RecordingChatModel chatModel = new RecordingChatModel(response(toolResponse("call-1", "catalog", "{}")));
         GoogleConversationModel model = new GoogleConversationModel(chatModel, new PromptResource());

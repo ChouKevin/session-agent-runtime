@@ -1,5 +1,14 @@
 package com.java.system.sessionagent.model;
 
+import com.java.system.sessionagent.conversation.domain.MessageJobId;
+import com.java.system.sessionagent.conversation.domain.MessageRole;
+import com.java.system.sessionagent.conversation.domain.ModelDecision;
+import com.java.system.sessionagent.conversation.domain.ModelRequest;
+import com.java.system.sessionagent.conversation.domain.ResultId;
+import com.java.system.sessionagent.conversation.domain.SessionId;
+import com.java.system.sessionagent.conversation.domain.SessionSequence;
+import com.java.system.sessionagent.conversation.domain.ToolMessage;
+import com.java.system.sessionagent.conversation.port.out.NoOpConversationTelemetry;
 import com.java.system.sessionagent.semantic.http.SemanticRepositoryClient;
 import com.java.system.sessionagent.semantic.http.SemanticSourceClient;
 import com.java.system.sessionagent.semantic.tool.SemanticToolProvider;
@@ -13,7 +22,6 @@ import org.springframework.ai.chat.memory.ChatMemory;
 import org.springframework.ai.chat.memory.MessageWindowChatMemory;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
-import org.springframework.ai.chat.messages.ToolResponseMessage;
 import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.chat.model.ChatResponse;
@@ -31,8 +39,10 @@ import org.springframework.util.CollectionUtils;
 import org.springframework.util.StringUtils;
 import org.springframework.web.client.RestClient;
 
+import java.time.Instant;
 import java.util.List;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -95,59 +105,35 @@ class GoogleNoToolLiveTest {
                 List::of,
                 new SemanticSourceClient(semanticClient, new SemanticRepositoryClient(semanticClient)));
         DirectToolRegistry registry = new DirectToolRegistry(toolProvider.registrations());
-        SpringAiToolCallbackFactory callbackFactory = new SpringAiToolCallbackFactory();
-        List<ToolCallback> catalogCallbacks = callbackFactory.create(registry.snapshot(false));
-        List<Message> catalogMessages = List.of(
-                new org.springframework.ai.chat.messages.SystemMessage(new PromptResource().content()),
-                new UserMessage("Alice: 有哪些付款方式？請先呼叫 list_repositories，不要直接回答。"));
+        GoogleGenAiChatOptions options = (GoogleGenAiChatOptions) provider.getOptions();
+        GoogleConversationModel model = new GoogleConversationModel(
+                provider, new PromptResource(), new NoOpConversationTelemetry(), options.getModel());
+        SessionId sessionId = new SessionId("google-tool-context-live");
+        MessageJobId jobId = new MessageJobId("google-tool-context-job");
+        Instant createdAt = Instant.parse("2026-08-20T00:00:00Z");
+        com.java.system.sessionagent.conversation.domain.UserMessage question =
+                new com.java.system.sessionagent.conversation.domain.UserMessage(
+                        sessionId, new SessionSequence(1), Optional.of(jobId), createdAt,
+                        MessageRole.USER, "Alice", "有哪些付款方式？請先呼叫 list_repositories，不要直接回答。");
 
-        ChatResponse catalogResponse = call(catalogMessages, catalogCallbacks);
-        AssistantMessage catalogRequest = Objects.requireNonNull(catalogResponse.getResults().getFirst().getOutput());
-        assertThat(catalogRequest.getToolCalls()).singleElement()
-                .extracting(AssistantMessage.ToolCall::name)
-                .isEqualTo("list_repositories");
-        assertThat(catalogRequest.getMetadata()).containsKey("thoughtSignatures");
-        AssistantMessage.ToolCall catalogToolCall = catalogRequest.getToolCalls().getFirst();
-        String catalogCallId = StringUtils.hasText(catalogToolCall.id())
-                ? catalogToolCall.id()
-                : "runtime-catalog";
-        AssistantMessage persistedCatalogRequest = AssistantMessage.builder()
-                .content("")
-                .properties(catalogRequest.getMetadata())
-                .toolCalls(List.of(new AssistantMessage.ToolCall(
-                        catalogCallId, catalogToolCall.type(), catalogToolCall.name(), catalogToolCall.arguments())))
-                .build();
-        List<Message> sourceMessages = List.of(
-                catalogMessages.get(0),
-                catalogMessages.get(1),
-                persistedCatalogRequest,
-                ToolResponseMessage.builder()
-                        .responses(List.of(new ToolResponseMessage.ToolResponse(
-                                catalogCallId, "list_repositories", """
-                                        {"data":{"repositories":[{"displayName":"Payment Service","repositoryId":"payment-service"}]},"resultId":"catalog-result","toolName":"list_repositories"}
-                                        """)))
-                        .build());
-        List<ToolCallback> sourceCallbacks = callbackFactory.create(registry.snapshot(true));
-        ChatResponse response = call(sourceMessages, sourceCallbacks);
+        ModelDecision firstDecision = model.decide(
+                new ModelRequest(List.of(question), registry.snapshot(false), false), usage -> { });
+        assertThat(firstDecision).isInstanceOf(ModelDecision.UseTool.class);
+        ModelDecision.UseTool catalogRequest = (ModelDecision.UseTool) firstDecision;
+        assertThat(catalogRequest.toolName().value()).isEqualTo("list_repositories");
+        ToolMessage catalogResult = new ToolMessage(
+                sessionId, new SessionSequence(2), Optional.of(jobId), createdAt.plusSeconds(1), MessageRole.TOOL,
+                new ResultId("catalog-result"), catalogRequest.callId(), catalogRequest.modelContext(),
+                catalogRequest.toolName().value(), "1", catalogRequest.arguments(), Optional.empty(), Optional.empty(),
+                """
+                        {"data":{"repositories":[{"displayName":"Payment Service","repositoryId":"payment-service"}]},"resultId":"catalog-result","toolName":"list_repositories"}
+                        """, false);
 
-        assertThat(response).isNotNull();
-        LiveOutcome outcome = classify(response);
-        assertThat(outcome).isIn(LiveOutcome.REPLY, LiveOutcome.TOOL_CALL);
-        System.out.printf("GOOGLE_ALL_TOOLS_LIVE_RESULT=%s usageAvailable=%s%n",
-                outcome, usageAvailable(response));
-    }
+        ModelDecision secondDecision = model.decide(
+                new ModelRequest(List.of(question, catalogResult), registry.snapshot(true), false), usage -> { });
 
-    private ChatResponse call(List<Message> messages, List<ToolCallback> callbacks) {
-        GoogleGenAiChatOptions.Builder options = ((GoogleGenAiChatOptions) provider.getOptions()).mutate()
-                .includeThoughts(true)
-                .includeServerSideToolInvocations(false)
-                .toolCallbacks(callbacks);
-        return Objects.requireNonNull(ChatClient.create(provider).prompt()
-                .advisors(AdvisorParams.toolCallingAdvisorAutoRegister(false))
-                .messages(messages)
-                .options(options)
-                .call()
-                .chatResponse());
+        assertThat(secondDecision).isInstanceOfAny(ModelDecision.UseTool.class, ModelDecision.Reply.class);
+        System.out.printf("GOOGLE_ALL_TOOLS_LIVE_RESULT=%s%n", secondDecision.getClass().getSimpleName());
     }
 
     private static LiveOutcome classify(ChatResponse response) {

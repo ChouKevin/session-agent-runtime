@@ -44,6 +44,7 @@ import java.util.function.Consumer;
 public final class GoogleConversationModel implements com.java.system.sessionagent.conversation.port.out.ConversationModel {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(GoogleConversationModel.class);
+    private static final String IS_THOUGHT = "isThought";
     private static final String THOUGHT_SIGNATURES = "thoughtSignatures";
     private final ChatClient chatClient;
     private final PromptResource promptResource;
@@ -177,7 +178,9 @@ public final class GoogleConversationModel implements com.java.system.sessionage
     }
 
     private ModelDecision decision(ChatResponse response) {
-        List<Generation> results = response.getResults();
+        List<Generation> results = response.getResults().stream()
+                .filter(result -> !isThought(result))
+                .toList();
         if (CollectionUtils.isEmpty(results) || results.size() != 1) {
             throw ModelCallFailure.correctable();
         }
@@ -187,6 +190,15 @@ public final class GoogleConversationModel implements com.java.system.sessionage
             return toolDecision(message);
         }
         return replyDecision(message.getText());
+    }
+
+    private static boolean isThought(Generation generation) {
+        return Optional.ofNullable(generation.getOutput())
+                .map(AssistantMessage::getMetadata)
+                .map(metadata -> metadata.get(IS_THOUGHT))
+                .filter(Boolean.class::isInstance)
+                .map(Boolean.class::cast)
+                .orElse(false);
     }
 
     private ModelDecision toolDecision(AssistantMessage message) {
