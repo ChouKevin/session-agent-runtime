@@ -11,6 +11,7 @@ import com.java.system.sessionagent.conversation.port.out.NoOpConversationTeleme
 import com.java.system.sessionagent.tool.domain.ToolName;
 import com.java.system.sessionagent.tool.json.JsonContractException;
 import com.java.system.sessionagent.tool.json.StrictJsonCodec;
+import com.java.system.sessionagent.tool.json.ToolSchemaFactory;
 import org.springframework.ai.chat.client.AdvisorParams;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.metadata.ChatResponseMetadata;
@@ -47,6 +48,7 @@ public final class GoogleConversationModel implements com.java.system.sessionage
     private static final Logger LOGGER = LoggerFactory.getLogger(GoogleConversationModel.class);
     private static final String IS_THOUGHT = "isThought";
     private static final String THOUGHT_SIGNATURES = "thoughtSignatures";
+    private static final String ASSISTANT_REPLY_SCHEMA = new ToolSchemaFactory().schemaFor(AssistantReply.class);
     private final ChatClient chatClient;
     private final PromptResource promptResource;
     private final SpringAiToolCallbackFactory callbackFactory;
@@ -128,7 +130,7 @@ public final class GoogleConversationModel implements com.java.system.sessionage
         List<Message> messages = messagesFor(request);
         LOGGER.info("google_model_request replyOnly={} messageCount={} callbackCount={}", request.replyOnly(), messages.size(), callbacks.size());
         try {
-            ChatResponse response = call(messages, callbacks);
+            ChatResponse response = call(messages, callbacks, request.replyOnly());
             logResponseShape(response);
             ModelUsage modelUsage = usage(response);
             ModelDecision modelDecision = decision(response);
@@ -164,13 +166,18 @@ public final class GoogleConversationModel implements com.java.system.sessionage
         return List.copyOf(messages);
     }
 
-    private ChatResponse call(List<Message> messages, List<ToolCallback> callbacks) {
+    private ChatResponse call(List<Message> messages, List<ToolCallback> callbacks, boolean replyOnly) {
         try {
             ChatClient.ChatClientRequestSpec request = chatClient.prompt()
                     .advisors(AdvisorParams.toolCallingAdvisorAutoRegister(false))
                     .messages(messages);
             if (googleOptions.isPresent()) {
-                return request.options(googleOptions.get().mutate().toolCallbacks(callbacks))
+                GoogleGenAiChatOptions.Builder options = googleOptions.get().mutate().toolCallbacks(callbacks);
+                if (replyOnly) {
+                    options.responseMimeType("application/json")
+                            .responseSchema(ASSISTANT_REPLY_SCHEMA);
+                }
+                return request.options(options)
                         .call().chatResponse();
             }
             return request.toolCallbacks(callbacks).call().chatResponse();

@@ -14,6 +14,7 @@ import com.java.system.sessionagent.conversation.domain.UserMessage;
 import com.java.system.sessionagent.conversation.domain.MessageRole;
 import com.java.system.sessionagent.conversation.port.out.ModelCallFailure;
 import com.java.system.sessionagent.conversation.port.out.ConversationTelemetry;
+import com.java.system.sessionagent.conversation.port.out.NoOpConversationTelemetry;
 import com.java.system.sessionagent.tool.application.DirectToolRegistry;
 import com.java.system.sessionagent.tool.application.ToolRegistration;
 import com.java.system.sessionagent.tool.application.ToolSnapshot;
@@ -33,6 +34,8 @@ import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.model.Generation;
 import org.springframework.ai.chat.prompt.Prompt;
+import org.springframework.ai.google.genai.GoogleGenAiChatModel;
+import org.springframework.ai.google.genai.GoogleGenAiChatOptions;
 import org.springframework.ai.model.tool.ToolCallingChatOptions;
 import org.springframework.ai.retry.NonTransientAiException;
 import org.springframework.ai.retry.TransientAiException;
@@ -135,6 +138,24 @@ class GoogleConversationModelTest {
         assertThat(finalInstruction.getText())
                 .contains("source-result")
                 .doesNotContain("catalog-result", "catalog-payload", "private-source-payload");
+    }
+
+    @Test
+    void asks_google_to_enforce_the_final_reply_json_schema() {
+        RecordingGoogleChatModel chatModel = new RecordingGoogleChatModel(response(
+                new AssistantMessage("{\"citations\":[{\"value\":\"result-1\"}],\"message\":\"Answer\"}"), null));
+        GoogleConversationModel model = new GoogleConversationModel(
+                chatModel, new PromptResource(), new NoOpConversationTelemetry(), "gemini-3.1-flash-lite");
+
+        model.decide(request(snapshot("catalog"), true), usage -> { });
+
+        GoogleGenAiChatOptions options = (GoogleGenAiChatOptions) chatModel.prompt.getOptions();
+        assertThat(options.getResponseMimeType()).isEqualTo("application/json");
+        assertThat(options.getResponseSchema())
+                .contains("\"message\"")
+                .contains("\"citations\"")
+                .contains("\"value\"");
+        assertThat(options.getToolCallbacks()).isEmpty();
     }
 
     @Test
@@ -338,6 +359,29 @@ class GoogleConversationModelTest {
         @Override
         public ToolCallingChatOptions getOptions() {
             return ToolCallingChatOptions.builder().build();
+        }
+    }
+
+    private static final class RecordingGoogleChatModel implements ChatModel {
+
+        private final ChatResponse response;
+        private Prompt prompt;
+
+        private RecordingGoogleChatModel(ChatResponse response) {
+            this.response = response;
+        }
+
+        @Override
+        public ChatResponse call(Prompt prompt) {
+            this.prompt = prompt;
+            return response;
+        }
+
+        @Override
+        public GoogleGenAiChatOptions getOptions() {
+            return GoogleGenAiChatOptions.builder()
+                    .model(GoogleGenAiChatModel.ChatModel.GEMINI_2_5_FLASH)
+                    .build();
         }
     }
 
