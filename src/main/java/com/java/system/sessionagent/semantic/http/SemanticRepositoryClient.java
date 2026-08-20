@@ -120,8 +120,10 @@ public final class SemanticRepositoryClient implements RepositoryCatalog {
         }
         try {
             RepositorySummary summary = new RepositorySummary(new RepositoryId(response.repoId()), response.displayName());
-            if (!StringUtils.hasText(response.mode()) || !StringUtils.hasText(response.currentBranch())
-                    || !Boolean.TRUE.equals(response.cloned()) || !StringUtils.hasText(response.currentRevision())) {
+            boolean validRepositoryLocation = "LOCAL_FIXTURE".equals(response.mode())
+                    || ("REMOTE".equals(response.mode()) && StringUtils.hasText(response.currentBranch()));
+            if (!validRepositoryLocation || !Boolean.TRUE.equals(response.cloned())
+                    || !StringUtils.hasText(response.currentRevision())) {
                 throw SemanticFailure.invalidResponse();
             }
             return new RepositoryStatus(summary, Optional.of(new RepositoryRevision(response.currentRevision())));

@@ -45,6 +45,21 @@ class SemanticRepositoryClientTest {
     }
 
     @Test
+    void accepts_a_local_fixture_without_a_git_branch() {
+        TestClient client = testClient();
+        client.server().expect(once(), requestTo("https://semantic.test/v1/repositories"))
+                .andExpect(method(GET))
+                .andRespond(withSuccess("""
+                        [{"currentRevision":"FIXTURE","displayName":"Payment Service","cloned":true,"repoId":"payment-service","mode":"LOCAL_FIXTURE","currentBranch":null}]
+                        """, MediaType.APPLICATION_JSON));
+
+        List<RepositorySummary> repositories = client.semantic().listRepositories();
+
+        assertEquals(List.of(new RepositorySummary(new RepositoryId("payment-service"), "Payment Service")), repositories);
+        client.server().verify();
+    }
+
+    @Test
     void checks_the_exact_requested_repository_against_live_status_without_catalog_membership() {
         TestClient client = testClient();
         client.server().expect(once(), requestTo("https://semantic.test/v1/repositories"))
