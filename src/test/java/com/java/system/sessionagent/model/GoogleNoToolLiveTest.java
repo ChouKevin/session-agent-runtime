@@ -31,7 +31,9 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-@SpringBootTest(classes = GoogleNoToolLiveTest.LiveApplication.class)
+@SpringBootTest(
+        classes = GoogleNoToolLiveTest.LiveApplication.class,
+        properties = "spring.flyway.enabled=false")
 @EnabledIfEnvironmentVariable(named = "GOOGLE_NO_TOOL_LIVE", matches = "true")
 class GoogleNoToolLiveTest {
 

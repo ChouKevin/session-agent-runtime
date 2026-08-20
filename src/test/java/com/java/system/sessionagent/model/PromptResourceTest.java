@@ -17,4 +17,16 @@ class PromptResourceTest {
                 .doesNotContain("order-service")
                 .doesNotContain("repositoryId\":");
     }
+
+    @Test
+    void defines_the_exact_tool_and_final_reply_contract() {
+        PromptResource promptResource = new PromptResource();
+
+        assertThat(promptResource.content())
+                .contains("`list_repositories`")
+                .contains("catalog result is not citeable")
+                .contains("\"message\":\"<answer>\"")
+                .contains("\"citations\":[{\"value\":\"<resultId>\"}]")
+                .contains("Do not wrap the JSON in Markdown");
+    }
 }
