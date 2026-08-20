@@ -1,5 +1,6 @@
 package com.java.system.sessionagent.semantic.json;
 
+import com.fasterxml.jackson.annotation.JsonInclude;
 import org.springframework.util.Assert;
 import tools.jackson.core.JacksonException;
 import tools.jackson.databind.BeanDescription;
@@ -22,6 +23,7 @@ public final class SemanticResultJsonWriter {
         module.setSerializerModifier(new ProviderControlFieldFilter());
         this.mapper = JsonMapper.builder()
                 .enable(SerializationFeature.ORDER_MAP_ENTRIES_BY_KEYS)
+                .changeDefaultPropertyInclusion(inclusion -> inclusion.withValueInclusion(JsonInclude.Include.NON_ABSENT))
                 .addModule(module)
                 .build();
     }

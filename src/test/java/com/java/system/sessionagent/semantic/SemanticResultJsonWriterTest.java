@@ -2,6 +2,10 @@ package com.java.system.sessionagent.semantic;
 
 import com.java.system.sessionagent.semantic.dto.ProviderDtos;
 import com.java.system.sessionagent.semantic.json.SemanticResultJsonWriter;
+import com.java.system.sessionagent.tool.application.ToolResultEnvelopeFactory;
+import com.java.system.sessionagent.tool.domain.ToolExecution;
+import com.java.system.sessionagent.tool.domain.ToolKind;
+import com.java.system.sessionagent.tool.domain.ToolName;
 import org.junit.jupiter.api.Test;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.json.JsonMapper;
@@ -9,6 +13,8 @@ import tools.jackson.databind.json.JsonMapper;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+
+import java.util.Optional;
 
 class SemanticResultJsonWriterTest {
 
@@ -34,5 +40,27 @@ class SemanticResultJsonWriterTest {
         assertFalse(target.has("sourceFile"));
         assertFalse(target.has("packageName"));
         assertFalse(target.has("className"));
+    }
+
+    @Test
+    void writes_a_real_concept_response_that_the_strict_result_envelope_accepts() throws Exception {
+        ProviderDtos.DiscoverConceptsResponse response = JsonMapper.builder().build().readValue("""
+                {"repoId":"payment-service","analyzedRevision":"FIXTURE","normalizedTerms":["payment method"],
+                 "searchedKinds":["TYPE"],"supportedKinds":["TYPE"],"limitations":[],
+                 "candidates":[{"identity":{"kind":"TYPE","sourceType":{"javaType":{"packageName":"com.example.payment","className":"PaymentMethod"},"sourceFile":"src/main/java/com/example/payment/PaymentMethod.java"}},
+                 "displayValue":"PaymentMethod","matchedTerms":["payment method"],"authority":"SYNTAX_DECLARED",
+                 "evidence":[{"identity":{"kind":"TYPE","sourceType":{"javaType":{"packageName":"com.example.payment","className":"PaymentMethod"},"sourceFile":"src/main/java/com/example/payment/PaymentMethod.java"}}}],
+                 "availableFollowUps":[]}],
+                 "page":{"offset":0,"limit":50,"returnedCount":1,"totalCount":1,"hasMore":false},
+                 "coverage":{"status":"COMPLETE","scannedFileCount":6,"extractedFileCount":6,"syntaxFailedFileCount":0},
+                 "issueSummaries":[],"availableFollowUps":[],"unavailableFollowUps":[]}
+                """, ProviderDtos.DiscoverConceptsResponse.class);
+
+        String json = new SemanticResultJsonWriter().write(response);
+        ToolExecution execution = new ToolExecution(new ToolName("codebase_discover_concepts"), "v1", ToolKind.SOURCE,
+                "{}", Optional.of("payment-service"), Optional.of("FIXTURE"), json, true);
+
+        new ToolResultEnvelopeFactory().validate(execution);
+        assertFalse(json.contains(":null"));
     }
 }
