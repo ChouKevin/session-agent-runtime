@@ -83,6 +83,26 @@ class SemanticToolContractTest {
     }
 
     @Test
+    void type_member_schema_exposes_every_semantic_provider_member_kind() {
+        SemanticToolProvider provider = new SemanticToolProvider(
+                List::of, new SemanticSourceClient(RestClient.create("https://semantic.test"),
+                new SemanticRepositoryClient(RestClient.create("https://semantic.test"))));
+
+        String schema = provider.registrations().stream()
+                .filter(registration -> registration.definition().name().value()
+                        .equals("codebase_discover_type_members"))
+                .findFirst()
+                .orElseThrow()
+                .definition()
+                .inputSchema();
+
+        assertTrue(schema.contains("METHOD"));
+        assertTrue(schema.contains("FIELD"));
+        assertTrue(schema.contains("ENUM_CONSTANT"));
+        assertTrue(schema.contains("RECORD_COMPONENT"));
+    }
+
+    @Test
     void rejects_windows_and_backslash_source_paths_before_any_source_http_request() {
         RestClient.Builder builder = RestClient.builder().baseUrl("https://semantic.test");
         MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();

@@ -1128,9 +1128,16 @@ public final class ProviderDtos {
     }
 
     /** 型別成員回應的封閉變體 */
-    @JsonTypeInfo(use = JsonTypeInfo.Id.DEDUCTION)
-    @JsonSubTypes({@JsonSubTypes.Type(MethodTypeMemberResponse.class), @JsonSubTypes.Type(FieldTypeMemberResponse.class)})
-    public sealed interface TypeMemberResponse permits MethodTypeMemberResponse, FieldTypeMemberResponse {
+    @JsonTypeInfo(use = JsonTypeInfo.Id.NAME, include = JsonTypeInfo.As.EXISTING_PROPERTY,
+            property = "kind", visible = true)
+    @JsonSubTypes({
+            @JsonSubTypes.Type(value = MethodTypeMemberResponse.class, name = "METHOD"),
+            @JsonSubTypes.Type(value = FieldTypeMemberResponse.class, name = "FIELD"),
+            @JsonSubTypes.Type(value = EnumConstantTypeMemberResponse.class, name = "ENUM_CONSTANT"),
+            @JsonSubTypes.Type(value = RecordComponentTypeMemberResponse.class, name = "RECORD_COMPONENT")
+    })
+    public sealed interface TypeMemberResponse permits MethodTypeMemberResponse, FieldTypeMemberResponse,
+            EnumConstantTypeMemberResponse, RecordComponentTypeMemberResponse {
         List<AvailableFollowUp> availableFollowUps();
     }
 
@@ -1138,6 +1145,7 @@ public final class ProviderDtos {
     public record MethodTypeMemberResponse(String kind, MethodTargetPayload target,
                                            List<AvailableFollowUp> availableFollowUps) implements TypeMemberResponse {
         public MethodTypeMemberResponse {
+            kind = requiredKind(kind, "METHOD");
             target = Objects.requireNonNull(target, "member method target is required");
             availableFollowUps = List.copyOf(Objects.requireNonNull(availableFollowUps,
                     "member method follow-ups are required"));
@@ -1149,6 +1157,7 @@ public final class ProviderDtos {
                                           Optional<String> resolvedType, List<String> annotations, List<String> limitations,
                                           List<AvailableFollowUp> availableFollowUps) implements TypeMemberResponse {
         public FieldTypeMemberResponse {
+            kind = requiredKind(kind, "FIELD");
             identity = Objects.requireNonNull(identity, "member field identity is required");
             writtenType = Objects.requireNonNull(writtenType, "member field written type is required");
             resolvedType = optional(resolvedType);
@@ -1156,6 +1165,43 @@ public final class ProviderDtos {
             limitations = List.copyOf(Objects.requireNonNull(limitations, "member field limitations are required"));
             availableFollowUps = List.copyOf(Objects.requireNonNull(availableFollowUps,
                     "member field follow-ups are required"));
+        }
+    }
+
+    @JsonIgnoreProperties(ignoreUnknown = false)
+    public record EnumConstantTypeMemberResponse(String kind, SourceMemberIdentityPayload identity,
+                                                 TextRangePayload declarationRange, List<String> annotations,
+                                                 List<AvailableFollowUp> availableFollowUps)
+            implements TypeMemberResponse {
+        public EnumConstantTypeMemberResponse {
+            kind = requiredKind(kind, "ENUM_CONSTANT");
+            identity = Objects.requireNonNull(identity, "enum constant identity is required");
+            declarationRange = Objects.requireNonNull(declarationRange,
+                    "enum constant declaration range is required");
+            annotations = List.copyOf(Objects.requireNonNull(annotations,
+                    "enum constant annotations are required"));
+            availableFollowUps = List.copyOf(Objects.requireNonNull(availableFollowUps,
+                    "enum constant follow-ups are required"));
+        }
+    }
+
+    @JsonIgnoreProperties(ignoreUnknown = false)
+    public record RecordComponentTypeMemberResponse(String kind, SourceMemberIdentityPayload identity,
+                                                    String writtenType, Optional<String> resolvedType,
+                                                    TextRangePayload declarationRange, List<String> annotations,
+                                                    List<AvailableFollowUp> availableFollowUps)
+            implements TypeMemberResponse {
+        public RecordComponentTypeMemberResponse {
+            kind = requiredKind(kind, "RECORD_COMPONENT");
+            identity = Objects.requireNonNull(identity, "record component identity is required");
+            writtenType = Objects.requireNonNull(writtenType, "record component written type is required");
+            resolvedType = optional(resolvedType);
+            declarationRange = Objects.requireNonNull(declarationRange,
+                    "record component declaration range is required");
+            annotations = List.copyOf(Objects.requireNonNull(annotations,
+                    "record component annotations are required"));
+            availableFollowUps = List.copyOf(Objects.requireNonNull(availableFollowUps,
+                    "record component follow-ups are required"));
         }
     }
 

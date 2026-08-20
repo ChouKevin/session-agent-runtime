@@ -294,6 +294,37 @@ class SemanticSourceClientTest {
     }
 
     @Test
+    void decodes_enum_constants_and_record_components_from_type_member_results() {
+        ClientFixture fixture = fixture();
+        fixture.server().expect(once(), requestTo("https://semantic.test/v1/discovery/type-members"))
+                .andRespond(withSuccess("""
+                        {"repoId":"payment-service","analyzedRevision":"revision-42",
+                         "sourceType":{"javaType":{"packageName":"com.example","className":"PaymentMethod"},"sourceFile":"src/PaymentMethod.java"},
+                         "typeKind":"ENUM","annotations":[],"implementedTypes":[],"extendedTypes":[],
+                         "members":[
+                           {"kind":"ENUM_CONSTANT","identity":{"scope":"TYPE","ownerType":{"javaType":{"packageName":"com.example","className":"PaymentMethod"},"sourceFile":"src/PaymentMethod.java"},"name":"CREDIT_CARD"},
+                            "declarationRange":{"start":{"line":1,"character":4},"end":{"line":1,"character":15}},"annotations":[],"availableFollowUps":[]},
+                           {"kind":"RECORD_COMPONENT","identity":{"scope":"TYPE","ownerType":{"javaType":{"packageName":"com.example","className":"PaymentMethod"},"sourceFile":"src/PaymentMethod.java"},"name":"label"},
+                            "writtenType":"String","resolvedType":"java.lang.String","declarationRange":{"start":{"line":0,"character":20},"end":{"line":0,"character":32}},"annotations":[],"availableFollowUps":[]}
+                         ],
+                         "page":{"offset":0,"limit":50,"returnedCount":2,"totalCount":2,"hasMore":false},
+                         "coverage":{"status":"COMPLETE","scannedFileCount":1,"extractedFileCount":1,"syntaxFailedFileCount":0},
+                         "availableFollowUps":[]}
+                        """, MediaType.APPLICATION_JSON));
+
+        SemanticSourceClient.SourceResult<?> result = fixture.client().discoverTypeMembers(
+                new DiscoverTypeMembersInput("payment-service",
+                        new MethodTarget.SourceType(new MethodTarget.JavaType("com.example", "PaymentMethod"),
+                                "src/PaymentMethod.java"),
+                        List.of(MemberKind.METHOD), null, null, null));
+
+        String json = new SemanticResultJsonWriter().write(result.response());
+        assertTrue(json.contains("\"kind\":\"ENUM_CONSTANT\""));
+        assertTrue(json.contains("\"kind\":\"RECORD_COMPONENT\""));
+        fixture.server().verify();
+    }
+
+    @Test
     void rejects_a_top_level_scope_mismatch() {
         ClientFixture fixture = fixture();
         fixture.server().expect(once(), requestTo("https://semantic.test/v1/repositories/payment-service/entry-points?expectedRevision=revision-42"))
