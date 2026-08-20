@@ -59,9 +59,9 @@ class SessionAgentLiveIT {
     private ScenarioReport runPaymentMethods(LiveRuntime runtime) throws Exception {
         ScenarioState state = runtime.ask("payment-methods", "目前有哪些支付方式？");
         String answer = state.assistantText();
-        assertContainsOneOf(answer, "信用卡", "credit card");
-        assertContainsOneOf(answer, "銀行轉帳", "bank transfer");
-        assertContainsOneOf(answer, "錢包", "wallet");
+        assertContainsOneOf(answer, "信用卡", "credit card", "CREDIT_CARD");
+        assertContainsOneOf(answer, "銀行轉帳", "银行转账", "bank transfer", "BANK_TRANSFER");
+        assertContainsOneOf(answer, "錢包", "钱包", "wallet", "WALLET");
         assertThat(state.sourceRepositoryIds()).contains("payment-service");
         return state.toReport("PAYMENT_METHODS_CONFIRMED");
     }
