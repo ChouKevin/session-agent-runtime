@@ -5,6 +5,7 @@ import com.java.system.sessionagent.conversation.domain.FeedbackMessage;
 import com.java.system.sessionagent.conversation.domain.SessionMessage;
 import com.java.system.sessionagent.conversation.domain.ToolMessage;
 import com.java.system.sessionagent.conversation.domain.UserMessage;
+import com.java.system.sessionagent.tool.json.StrictJsonCodec;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.ToolResponseMessage;
 import org.springframework.util.Assert;
@@ -17,6 +18,11 @@ import java.util.Map;
 public final class ConversationHistoryProjector {
 
     private static final String THOUGHT_SIGNATURES = "thoughtSignatures";
+    private final StrictJsonCodec jsonCodec;
+
+    public ConversationHistoryProjector() {
+        this.jsonCodec = new StrictJsonCodec();
+    }
 
     public List<Message> project(List<SessionMessage> history) {
         Assert.notNull(history, "Conversation history must not be null");
@@ -27,7 +33,7 @@ public final class ConversationHistoryProjector {
         return List.copyOf(projected);
     }
 
-    private static void addProjection(List<Message> projected, SessionMessage message) {
+    private void addProjection(List<Message> projected, SessionMessage message) {
         if (message instanceof UserMessage userMessage) {
             projected.add(org.springframework.ai.chat.messages.UserMessage.builder()
                     .text(userMessage.participantId() + ": " + userMessage.message())
@@ -51,14 +57,15 @@ public final class ConversationHistoryProjector {
         throw new IllegalArgumentException("Unsupported conversation history message");
     }
 
-    private static void addFeedbackProjection(List<Message> projected, FeedbackMessage feedbackMessage) {
+    private void addFeedbackProjection(List<Message> projected, FeedbackMessage feedbackMessage) {
         if (feedbackMessage.modelCallId().isPresent()) {
             addToolProjection(projected,
                     feedbackMessage.modelCallId().orElseThrow(),
                     feedbackMessage.modelContext().orElseThrow(),
                     feedbackMessage.toolName().orElseThrow(),
                     feedbackMessage.rejectedArguments().orElseThrow(),
-                    "Tool request was rejected [" + feedbackMessage.code() + "]: " + feedbackMessage.message());
+                    jsonCodec.canonicalize(new RejectedToolResponse(
+                            feedbackMessage.code(), feedbackMessage.message(), "REJECTED")));
             return;
         }
         projected.add(new org.springframework.ai.chat.messages.UserMessage(
@@ -80,5 +87,8 @@ public final class ConversationHistoryProjector {
                 .build();
         projected.add(toolRequest);
         projected.add(toolResponse);
+    }
+
+    private record RejectedToolResponse(String code, String message, String status) {
     }
 }

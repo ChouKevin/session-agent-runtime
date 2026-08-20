@@ -10,6 +10,7 @@ import com.java.system.sessionagent.conversation.domain.SessionMessage;
 import com.java.system.sessionagent.conversation.domain.SessionSequence;
 import com.java.system.sessionagent.conversation.domain.ToolMessage;
 import com.java.system.sessionagent.conversation.domain.UserMessage;
+import com.java.system.sessionagent.tool.json.StrictJsonCodec;
 import org.junit.jupiter.api.Test;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.ToolResponseMessage;
@@ -83,7 +84,10 @@ class ConversationHistoryProjectorTest {
                         "call-source", "function", "get_source_segment", "{\"repositoryId\":\"payment-service\"}"));
         assertThat(rejectedResponse.getResponses().getFirst().id()).isEqualTo("call-source");
         assertThat(rejectedResponse.getResponses().getFirst().name()).isEqualTo("get_source_segment");
-        assertThat(rejectedResponse.getResponses().getFirst().responseData()).contains("TOOL_INPUT_INVALID");
+        RejectedToolResponse rejectedToolResponse = new StrictJsonCodec().decode(
+                rejectedResponse.getResponses().getFirst().responseData(), RejectedToolResponse.class);
+        assertThat(rejectedToolResponse).isEqualTo(new RejectedToolResponse(
+                "TOOL_INPUT_INVALID", "Use a repository returned by the catalog.", "REJECTED"));
     }
 
     private static List<SessionMessage> history() {
@@ -111,5 +115,8 @@ class ConversationHistoryProjectorTest {
                 new FeedbackMessage(SESSION_ID, new SessionSequence(7), Optional.of(JOB_ID), CREATED_AT,
                         MessageRole.FEEDBACK, "MODEL_OUTPUT_INVALID", "Return one tool call or one reply.", false,
                         Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty()));
+    }
+
+    private record RejectedToolResponse(String code, String message, String status) {
     }
 }
