@@ -52,7 +52,8 @@ public final class ProviderDtos {
         }
     }
 
-    @JsonTypeInfo(use = JsonTypeInfo.Id.NAME, property = "type", visible = true)
+    @JsonTypeInfo(use = JsonTypeInfo.Id.NAME, include = JsonTypeInfo.As.EXISTING_PROPERTY,
+            property = "type", visible = true)
     @JsonSubTypes({
             @JsonSubTypes.Type(value = ApiEntryPointMethodResponse.class, name = "API"),
             @JsonSubTypes.Type(value = MqEntryPointMethodResponse.class, name = "MQ"),
@@ -846,7 +847,8 @@ public final class ProviderDtos {
     }
 
     /** 概念候選的額外封閉細節 */
-    @JsonTypeInfo(use = JsonTypeInfo.Id.NAME, property = "kind", visible = true)
+    @JsonTypeInfo(use = JsonTypeInfo.Id.NAME, include = JsonTypeInfo.As.EXISTING_PROPERTY,
+            property = "kind", visible = true)
     @JsonSubTypes({@JsonSubTypes.Type(value = FieldConceptCandidateDetailsResponse.class, name = "FIELD"),
             @JsonSubTypes.Type(value = MapperStatementConceptCandidateDetailsResponse.class, name = "MAPPER_STATEMENT")})
     public sealed interface ConceptCandidateDetailsResponse permits FieldConceptCandidateDetailsResponse,
@@ -870,7 +872,8 @@ public final class ProviderDtos {
     }
 
     /** mapper statement 到 Java 方法的封閉 mapping 結果 */
-    @JsonTypeInfo(use = JsonTypeInfo.Id.NAME, property = "status", visible = true)
+    @JsonTypeInfo(use = JsonTypeInfo.Id.NAME, include = JsonTypeInfo.As.EXISTING_PROPERTY,
+            property = "status", visible = true)
     @JsonSubTypes({@JsonSubTypes.Type(value = ResolvedMapperStatementMappingResponse.class, name = "RESOLVED"),
             @JsonSubTypes.Type(value = AmbiguousMapperStatementMappingResponse.class, name = "AMBIGUOUS"),
             @JsonSubTypes.Type(value = UnresolvedMapperStatementMappingResponse.class, name = "UNRESOLVED")})
@@ -926,7 +929,8 @@ public final class ProviderDtos {
     }
 
     /** 欄位宣告型別的遞迴封閉證據 */
-    @JsonTypeInfo(use = JsonTypeInfo.Id.NAME, property = "kind", visible = true)
+    @JsonTypeInfo(use = JsonTypeInfo.Id.NAME, include = JsonTypeInfo.As.EXISTING_PROPERTY,
+            property = "kind", visible = true)
     @JsonSubTypes({@JsonSubTypes.Type(value = NamedFieldTypeReferenceResponse.class, name = "NAMED"),
             @JsonSubTypes.Type(value = ParameterizedFieldTypeReferenceResponse.class, name = "PARAMETERIZED"),
             @JsonSubTypes.Type(value = PrimitiveFieldTypeReferenceResponse.class, name = "PRIMITIVE"),
@@ -1275,7 +1279,8 @@ public final class ProviderDtos {
     }
 
     /** source symbol context candidate 的精確 provider 變體 */
-    @JsonTypeInfo(use = JsonTypeInfo.Id.NAME, property = "kind", visible = true)
+    @JsonTypeInfo(use = JsonTypeInfo.Id.NAME, include = JsonTypeInfo.As.EXISTING_PROPERTY,
+            property = "kind", visible = true)
     @JsonSubTypes({@JsonSubTypes.Type(value = SourceTypeContextCandidateResponse.class, name = "SOURCE_TYPE"),
             @JsonSubTypes.Type(value = SourceMethodContextCandidateResponse.class, name = "METHOD")})
     public sealed interface SourceContextCandidateResponse permits SourceTypeContextCandidateResponse,
@@ -1302,7 +1307,8 @@ public final class ProviderDtos {
     }
 
     /** source symbol candidate 的精確 provider 變體 */
-    @JsonTypeInfo(use = JsonTypeInfo.Id.NAME, property = "kind", visible = true)
+    @JsonTypeInfo(use = JsonTypeInfo.Id.NAME, include = JsonTypeInfo.As.EXISTING_PROPERTY,
+            property = "kind", visible = true)
     @JsonSubTypes({
             @JsonSubTypes.Type(value = VariableLikeSourceSymbolCandidateResponse.class, name = "FIELD"),
             @JsonSubTypes.Type(value = VariableLikeSourceSymbolCandidateResponse.class, name = "RECORD_COMPONENT"),
@@ -1462,7 +1468,8 @@ public final class ProviderDtos {
         }
     }
 
-    @JsonTypeInfo(use = JsonTypeInfo.Id.NAME, property = "kind", visible = true)
+    @JsonTypeInfo(use = JsonTypeInfo.Id.NAME, include = JsonTypeInfo.As.EXISTING_PROPERTY,
+            property = "kind", visible = true)
     @JsonSubTypes({@JsonSubTypes.Type(value = InternalReferenceTypeContextResponse.class, name = "TYPE"),
             @JsonSubTypes.Type(value = InternalReferenceMethodContextResponse.class, name = "METHOD")})
     public sealed interface InternalReferenceContextResponse permits InternalReferenceTypeContextResponse,

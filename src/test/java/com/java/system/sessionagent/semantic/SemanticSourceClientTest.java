@@ -27,6 +27,10 @@ import com.java.system.sessionagent.semantic.tool.input.OutgoingCallGraphInput;
 import com.java.system.sessionagent.semantic.tool.input.ResolveConceptInput;
 import com.java.system.sessionagent.semantic.tool.input.ResolveSourceSymbolInput;
 import com.java.system.sessionagent.semantic.tool.input.SuggestApiRouteInput;
+import com.java.system.sessionagent.tool.application.ToolResultEnvelopeFactory;
+import com.java.system.sessionagent.tool.domain.ToolExecution;
+import com.java.system.sessionagent.tool.domain.ToolKind;
+import com.java.system.sessionagent.tool.domain.ToolName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.DynamicTest;
 import org.junit.jupiter.api.TestFactory;
@@ -172,6 +176,51 @@ class SemanticSourceClientTest {
                 new WireCase("source-symbol", POST, "/v1/discovery/source-symbols/resolve", "{\"repoId\":\"payment-service\",\"expectedRevision\":\"revision-42\",\"context\":{\"javaType\":{\"packageName\":\"com.example\",\"className\":\"Payments\"},\"sourceFile\":\"src/Payments.java\",\"method\":{\"name\":\"pay\",\"parameterTypes\":[]}},\"symbol\":\"payment\",\"position\":{\"line\":0,\"character\":0}}", "{" + scope + ",\"status\":\"RESOLVED\",\"contextCandidates\":[],\"contextCandidateLimits\":{\"limit\":10,\"returnedCount\":0,\"totalCount\":0,\"truncated\":false},\"candidates\":[],\"issues\":[]}", client -> client.resolveSourceSymbol(new ResolveSourceSymbolInput("payment-service", "payment", sourceSymbolContext(), new ProviderDtos.Position(0, 0))))
         );
         return cases.stream().map(wireCase -> DynamicTest.dynamicTest(wireCase.name(), () -> verify(wireCase)));
+    }
+
+    @Test
+    void decodes_a_provider_field_concept_with_its_declared_type_and_follow_up() {
+        ClientFixture fixture = fixture();
+        fixture.server().expect(once(), requestTo("https://semantic.test/v1/discovery/concepts"))
+                .andExpect(method(POST))
+                .andRespond(withSuccess("""
+                        {
+                          "repoId":"payment-service",
+                          "analyzedRevision":"revision-42",
+                          "normalizedTerms":["fee"],
+                          "searchedKinds":["FIELD"],
+                          "supportedKinds":["TYPE","METHOD","FIELD"],
+                          "limitations":["SOURCE_BODY_NOT_SEARCHED"],
+                          "candidates":[{
+                            "identity":{"kind":"FIELD","identity":{"scope":"TYPE","ownerType":{"javaType":{"packageName":"com.example.payment","className":"PaymentFeeCalculator"},"sourceFile":"src/main/java/com/example/payment/PaymentFeeCalculator.java"},"name":"feeFormulaEvaluator"}},
+                            "displayValue":"feeFormulaEvaluator",
+                            "matchedTerms":["fee"],
+                            "authority":"SYNTAX_DECLARED",
+                            "details":{"kind":"FIELD","declaredType":{"kind":"NAMED","writtenType":"FeeFormulaEvaluator","simpleTypeName":"FeeFormulaEvaluator","resolvedJavaType":{"packageName":"com.example.payment","className":"FeeFormulaEvaluator"},"sourceDefined":true}},
+                            "evidence":[{"identity":{"kind":"FIELD","identity":{"scope":"TYPE","ownerType":{"javaType":{"packageName":"com.example.payment","className":"PaymentFeeCalculator"},"sourceFile":"src/main/java/com/example/payment/PaymentFeeCalculator.java"},"name":"feeFormulaEvaluator"}}}],
+                            "availableFollowUps":[{"operation":"GET_TYPE_MEMBERS","api":{"method":"POST","path":"/v1/discovery/type-members","operationId":"discoverTypeMembers"},"request":{"repoId":"payment-service","expectedRevision":"revision-42","sourceType":{"javaType":{"packageName":"com.example.payment","className":"PaymentFeeCalculator"},"sourceFile":"src/main/java/com/example/payment/PaymentFeeCalculator.java"},"memberKinds":["METHOD","FIELD"],"namePrefix":null,"offset":0,"limit":50}}]
+                          }],
+                          "page":{"offset":0,"limit":50,"returnedCount":1,"totalCount":1,"hasMore":false},
+                          "coverage":{"status":"COMPLETE","scannedFileCount":6,"extractedFileCount":6,"syntaxFailedFileCount":0},
+                          "issueSummaries":[],
+                          "availableFollowUps":[],
+                          "unavailableFollowUps":[]
+                        }
+                        """, MediaType.APPLICATION_JSON));
+
+        SemanticSourceClient.SourceResult<ProviderDtos.DiscoverConceptsResponse> result = fixture.client()
+                .discoverConcepts(new DiscoverConceptsInput("payment-service",
+                        List.of(new ConceptTerm("fee", null)), List.of(ConceptKind.FIELD), null, null, null));
+
+        ProviderDtos.ConceptCandidateResponse candidate = result.response().candidates().getFirst();
+        assertTrue(candidate.details().orElseThrow()
+                instanceof ProviderDtos.FieldConceptCandidateDetailsResponse);
+        assertEquals("GET_TYPE_MEMBERS", candidate.availableFollowUps().getFirst().operation());
+        ToolExecution execution = new ToolExecution(new ToolName("codebase_discover_concepts"), "v1",
+                ToolKind.SOURCE, "{}", Optional.of("payment-service"), Optional.of("revision-42"),
+                new SemanticResultJsonWriter().write(result.response()), true);
+        new ToolResultEnvelopeFactory().validate(execution);
+        fixture.server().verify();
     }
 
     @Test
