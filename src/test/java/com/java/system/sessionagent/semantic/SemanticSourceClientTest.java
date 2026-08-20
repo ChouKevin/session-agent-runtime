@@ -145,6 +145,25 @@ class SemanticSourceClientTest {
         otherConflictFixture.server().verify();
     }
 
+    @Test
+    void classifies_a_provider_rejected_source_request_as_correctable_input() {
+        ClientFixture fixture = fixture();
+        fixture.server().expect(once(), requestTo("https://semantic.test/v1/discovery/source-segment"))
+                .andExpect(method(POST))
+                .andRespond(withStatus(HttpStatus.BAD_REQUEST).contentType(MediaType.APPLICATION_JSON).body("""
+                        {"errorCode":"REQUEST_INVALID","message":"request body is invalid","repoId":null,
+                        "expectedRevision":null,"currentRevision":null,"target":null,"candidates":[],
+                        "requestId":"request-1"}
+                        """));
+
+        SemanticFailure failure = assertThrows(SemanticFailure.class,
+                () -> fixture.client().getSourceSegment(
+                        new GetSourceSegmentInput("payment-service", location(), null)));
+
+        assertEquals(SemanticFailure.Kind.INVALID_INPUT, failure.kind());
+        fixture.server().verify();
+    }
+
     @TestFactory
     Stream<DynamicTest> uses_the_provider_wire_contract_for_every_source_operation() {
         MethodTarget target = target();

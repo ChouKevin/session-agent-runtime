@@ -403,6 +403,10 @@ public final class SemanticSourceClient {
                 .filter(code -> code.endsWith("_NOT_FOUND")).isPresent()) {
             return SemanticFailure.invalidInput();
         }
+        if (statusCode.value() == 400 && error.map(ProviderDtos.ApiErrorResponse::errorCode)
+                .filter("REQUEST_INVALID"::equals).isPresent()) {
+            return SemanticFailure.invalidInput();
+        }
         if (statusCode.value() == 401 || statusCode.value() == 403) { return SemanticFailure.forbidden(); }
         if (statusCode.value() == 429 || statusCode.value() == 503) { return SemanticFailure.transientFailure(retryAfter(exception.getResponseHeaders()), exception); }
         if (statusCode.value() == 409 && isRevisionMismatch(exception, repositoryId, revision)) { return SemanticFailure.revisionChanged(); }
