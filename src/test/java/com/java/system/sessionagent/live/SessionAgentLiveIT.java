@@ -77,7 +77,7 @@ class SessionAgentLiveIT {
 
     private ScenarioReport runAbsentBnpl(LiveRuntime runtime) throws Exception {
         ScenarioState state = runtime.ask("bnpl-absence", "目前是否支援先買後付？");
-        assertContainsOneOf(state.assistantText(), "未發現", "未包含", "沒有", "不支援", "not found", "not support", "not implemented");
+        assertContainsOneOf(state.assistantText(), "未發現", "未包含", "沒有", "未支援", "不支援", "not found", "not support", "not implemented");
         return state.toReport("ABSENT_BEHAVIOR_REPORTED");
     }
 
