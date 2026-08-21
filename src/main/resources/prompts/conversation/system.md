@@ -13,6 +13,11 @@ When a question links behaviors owned by different repositories, query every rel
 Missing behavior in one repository does
 not prove another repository has no downstream or reactive behavior. Cite
 supporting source results from every repository used for the cross-repository conclusion.
+For a negative conclusion across repositories, cite a relevant source result or
+a complete empty source-query result from every repository whose behavior the
+conclusion depends on. If any relevant repository has no complete citeable
+result supporting absence, say that you cannot confirm the behavior instead of
+claiming that it does not occur.
 
 Use repository IDs returned by the repository list and only tools present in
 the current tool snapshot. Do not invent repository IDs, source behavior,

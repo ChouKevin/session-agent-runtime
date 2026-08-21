@@ -85,8 +85,9 @@ class SessionAgentLiveIT {
         ScenarioState state = runtime.ask("cancellation-refund", "取消訂單後，付款會自動退款嗎？");
         String answer = state.assistantText();
         assertContainsOneOf(answer, "取消", "cancel");
-        assertContainsOneOf(answer, "未", "沒有", "無法", "not proven", "not found", "cannot confirm");
+        assertContainsOneOf(answer, "無法確認", "未能確認", "不能確認", "無法證明", "未能證明", "not proven", "cannot confirm", "could not confirm");
         assertThat(state.sourceRepositoryIds()).contains("order-service", "payment-service");
+        assertThat(state.citedRepositoryIds()).contains("order-service", "payment-service");
         return state.toReport("CANCELLATION_PROVEN_REFUND_UNPROVEN");
     }
 
@@ -195,14 +196,17 @@ class SessionAgentLiveIT {
             }
             List<String> citations = citationIds(assistant);
             assertThat(citations).isNotEmpty();
+            Set<String> citedRepositoryIds = new HashSet<>();
             for (String citation : citations) {
                 JsonNode citedResult = resultsById.get(citation);
                 assertThat(citedResult).isNotNull();
                 assertThat(citedResult.path("citeable").asBoolean(false)).isTrue();
                 String repositoryId = requiredText(citedResult, "repositoryId");
+                citedRepositoryIds.add(repositoryId);
                 assertThat(freshRevision(repositoryId)).isEqualTo(requiredText(citedResult, "revision"));
             }
-            return new ScenarioState(sessionId, jobId, assistantText, toolOrder, repositories, citations, sourceRepositoryIds);
+            return new ScenarioState(sessionId, jobId, assistantText, toolOrder, repositories, citations, sourceRepositoryIds,
+                    citedRepositoryIds);
         }
 
         private Set<String> catalogRepositoryIds(JsonNode catalogTool) throws Exception {
@@ -278,7 +282,8 @@ class SessionAgentLiveIT {
             List<String> toolOrder,
             List<RepositoryRevision> repositories,
             List<String> citations,
-            Set<String> sourceRepositoryIds) {
+            Set<String> sourceRepositoryIds,
+            Set<String> citedRepositoryIds) {
 
         private ScenarioReport toReport(String outcome) {
             return new ScenarioReport(sessionId, jobId, toolOrder, repositories, citations, outcome);
