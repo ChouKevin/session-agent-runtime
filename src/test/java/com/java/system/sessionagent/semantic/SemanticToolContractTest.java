@@ -6,6 +6,7 @@ import com.java.system.sessionagent.semantic.http.SemanticSourceClient;
 import com.java.system.sessionagent.tool.application.DirectToolRegistry;
 import com.java.system.sessionagent.tool.application.ToolRegistration;
 import com.java.system.sessionagent.tool.application.ToolExecutionFailure;
+import com.java.system.sessionagent.tool.domain.ToolKind;
 import com.java.system.sessionagent.tool.domain.ToolName;
 import org.junit.jupiter.api.Test;
 import org.springframework.ai.google.genai.schema.JsonSchemaConverter;
@@ -62,6 +63,28 @@ class SemanticToolContractTest {
                 .findFirst()
                 .orElseThrow();
         assertTrue(sourceSegment.definition().description().contains("exact location returned by a prior source result"));
+    }
+
+    @Test
+    void source_tool_descriptions_explain_when_each_semantic_operation_applies() {
+        SemanticToolProvider provider = sourceEnabledProvider();
+        List<String> descriptions = provider.registrations().stream()
+                .filter(registration -> registration.definition().kind() == ToolKind.SOURCE)
+                .map(registration -> registration.definition().description())
+                .toList();
+
+        assertEquals(15, descriptions.size());
+        assertTrue(descriptions.stream().allMatch(description -> !description.isBlank()));
+        assertEquals(descriptions.size(), descriptions.stream().distinct().count());
+        assertTrue(descriptionFor(provider, "codebase_discover_type_members").contains("Java type target"));
+        assertTrue(descriptionFor(provider, "codebase_discover_type_members").contains("exact method targets"));
+        assertTrue(descriptionFor(provider, "codebase_get_method_source").contains("complete method target"));
+        assertTrue(descriptionFor(provider, "codebase_get_method_source").contains("type identity alone is invalid"));
+        assertTrue(descriptionFor(provider, "codebase_discover_method_implementations").contains("source-defined implementations"));
+        assertTrue(descriptionFor(provider, "codebase_discover_method_implementations").contains("resolution status"));
+        assertTrue(descriptionFor(provider, "codebase_discover_event_listeners").contains("fully qualified Java event type"));
+        assertTrue(descriptionFor(provider, "codebase_discover_concepts").contains("one to four related terms"));
+        assertTrue(descriptionFor(provider, "codebase_discover_concepts").contains("does not search method bodies"));
     }
 
     @Test
@@ -245,5 +268,19 @@ class SemanticToolContractTest {
                 .orElseThrow()
                 .definition()
                 .inputSchema();
+    }
+
+    private static String descriptionFor(SemanticToolProvider provider, String toolName) {
+        return provider.registrations().stream()
+                .filter(registration -> registration.definition().name().value().equals(toolName))
+                .map(registration -> registration.definition().description())
+                .findFirst()
+                .orElseThrow();
+    }
+
+    private static SemanticToolProvider sourceEnabledProvider() {
+        RestClient restClient = RestClient.create();
+        return new SemanticToolProvider(
+                List::of, new SemanticSourceClient(restClient, new SemanticRepositoryClient(restClient)));
     }
 }
