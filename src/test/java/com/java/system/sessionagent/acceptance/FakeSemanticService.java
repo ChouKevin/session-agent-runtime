@@ -114,7 +114,13 @@ final class FakeSemanticService implements AutoCloseable {
                 ? "Payment methods include credit card, bank transfer, and wallet; fee formula is loaded from JSON settings."
                 : "Order cancellation is implemented before payment refund handling.";
         return """
-                {"repoId":"%s","analyzedRevision":"%s","entryPoints":[{"className":"ConversationFixture","packageName":"com.example","packagePath":"com/example","description":"%s","basePaths":[],"methods":[]}]}
+                {"repoId":"%s","analyzedRevision":"%s","entryPoints":[{
+                  "sourceType":{
+                    "javaType":{"packageName":"com.example","className":"ConversationFixture"},
+                    "sourceFile":"src/main/java/com/example/ConversationFixture.java"
+                  },
+                  "description":"%s","basePaths":[],"methods":[]
+                }]}
                 """.formatted(repositoryId, revision, description);
     }
 

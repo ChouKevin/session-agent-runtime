@@ -15,6 +15,7 @@ import com.java.system.sessionagent.semantic.tool.input.DiscoverConceptsInput;
 import com.java.system.sessionagent.semantic.tool.input.DiscoverEventListenersInput;
 import com.java.system.sessionagent.semantic.tool.input.DiscoverMethodImplementationsInput;
 import com.java.system.sessionagent.semantic.tool.input.DiscoverTypeMembersInput;
+import com.java.system.sessionagent.semantic.tool.input.EntryPointType;
 import com.java.system.sessionagent.semantic.tool.input.FindInternalReferencesInput;
 import com.java.system.sessionagent.semantic.tool.input.GetEvidenceSourceInput;
 import com.java.system.sessionagent.semantic.tool.input.GetMethodSourceInput;
@@ -284,6 +285,76 @@ class SemanticSourceClientTest {
     }
 
     @Test
+    void decodes_the_current_semantic_entry_point_wire_shape() {
+        ClientFixture fixture = fixture();
+        fixture.server().expect(once(), requestTo(
+                        "https://semantic.test/v1/repositories/payment-service/entry-points?expectedRevision=revision-42&types=API"))
+                .andExpect(method(GET))
+                .andRespond(withSuccess("""
+                        {
+                          "repoId":"payment-service",
+                          "analyzedRevision":"revision-42",
+                          "entryPoints":[{
+                            "sourceType":{
+                              "javaType":{"packageName":"com.example.payment","className":"PaymentQueryController"},
+                              "sourceFile":"src/main/java/com/example/payment/PaymentQueryController.java"
+                            },
+                            "description":"",
+                            "basePaths":["/payments"],
+                            "methods":[{
+                              "name":"paymentMethods",
+                              "description":"",
+                              "type":"API",
+                              "apiUrl":"/payments/methods",
+                              "httpMethods":["GET"],
+                              "swaggerDescriptions":[],
+                              "analysisTarget":{
+                                "status":"RESOLVED",
+                                "target":{
+                                  "sourceType":{
+                                    "javaType":{"packageName":"com.example.payment","className":"PaymentQueryController"},
+                                    "sourceFile":"src/main/java/com/example/payment/PaymentQueryController.java"
+                                  },
+                                  "methodName":"paymentMethods",
+                                  "parameterTypes":[]
+                                },
+                                "candidates":[],
+                                "reasonCode":"",
+                                "availableFollowUps":[{
+                                  "operation":"GET_METHOD_SOURCE",
+                                  "api":{"method":"POST","path":"/v1/discovery/method-source","operationId":"getMethodSource"},
+                                  "request":{
+                                    "repoId":"payment-service",
+                                    "expectedRevision":"revision-42",
+                                    "target":{
+                                      "sourceType":{
+                                        "javaType":{"packageName":"com.example.payment","className":"PaymentQueryController"},
+                                        "sourceFile":"src/main/java/com/example/payment/PaymentQueryController.java"
+                                      },
+                                      "methodName":"paymentMethods",
+                                      "parameterTypes":[]
+                                    }
+                                  }
+                                }]
+                              }
+                            }]
+                          }]
+                        }
+                        """, MediaType.APPLICATION_JSON));
+
+        SemanticSourceClient.SourceResult<ProviderDtos.EntryPointsResponse> result = fixture.client()
+                .listEntryPoints(new ListEntryPointsInput("payment-service", EntryPointType.API));
+
+        ProviderDtos.EntryPointClassResponse entryPoint = result.response().entryPoints().getFirst();
+        assertEquals("PaymentQueryController", entryPoint.sourceType().javaType().className());
+        assertEquals("", entryPoint.description());
+        assertEquals("paymentMethods", entryPoint.methods().getFirst().name());
+        assertEquals("GET_METHOD_SOURCE", entryPoint.methods().getFirst().analysisTarget()
+                .availableFollowUps().getFirst().operation());
+        fixture.server().verify();
+    }
+
+    @Test
     void injects_only_the_current_revision_into_a_typed_route_request() {
         RestClient.Builder builder = RestClient.builder().baseUrl("https://semantic.test");
         MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
@@ -319,7 +390,9 @@ class SemanticSourceClientTest {
                         """, MediaType.APPLICATION_JSON));
         server.expect(once(), requestTo("https://semantic.test/v1/repositories/payment-service/entry-points?expectedRevision=revision-42"))
                 .andRespond(withSuccess("""
-                        {"repoId":"payment-service","analyzedRevision":"revision-42","entryPoints":[{"className":"Payments","packageName":"com.example","packagePath":"src","description":"entry","basePaths":[],"methods":[],"unrecognized":"must-fail"}]}
+                        {"repoId":"payment-service","analyzedRevision":"revision-42","entryPoints":[{
+                        "sourceType":{"javaType":{"packageName":"com.example","className":"Payments"},"sourceFile":"src/Payments.java"},
+                        "description":"entry","basePaths":[],"methods":[],"unrecognized":"must-fail"}]}
                         """, MediaType.APPLICATION_JSON));
 
         SemanticFailure failure = assertThrows(SemanticFailure.class,
@@ -331,19 +404,20 @@ class SemanticSourceClientTest {
 
     @Test
     void rejects_missing_or_blank_required_provider_scalars_before_a_tool_result_is_created() {
-        ClientFixture missingClassName = fixture();
-        missingClassName.server().expect(once(), requestTo("https://semantic.test/v1/repositories/payment-service/entry-points?expectedRevision=revision-42"))
+        ClientFixture missingSourceType = fixture();
+        missingSourceType.server().expect(once(), requestTo("https://semantic.test/v1/repositories/payment-service/entry-points?expectedRevision=revision-42"))
                 .andRespond(withSuccess("""
-                        {"repoId":"payment-service","analyzedRevision":"revision-42","entryPoints":[{"packageName":"com.example","packagePath":"src","description":"entry","basePaths":[],"methods":[]}]}
+                        {"repoId":"payment-service","analyzedRevision":"revision-42","entryPoints":[{
+                        "description":"entry","basePaths":[],"methods":[]}]}
                         """, MediaType.APPLICATION_JSON));
 
-        assertInvalidResponse(() -> missingClassName.client().listEntryPoints(new ListEntryPointsInput("payment-service", null)));
-        missingClassName.server().verify();
+        assertInvalidResponse(() -> missingSourceType.client().listEntryPoints(new ListEntryPointsInput("payment-service", null)));
+        missingSourceType.server().verify();
 
         ClientFixture blankRouteScalar = fixture();
         blankRouteScalar.server().expect(once(), requestTo("https://semantic.test/v1/api-routes/lookup"))
                 .andRespond(withSuccess("""
-                        {"candidates":[{"repoId":"payment-service","analyzedRevision":"revision-42","httpMethod":" ","routeTemplate":"/payments","packageName":"com.example","className":"Payments","methodName":"pay","analysisTarget":{"status":"RESOLVED","target":{"sourceType":{"javaType":{"packageName":"com.example","className":"Payments"},"sourceFile":"src/Payments.java"},"methodName":"pay","parameterTypes":[]},"candidates":[],"reasonCode":"OK"},"matchReasons":[]}],"observations":[]}
+                        {"candidates":[{"repoId":"payment-service","analyzedRevision":"revision-42","httpMethod":" ","routeTemplate":"/payments","packageName":"com.example","className":"Payments","methodName":"pay","analysisTarget":{"status":"RESOLVED","target":{"sourceType":{"javaType":{"packageName":"com.example","className":"Payments"},"sourceFile":"src/Payments.java"},"methodName":"pay","parameterTypes":[]},"candidates":[],"reasonCode":"OK","availableFollowUps":[]},"matchReasons":[]}],"observations":[]}
                         """, MediaType.APPLICATION_JSON));
 
         assertInvalidResponse(() -> blankRouteScalar.client().lookupApiRoute(

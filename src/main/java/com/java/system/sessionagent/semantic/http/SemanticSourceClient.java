@@ -235,10 +235,7 @@ public final class SemanticSourceClient {
     }
 
     private static void validatePayload(Object payload) {
-        if (payload instanceof String value) {
-            if (!org.springframework.util.StringUtils.hasText(value)) {
-                throw SemanticFailure.invalidResponse();
-            }
+        if (payload instanceof String) {
             return;
         }
         if (payload instanceof List<?> values) {

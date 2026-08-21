@@ -39,14 +39,12 @@ public final class ProviderDtos {
         }
     }
 
-    public record EntryPointClassResponse(String className, String packageName, String packagePath,
-                                          String description, List<String> basePaths,
+    public record EntryPointClassResponse(SourceTypeIdentityPayload sourceType, String description,
+                                          List<String> basePaths,
                                           List<EntryPointMethodResponse> methods) {
         public EntryPointClassResponse {
-            className = requiredText(className, "className");
-            packageName = requiredText(packageName, "packageName");
-            packagePath = requiredText(packagePath, "packagePath");
-            description = requiredText(description, "description");
+            sourceType = Objects.requireNonNull(sourceType, "sourceType is required");
+            description = Objects.requireNonNull(description, "description is required");
             basePaths = List.copyOf(Objects.requireNonNull(basePaths, "basePaths are required"));
             methods = List.copyOf(Objects.requireNonNull(methods, "methods are required"));
         }
@@ -77,7 +75,7 @@ public final class ProviderDtos {
             implements EntryPointMethodResponse {
         public ApiEntryPointMethodResponse {
             name = requiredText(name, "name");
-            description = requiredText(description, "description");
+            description = Objects.requireNonNull(description, "description is required");
             type = requiredKind(type, "API");
             apiUrl = requiredText(apiUrl, "apiUrl");
             httpMethods = List.copyOf(Objects.requireNonNull(httpMethods, "httpMethods are required"));
@@ -92,7 +90,7 @@ public final class ProviderDtos {
             implements EntryPointMethodResponse {
         public MqEntryPointMethodResponse {
             name = requiredText(name, "name");
-            description = requiredText(description, "description");
+            description = Objects.requireNonNull(description, "description is required");
             type = requiredKind(type, "MQ");
             broker = requiredText(broker, "broker");
             destinations = List.copyOf(Objects.requireNonNull(destinations, "destinations are required"));
@@ -106,7 +104,7 @@ public final class ProviderDtos {
             implements EntryPointMethodResponse {
         public ScheduleEntryPointMethodResponse {
             name = requiredText(name, "name");
-            description = requiredText(description, "description");
+            description = Objects.requireNonNull(description, "description is required");
             type = requiredKind(type, "SCHEDULE");
             triggerKind = requiredText(triggerKind, "triggerKind");
             triggerValue = requiredText(triggerValue, "triggerValue");
@@ -158,7 +156,15 @@ public final class ProviderDtos {
     }
 
     public record MethodTargetResolutionResponse(String status, MethodTargetPayload target,
-                                                 List<MethodTargetPayload> candidates, String reasonCode) {
+                                                 List<MethodTargetPayload> candidates, String reasonCode,
+                                                 List<AvailableFollowUp> availableFollowUps) {
+        public MethodTargetResolutionResponse {
+            status = requiredText(status, "status");
+            candidates = List.copyOf(Objects.requireNonNull(candidates, "candidates are required"));
+            reasonCode = Objects.requireNonNull(reasonCode, "reasonCode is required");
+            availableFollowUps = List.copyOf(Objects.requireNonNull(
+                    availableFollowUps, "availableFollowUps are required"));
+        }
     }
 
     public record OutgoingCallGraphResponse(String status, String analyzedRevision, String rootNodeId,
