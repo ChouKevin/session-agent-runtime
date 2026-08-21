@@ -77,7 +77,9 @@ class SemanticToolContractTest {
         assertTrue(descriptions.stream().allMatch(description -> !description.isBlank()));
         assertEquals(descriptions.size(), descriptions.stream().distinct().count());
         assertTrue(descriptionFor(provider, "codebase_discover_type_members").contains("Java type target"));
-        assertTrue(descriptionFor(provider, "codebase_discover_type_members").contains("exact method targets"));
+        assertTrue(descriptionFor(provider, "codebase_discover_type_members")
+                .contains("when METHOD members are requested or returned"));
+        assertTrue(descriptionFor(provider, "codebase_discover_type_members").contains("complete method targets"));
         assertTrue(descriptionFor(provider, "codebase_get_method_source").contains("complete method target"));
         assertTrue(descriptionFor(provider, "codebase_get_method_source").contains("type identity alone is invalid"));
         assertTrue(descriptionFor(provider, "codebase_discover_method_implementations").contains("source-defined implementations"));

@@ -126,7 +126,7 @@ public final class SemanticToolProvider {
                         "Discover source-defined implementations of one complete method target; inspect resolution status before interpreting empty candidates.",
                         DiscoverMethodImplementationsInput.class, DiscoverMethodImplementationsInput::repositoryId, client::discoverMethodImplementations),
                 source(SemanticToolName.DISCOVER_TYPE_MEMBERS,
-                        "Discover selected members of one Java type target; returns exact method targets for subsequent method tools.",
+                        "Discover selected members of one Java type target and, when METHOD members are requested or returned, supplies complete method targets usable by method-only tools.",
                         DiscoverTypeMembersInput.class, DiscoverTypeMembersInput::repositoryId, client::discoverTypeMembers),
                 source(SemanticToolName.FIND_INTERNAL_REFERENCES,
                         "Find internal references using the exact typed identity copied from a prior result.",
