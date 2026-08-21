@@ -9,6 +9,7 @@ import com.github.victools.jsonschema.generator.SchemaVersion;
 import com.github.victools.jsonschema.module.jackson.JacksonModule;
 import com.github.victools.jsonschema.module.jackson.JacksonOption;
 import com.github.victools.jsonschema.module.jakarta.validation.JakartaValidationModule;
+import com.github.victools.jsonschema.module.jakarta.validation.JakartaValidationOption;
 import org.springframework.util.Assert;
 
 public final class ToolSchemaFactory {
@@ -21,7 +22,7 @@ public final class ToolSchemaFactory {
                 .with(new JacksonModule(
                         JacksonOption.RESPECT_JSONPROPERTY_ORDER,
                         JacksonOption.RESPECT_JSONPROPERTY_REQUIRED))
-                .with(new JakartaValidationModule())
+                .with(new JakartaValidationModule(JakartaValidationOption.INCLUDE_PATTERN_EXPRESSIONS))
                 .without(Option.FLATTENED_OPTIONALS)
                 .with(Option.SIMPLIFIED_OPTIONALS)
                 .with(Option.FORBIDDEN_ADDITIONAL_PROPERTIES_BY_DEFAULT)

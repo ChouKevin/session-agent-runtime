@@ -5,6 +5,7 @@ import com.java.system.sessionagent.tool.json.ToolSchemaFactory;
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.Pattern;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -22,11 +23,12 @@ class ToolSchemaFactoryTest {
         assertTrue(schema.contains("\"required\":[\"repositoryId\"]"));
         assertTrue(schema.contains("\"minimum\":1"));
         assertTrue(schema.contains("\"maximum\":20"));
+        assertTrue(schema.contains("\"pattern\":\"^[a-z]+$\""));
         assertFalse(schema.contains("\"default\":10"));
     }
 
     record SampleInput(
-            @JsonProperty(required = true) @NotBlank String repositoryId,
+            @JsonProperty(required = true) @NotBlank @Pattern(regexp = "^[a-z]+$") String repositoryId,
             @JsonProperty(required = false) @Min(1) @Max(20) Integer limit) {
 
         SampleInput {

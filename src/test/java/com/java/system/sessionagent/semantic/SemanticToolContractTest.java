@@ -21,6 +21,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.springframework.http.HttpMethod.POST;
+import static org.springframework.test.web.client.ExpectedCount.never;
 import static org.springframework.test.web.client.ExpectedCount.once;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.method;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.requestTo;
@@ -93,6 +94,54 @@ class SemanticToolContractTest {
         assertTrue(schema.contains("TOKEN_EXACT"));
         assertTrue(schema.contains("TOKEN_PREFIX"));
         assertFalse(schema.contains("CONTAINS"));
+    }
+
+    @Test
+    void source_tool_schemas_expose_unambiguous_semantic_targets_and_concept_search_intent() {
+        RestClient restClient = RestClient.create();
+        SemanticToolProvider provider = new SemanticToolProvider(
+                List::of, new SemanticSourceClient(restClient, new SemanticRepositoryClient(restClient)));
+
+        String eventListeners = schemaFor(provider, "codebase_discover_event_listeners");
+        String methodSource = schemaFor(provider, "codebase_get_method_source");
+        String typeMembers = schemaFor(provider, "codebase_discover_type_members");
+        String concepts = schemaFor(provider, "codebase_discover_concepts");
+
+        assertTrue(eventListeners.contains("Fully qualified Java event type"));
+        assertTrue(eventListeners.contains("com.example.order.OrderCancelledEvent"));
+        assertTrue(eventListeners.contains("\"pattern\":\"^(?:[^.\\\\s\\\\[\\\\]]+\\\\.)+[^.\\\\s\\\\[\\\\]]+(?:\\\\[\\\\])*$\""));
+        assertTrue(methodSource.contains("Complete method target; a type identity alone is invalid"));
+        assertTrue(methodSource.contains("Exact method name copied from a prior Semantic method target"));
+        assertTrue(methodSource.contains("Ordered fully-qualified parameter type names; use an empty array for a no-argument method"));
+        assertTrue(methodSource.contains("\"required\":[\"methodName\",\"parameterTypes\",\"sourceType\"]"));
+        assertTrue(typeMembers.contains("Java type target, not a method target; copy it from a prior Semantic result"));
+        assertTrue(concepts.contains("One to four related search terms for the same intent; combine synonyms"));
+        assertTrue(concepts.contains("\"minItems\":1"));
+        assertTrue(concepts.contains("\"maxItems\":4"));
+    }
+
+    @Test
+    void rejects_unqualified_event_types_and_incomplete_method_targets_before_semantic_http() {
+        RestClient.Builder builder = RestClient.builder().baseUrl("https://semantic.test");
+        MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+        RestClient restClient = builder.build();
+        SemanticToolProvider provider = new SemanticToolProvider(
+                List::of, new SemanticSourceClient(restClient, new SemanticRepositoryClient(restClient)));
+        DirectToolRegistry registry = new DirectToolRegistry(provider.registrations());
+        server.expect(never(), requestTo("https://semantic.test/v1/repositories/payment-service"));
+
+        ToolExecutionFailure unqualifiedEvent = assertThrows(ToolExecutionFailure.class, () -> registry.execute(
+                registry.snapshot(true), new ToolName("codebase_discover_event_listeners"),
+                "{\"repositoryId\":\"payment-service\",\"eventType\":\"OrderCancelledEvent\"}"));
+        ToolExecutionFailure incompleteTarget = assertThrows(ToolExecutionFailure.class, () -> registry.execute(
+                registry.snapshot(true), new ToolName("codebase_get_method_source"), """
+                        {"repositoryId":"payment-service","target":{"sourceType":{"javaType":
+                        {"packageName":"com.example","className":"Payments"},"sourceFile":"src/Payments.java"}}}
+                        """));
+
+        assertEquals(ToolExecutionFailure.Kind.INVALID_INPUT, unqualifiedEvent.kind());
+        assertEquals(ToolExecutionFailure.Kind.INVALID_INPUT, incompleteTarget.kind());
+        server.verify();
     }
 
     @Test
@@ -187,5 +236,14 @@ class SemanticToolContractTest {
 
         assertEquals(ToolExecutionFailure.Kind.INVALID_INPUT, failure.kind());
         server.verify();
+    }
+
+    private static String schemaFor(SemanticToolProvider provider, String toolName) {
+        return provider.registrations().stream()
+                .filter(registration -> registration.definition().name().value().equals(toolName))
+                .findFirst()
+                .orElseThrow()
+                .definition()
+                .inputSchema();
     }
 }

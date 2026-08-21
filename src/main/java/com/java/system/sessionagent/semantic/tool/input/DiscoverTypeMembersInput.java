@@ -1,6 +1,7 @@
 package com.java.system.sessionagent.semantic.tool.input;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.fasterxml.jackson.annotation.JsonPropertyDescription;
 import com.java.system.sessionagent.semantic.dto.MethodTarget;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Max;
@@ -11,7 +12,9 @@ import java.util.List;
 import java.util.Objects;
 
 public record DiscoverTypeMembersInput(@JsonProperty(required = true) @NotBlank @Size(max = 128) String repositoryId,
-                                       @JsonProperty(required = true) @Valid MethodTarget.SourceType sourceType,
+                                       @JsonProperty(required = true)
+                                       @JsonPropertyDescription("Java type target, not a method target; copy it from a prior Semantic result")
+                                       @Valid MethodTarget.SourceType sourceType,
                                        @JsonProperty(required = true) @Size(min = 1) List<MemberKind> memberKinds,
                                        @JsonProperty(required = false) String namePrefix,
                                        @JsonProperty(required = false) @Min(0) Integer offset,

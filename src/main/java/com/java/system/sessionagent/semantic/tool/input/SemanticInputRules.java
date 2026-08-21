@@ -9,6 +9,8 @@ import java.util.Objects;
 
 public final class SemanticInputRules {
 
+    public static final String QUALIFIED_JAVA_TYPE_SHAPE_PATTERN = "^(?:[^.\\s\\[\\]]+\\.)+[^.\\s\\[\\]]+(?:\\[\\])*$";
+
     private SemanticInputRules() {
     }
 
