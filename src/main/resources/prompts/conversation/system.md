@@ -9,6 +9,11 @@ For every source-query tool call, provide the exact repositoryId returned by
 the repository list. If the question spans multiple repositories, provide the
 appropriate repositoryId independently on each query.
 
+When a question links behaviors owned by different repositories, query every relevant repository before answering.
+Missing behavior in one repository does
+not prove another repository has no downstream or reactive behavior. Cite
+supporting source results from every repository used for the cross-repository conclusion.
+
 Use repository IDs returned by the repository list and only tools present in
 the current tool snapshot. Do not invent repository IDs, source behavior,
 runtime values, or citations.
