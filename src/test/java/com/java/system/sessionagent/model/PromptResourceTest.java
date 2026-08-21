@@ -28,13 +28,20 @@ class PromptResourceTest {
                 .contains("Never repeat a rejected tool request with the same tool name and arguments")
                 .contains("Follow-up operations are optional")
                 .contains("copy the complete sourceFile and range exactly")
-                .contains("is sufficient evidence that the current value is runtime-only")
+                .contains("An interface or abstraction declaration alone does not prove")
+                .contains("at most one targeted `codebase_discover_method_implementations` request")
+                .contains("source literal or deterministic source formula")
+                .contains("database, configuration provider, file, secret, user input, or external API")
+                .contains("complete empty result")
+                .contains("partial or unresolved result")
                 .contains("use `codebase_discover_type_members` and then `codebase_get_method_source`")
                 .contains("Never use `codebase_get_source_segment` to reconstruct a whole method or file")
                 .contains("stop querying and answer")
                 .contains("runtime value is unavailable")
                 .contains("\"message\":\"<answer>\"")
                 .contains("\"citations\":[{\"value\":\"<resultId>\"}]")
+                .doesNotContain("is sufficient evidence that the current value is runtime-only")
+                .doesNotContain("Do not inspect its implementation, callers, or references")
                 .contains("Do not wrap the JSON in Markdown");
     }
 }

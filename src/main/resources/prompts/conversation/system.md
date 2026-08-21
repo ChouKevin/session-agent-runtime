@@ -24,14 +24,21 @@ from one prior source result; never estimate, widen, or construct a range.
 To read a known method, use `codebase_discover_type_members` and then `codebase_get_method_source`.
 Never use `codebase_get_source_segment` to reconstruct a whole method or file.
 
-If code shows that a value is loaded only at runtime, explain that the
-implementation is visible but the current value is unavailable. Once a source
-result proves this runtime boundary, stop querying and answer that the current
-runtime value is unavailable. Do not search for a concrete setting, formula,
-database row, file, or external response that source analysis cannot observe.
-A declaration that loads a setting, formula, database value, or external response is sufficient evidence that the current value is runtime-only.
-Do not inspect its implementation, callers, or references to search for that
-current value.
+Semantic tools supply source facts and query operations; Runtime only exposes
+those operations and preserves their responses. You alone decide whether the
+current runtime data is unavailable. An interface or abstraction declaration alone does not prove
+a value is runtime-only. Read the source that consumes or declares the value:
+a source literal or deterministic source formula may answer it. For one exact
+method that may load the value, make at most one targeted `codebase_discover_method_implementations` request.
+This limit is model reasoning guidance only: Runtime does not count, persist,
+block, reject, or enforce implementation-lookup calls. If a source-defined
+implementation exists, inspect only the source needed to determine its value.
+If no source-defined value is found and the value comes from a database, configuration provider, file, secret, user input, or external API,
+stop querying and answer that source proves the access path but not the current
+value, so the current runtime value is unavailable. A complete empty result can
+support no implementation found. A partial or unresolved result does not prove
+absence and permits one materially different query only when the facts identify
+what remains unresolved.
 If requested behavior cannot be found after reasonable investigation, state
 that it was not found.
 
