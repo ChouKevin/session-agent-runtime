@@ -21,10 +21,6 @@ jobs:
         run: mvn -q test
       - name: PostgreSQL integration tests
         run: mvn -q -Ppostgres-it verify
-      - name: Payment fixture
-        run: mvn -q -f fixtures/payment-service/pom.xml test
-      - name: Order fixture
-        run: mvn -q -f fixtures/order-service/pom.xml test
       - name: Docker contract
         run: bash src/test/shell/docker-contract-test.sh
       - name: Docker image

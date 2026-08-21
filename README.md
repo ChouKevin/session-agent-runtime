@@ -18,10 +18,10 @@ mounted.
 
 ## Live acceptance
 
-Live acceptance uses an already-running Semantic Service configured with the
-`payment-service` and `order-service` fixtures. It also requires a Google GenAI
-key in the calling environment. Neither service nor its data is managed by this
-project.
+Live acceptance uses an already-running Semantic Service that publishes stable
+`payment-service` and `order-service` UAT repository contracts. Semantic owns
+and validates those sources; this Runtime neither contains nor mounts their
+source. It also requires a Google GenAI key in the calling environment.
 
 Set these environment inputs in your shell (the empty-value template is at
 [`docker/.env.example`](docker/.env.example)):

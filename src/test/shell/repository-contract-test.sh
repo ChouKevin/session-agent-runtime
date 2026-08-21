@@ -33,8 +33,23 @@ if rg -n --hidden \
     'java-agent-starter|\.runtime/sources|com\.java\.system\.agent' \
     "${runtime_root}/pom.xml" "${runtime_root}/Dockerfile" \
     "${runtime_root}/README.md" "${runtime_root}/src" \
-    "${runtime_root}/docker" "${runtime_root}/fixtures" >/dev/null; then
+    "${runtime_root}/docker" >/dev/null; then
     printf 'standalone repository still references its former parent or old agent\n' >&2
+    exit 1
+fi
+
+if [[ -e "${runtime_root}/fixtures" ]]; then
+    printf 'Runtime must not contain Semantic-owned UAT fixture sources\n' >&2
+    exit 1
+fi
+
+if (
+    cd "${runtime_root}"
+    rg -n 'fixtures/(payment-service|order-service)|FixtureContractTest' \
+        --glob '!src/test/shell/repository-contract-test.sh' \
+        .github src README.md
+) >/dev/null; then
+    printf 'Runtime must not own or directly inspect Semantic UAT fixture sources\n' >&2
     exit 1
 fi
 
@@ -42,8 +57,6 @@ workflow="${runtime_root}/.github/workflows/ci.yml"
 for command in \
     'mvn -q test' \
     'mvn -q -Ppostgres-it verify' \
-    'mvn -q -f fixtures/payment-service/pom.xml test' \
-    'mvn -q -f fixtures/order-service/pom.xml test' \
     'bash src/test/shell/docker-contract-test.sh' \
     'docker build -t session-agent-runtime:ci .'; do
     grep -Fq "${command}" "${workflow}" || {
