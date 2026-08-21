@@ -14,7 +14,7 @@ import java.util.Objects;
 public record DiscoverConceptsInput(
         @JsonProperty(required = true) @NotBlank @Size(max = 128) String repositoryId,
         @JsonProperty(required = true)
-        @JsonPropertyDescription("One to four related search terms for the same intent; combine synonyms")
+        @JsonPropertyDescription("One to four conjunctive terms; every term must match the same concept. Synonyms or alternatives require separate searches; method bodies are not searched")
         @Size(min = 1, max = 4) List<@Valid ConceptTerm> terms,
         @JsonProperty(required = true)
         @JsonPropertyDescription("Structured concept kinds to search; method bodies are not searched")

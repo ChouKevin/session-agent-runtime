@@ -85,8 +85,12 @@ class SemanticToolContractTest {
         assertTrue(descriptionFor(provider, "codebase_discover_method_implementations").contains("source-defined implementations"));
         assertTrue(descriptionFor(provider, "codebase_discover_method_implementations").contains("resolution status"));
         assertTrue(descriptionFor(provider, "codebase_discover_event_listeners").contains("fully qualified Java event type"));
-        assertTrue(descriptionFor(provider, "codebase_discover_concepts").contains("one to four related terms"));
-        assertTrue(descriptionFor(provider, "codebase_discover_concepts").contains("does not search method bodies"));
+        assertTrue(descriptionFor(provider, "codebase_discover_concepts").contains("one to four conjunctive terms"));
+        assertTrue(descriptionFor(provider, "codebase_discover_concepts")
+                .contains("every term must match the same concept"));
+        assertTrue(descriptionFor(provider, "codebase_discover_concepts")
+                .contains("Synonyms or alternatives require separate searches"));
+        assertTrue(descriptionFor(provider, "codebase_discover_concepts").contains("method bodies are not searched"));
     }
 
     @Test
@@ -137,10 +141,12 @@ class SemanticToolContractTest {
         assertTrue(eventListeners.contains("\"pattern\":\"^(?:[^.\\\\s\\\\[\\\\]]+\\\\.)+[^.\\\\s\\\\[\\\\]]+(?:\\\\[\\\\])*$\""));
         assertTrue(methodSource.contains("Complete method target; a type identity alone is invalid"));
         assertTrue(methodSource.contains("Exact method name copied from a prior Semantic method target"));
-        assertTrue(methodSource.contains("Ordered fully-qualified parameter type names; use an empty array for a no-argument method"));
+        assertTrue(methodSource.contains("Ordered parameter type strings copied unchanged from Semantic; fully-qualified "
+                + "reference types, primitives, arrays, and type variables are allowed; use an empty list for a no-argument method"));
         assertTrue(methodSource.contains("\"required\":[\"methodName\",\"parameterTypes\",\"sourceType\"]"));
         assertTrue(typeMembers.contains("Java type target, not a method target; copy it from a prior Semantic result"));
-        assertTrue(concepts.contains("One to four related search terms for the same intent; combine synonyms"));
+        assertTrue(concepts.contains("One to four conjunctive terms; every term must match the same concept. "
+                + "Synonyms or alternatives require separate searches; method bodies are not searched"));
         assertTrue(concepts.contains("\"minItems\":1"));
         assertTrue(concepts.contains("\"maxItems\":4"));
     }

@@ -114,7 +114,7 @@ public final class SemanticToolProvider {
                         "Find callers of one complete method target in one repository at depth 1 or 2.",
                         IncomingCallGraphInput.class, IncomingCallGraphInput::repositoryId, client::incomingCallGraph),
                 source(SemanticToolName.DISCOVER_CONCEPTS,
-                        "Discover codebase concepts from one to four related terms in one request; does not search method bodies.",
+                        "Discover codebase concepts from one to four conjunctive terms; every term must match the same concept. Synonyms or alternatives require separate searches; method bodies are not searched.",
                         DiscoverConceptsInput.class, DiscoverConceptsInput::repositoryId, client::discoverConcepts),
                 source(SemanticToolName.RESOLVE_CONCEPT,
                         "Resolve the exact concept identity copied from a prior Semantic result.",

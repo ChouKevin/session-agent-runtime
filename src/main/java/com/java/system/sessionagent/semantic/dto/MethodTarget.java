@@ -20,7 +20,7 @@ public record MethodTarget(
         @JsonPropertyDescription("Exact method name copied from a prior Semantic method target")
         @NotNull @NotBlank String methodName,
         @JsonProperty(required = true)
-        @JsonPropertyDescription("Ordered fully-qualified parameter type names; use an empty array for a no-argument method")
+        @JsonPropertyDescription("Ordered parameter type strings copied unchanged from Semantic; fully-qualified reference types, primitives, arrays, and type variables are allowed; use an empty list for a no-argument method")
         @NotNull List<@NotBlank String> parameterTypes) {
 
     public MethodTarget {
