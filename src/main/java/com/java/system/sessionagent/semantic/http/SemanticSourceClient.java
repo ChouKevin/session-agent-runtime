@@ -98,24 +98,45 @@ public final class SemanticSourceClient {
         HttpStatusCode status = exception.getStatusCode();
         if (status.value() == 409) { return stale(exception, repositoryId, revision); }
         if (status.value() == 401 || status.value() == 403) { return SemanticFailure.forbidden(); }
-        if (status.value() == 429 || status.value() == 503) { return SemanticFailure.semanticIndexUnavailable(retryAfter(exception.getResponseHeaders()), exception); }
-        return code(exception.getResponseBodyAsString());
+        Optional<SemanticFailure> typedFailure = code(exception.getResponseBodyAsString(),
+                retryAfter(exception.getResponseHeaders()), exception);
+        if (typedFailure.isPresent()) { return typedFailure.orElseThrow(); }
+        if (status.value() == 429 || status.value() == 503) {
+            return SemanticFailure.semanticIndexUnavailable(retryAfter(exception.getResponseHeaders()), exception);
+        }
+        return SemanticFailure.invalidResponse();
     }
     private static SemanticFailure stale(RestClientResponseException exception, String repositoryId, RepositoryRevision revision) {
         try {
             RevisionOutdatedResponse response = MAPPER.readValue(exception.getResponseBodyAsString(), RevisionOutdatedResponse.class);
-            if (!"REVISION_OUTDATED".equals(response.code()) || !repositoryId.equals(response.repositoryId()) || !revision.value().equals(response.requestedRevision()) || !StringUtils.hasText(response.currentRevision()) || !StringUtils.hasText(response.retryGuidance())) { return SemanticFailure.invalidResponse(); }
+            if (!"REVISION_OUTDATED".equals(response.code()) || !repositoryId.equals(response.repositoryId())
+                    || !revision.value().equals(response.requestedRevision())
+                    || !StringUtils.hasText(response.currentRevision())
+                    || revision.value().equals(response.currentRevision())
+                    || !StringUtils.hasText(response.retryGuidance())) {
+                return SemanticFailure.invalidResponse();
+            }
             return SemanticFailure.revisionOutdated(response.repositoryId(), response.requestedRevision(), response.currentRevision(), response.retryGuidance());
         } catch (RuntimeException exception2) { return SemanticFailure.invalidResponse(); }
     }
-    private static SemanticFailure code(String body) {
+    private static Optional<SemanticFailure> code(
+            String body,
+            Optional<Duration> retryAfter,
+            RestClientResponseException cause) {
         try {
             String value = MAPPER.readTree(body).required("code").textValue();
-            return switch (value) {
-                case "REPOSITORY_NOT_FOUND" -> SemanticFailure.repositoryNotFound(); case "INDEX_NOT_READY" -> SemanticFailure.indexNotReady(); case "INVALID_ARGUMENT" -> SemanticFailure.invalidArgument(); case "INDEX_CONTRACT_MISMATCH" -> SemanticFailure.indexContractMismatch(); case "CODE_FACT_NOT_FOUND" -> SemanticFailure.codeFactNotFound(); case "CODE_FACT_KIND_UNSUPPORTED" -> SemanticFailure.codeFactKindUnsupported(); case "INVALID_QUERY" -> SemanticFailure.invalidQuery(); case "SEMANTIC_INDEX_UNAVAILABLE" -> SemanticFailure.semanticIndexUnavailable(Optional.empty(), null); // cs-allow API cause is absent
-                default -> SemanticFailure.invalidResponse();
-            };
-        } catch (RuntimeException exception) { return SemanticFailure.invalidResponse(); }
+            return Optional.ofNullable(switch (value) {
+                case "REPOSITORY_NOT_FOUND" -> SemanticFailure.repositoryNotFound();
+                case "INDEX_NOT_READY" -> SemanticFailure.indexNotReady();
+                case "INVALID_ARGUMENT", "REQUEST_INVALID" -> SemanticFailure.invalidArgument();
+                case "INDEX_CONTRACT_MISMATCH" -> SemanticFailure.indexContractMismatch();
+                case "CODE_FACT_NOT_FOUND" -> SemanticFailure.codeFactNotFound();
+                case "CODE_FACT_KIND_UNSUPPORTED" -> SemanticFailure.codeFactKindUnsupported();
+                case "INVALID_QUERY" -> SemanticFailure.invalidQuery();
+                case "SEMANTIC_INDEX_UNAVAILABLE" -> SemanticFailure.semanticIndexUnavailable(retryAfter, cause);
+                default -> null; // cs-allow unknown provider codes are handled by HTTP status
+            });
+        } catch (RuntimeException exception) { return Optional.empty(); }
     }
     private static Optional<Duration> retryAfter(HttpHeaders headers) { return Optional.ofNullable(headers).map(value -> value.getFirst(HttpHeaders.RETRY_AFTER)).filter(value -> StringUtils.hasText(value) && value.chars().allMatch(character -> character >= '0' && character <= '9')).flatMap(SemanticSourceClient::duration); }
     private static Optional<Duration> duration(String value) { try { return Optional.of(Duration.ofSeconds(new BigInteger(value).min(MAX_RETRY_AFTER_SECONDS).longValueExact())); } catch (NumberFormatException | ArithmeticException exception) { return Optional.empty(); } }

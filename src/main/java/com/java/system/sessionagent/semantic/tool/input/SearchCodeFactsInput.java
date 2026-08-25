@@ -15,9 +15,15 @@ public record SearchCodeFactsInput(
         @NotBlank @Size(max = 128) String repositoryId,
         @JsonProperty(required = true) @JsonPropertyDescription("Exact revision paired with repositoryId in visible prior evidence; never invent or normalize it")
         @NotBlank @Size(max = 128) String revision,
-        @JsonProperty(required = true) @NotBlank @Size(min = 2, max = 128) String query,
-        @JsonProperty(required = false) List<CodeFactKind> kinds,
+        @JsonProperty(required = true)
+        @JsonPropertyDescription("Code or business search terms from the user question; use code-derived names when known")
+        @NotBlank @Size(min = 2, max = 128) String query,
+        @JsonProperty(required = false)
+        @JsonPropertyDescription("Optional exact CodeFactKind filters; omit unknown kinds rather than guessing")
+        List<CodeFactKind> kinds,
         @JsonProperty(required = false) @JsonPropertyDescription("Omit packagePrefix when unknown rather than guessing") String packagePrefix,
-        @JsonProperty(required = false) @Min(0) Integer offset,
-        @JsonProperty(required = false) @Min(1) @Max(100) Integer limit) {
+        @JsonProperty(required = false) @JsonPropertyDescription(SemanticInputDescriptions.OFFSET)
+        @Min(0) Integer offset,
+        @JsonProperty(required = false) @JsonPropertyDescription(SemanticInputDescriptions.LIMIT)
+        @Min(1) @Max(100) Integer limit) {
 }

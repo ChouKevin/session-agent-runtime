@@ -2,7 +2,6 @@ package com.java.system.sessionagent.bootstrap;
 
 import com.java.system.sessionagent.conversation.application.MessageJobRetryPolicy;
 import com.java.system.sessionagent.semantic.SemanticFailure;
-import com.java.system.sessionagent.semantic.dto.MethodTarget;
 import com.java.system.sessionagent.semantic.http.SemanticRepositoryClient;
 import com.java.system.sessionagent.semantic.http.SemanticSourceClient;
 import com.java.system.sessionagent.semantic.tool.input.IncomingCallGraphInput;
@@ -11,7 +10,6 @@ import org.junit.jupiter.api.Test;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.web.client.RestClient;
 
-import com.java.system.sessionagent.semantic.domain.RepositoryId;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 
@@ -24,9 +22,6 @@ import java.util.List;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.doThrow;
 
 class RuntimeConfigurationTest {
 

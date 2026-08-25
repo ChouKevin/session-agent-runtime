@@ -7,15 +7,25 @@ import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
-import java.util.Objects;
 
-public record DiscoverEventListenersInput(@JsonProperty(required = true) @NotBlank @Size(max = 128) String repositoryId,
-                                          @JsonProperty(required = true) @NotBlank @Size(max = 128) String revision,
+public record DiscoverEventListenersInput(
                                           @JsonProperty(required = true)
-                                          @JsonPropertyDescription("Fully qualified Java event type, for example com.example.order.OrderCancelledEvent")
+                                          @JsonPropertyDescription(SemanticInputDescriptions.REPOSITORY_ID)
+                                          @NotBlank @Size(max = 128) String repositoryId,
+                                          @JsonProperty(required = true)
+                                          @JsonPropertyDescription(SemanticInputDescriptions.REVISION)
+                                          @NotBlank @Size(max = 128) String revision,
+                                          @JsonProperty(required = true)
+                                          @JsonPropertyDescription("Exact fully qualified Java event type copied from prior Semantic evidence")
                                           @NotBlank @Size(max = 1_024)
                                           @Pattern(regexp = SemanticInputRules.QUALIFIED_JAVA_TYPE_SHAPE_PATTERN) String eventType,
-                                          @JsonProperty(required = false) @Min(0) Integer offset,
-                                          @JsonProperty(required = false) @Min(1) @Max(100) Integer limit) {
-    public DiscoverEventListenersInput { eventType = SemanticInputRules.text(eventType, "Event type"); offset = Objects.requireNonNullElse(offset, 0); limit = Objects.requireNonNullElse(limit, 50); }
+                                          @JsonProperty(required = false)
+                                          @JsonPropertyDescription(SemanticInputDescriptions.OFFSET)
+                                          @Min(0) Integer offset,
+                                          @JsonProperty(required = false)
+                                          @JsonPropertyDescription(SemanticInputDescriptions.LIMIT)
+                                          @Min(1) @Max(100) Integer limit) {
+    public DiscoverEventListenersInput {
+        eventType = SemanticInputRules.text(eventType, "Event type");
+    }
 }
