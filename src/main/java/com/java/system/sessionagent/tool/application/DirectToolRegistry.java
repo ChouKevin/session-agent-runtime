@@ -32,11 +32,8 @@ public final class DirectToolRegistry {
         ensureDistinctToolNames(this.registrations);
     }
 
-    public ToolSnapshot snapshot(boolean includeSourceTools) {
-        List<ToolRegistration<?>> issuedRegistrations = registrations.stream()
-                .filter(registration -> includeSourceTools || registration.definition().kind() == ToolKind.CATALOG)
-                .toList();
-        return new ToolSnapshot(issuedRegistrations);
+    public ToolSnapshot snapshot() {
+        return new ToolSnapshot(registrations);
     }
 
     public ToolExecution execute(ToolSnapshot snapshot, ToolName name, String rawArguments) {

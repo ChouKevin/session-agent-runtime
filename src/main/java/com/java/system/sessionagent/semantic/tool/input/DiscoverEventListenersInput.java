@@ -10,6 +10,7 @@ import jakarta.validation.constraints.Size;
 import java.util.Objects;
 
 public record DiscoverEventListenersInput(@JsonProperty(required = true) @NotBlank @Size(max = 128) String repositoryId,
+                                          @JsonProperty(required = true) @NotBlank @Size(max = 128) String revision,
                                           @JsonProperty(required = true)
                                           @JsonPropertyDescription("Fully qualified Java event type, for example com.example.order.OrderCancelledEvent")
                                           @NotBlank @Size(max = 1_024)

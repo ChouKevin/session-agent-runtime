@@ -2,6 +2,7 @@ package com.java.system.sessionagent.semantic;
 
 import com.java.system.sessionagent.semantic.domain.RepositoryId;
 import com.java.system.sessionagent.semantic.domain.RepositorySummary;
+import com.java.system.sessionagent.semantic.domain.RepositoryRevision;
 import com.java.system.sessionagent.semantic.tool.ListRepositoriesInput;
 import com.java.system.sessionagent.semantic.tool.SemanticToolProvider;
 import com.java.system.sessionagent.tool.application.DirectToolRegistry;
@@ -38,12 +39,12 @@ class ListRepositoriesToolTest {
     @Test
     void registers_the_closed_catalog_tool_and_returns_uncited_unscoped_normalized_json() {
         SemanticToolProvider provider = new SemanticToolProvider(() -> List.of(
-                new RepositorySummary(new RepositoryId("payment-service"), "Payment Service")));
+                new RepositorySummary(new RepositoryId("payment-service"), new RepositoryRevision("revision-a"))));
         List<ToolRegistration<?>> registrations = provider.registrations();
         DirectToolRegistry registry = new DirectToolRegistry(registrations);
 
         ToolDefinition definition = registrations.getFirst().definition();
-        ToolExecution execution = registry.execute(registry.snapshot(false), new ToolName("list_repositories"), "{}");
+        ToolExecution execution = registry.execute(registry.snapshot(), new ToolName("list_repositories"), "{}");
 
         assertEquals(1, registrations.size());
         assertEquals(new ToolName("list_repositories"), definition.name());
@@ -55,7 +56,7 @@ class ListRepositoriesToolTest {
         assertEquals(Optional.empty(), execution.repositoryId());
         assertEquals(Optional.empty(), execution.revision());
         assertFalse(execution.citeable());
-        assertEquals("{\"repositories\":[{\"displayName\":\"Payment Service\",\"repositoryId\":\"payment-service\"}]}", execution.dataJson());
+        assertEquals("{\"repositories\":[{\"repositoryId\":\"payment-service\",\"revision\":\"revision-a\"}]}", execution.dataJson());
     }
 
     @Test
@@ -64,7 +65,7 @@ class ListRepositoriesToolTest {
         DirectToolRegistry registry = new DirectToolRegistry(provider.registrations());
 
         ToolExecutionFailure exception = assertThrows(ToolExecutionFailure.class,
-                () -> registry.execute(registry.snapshot(false), new ToolName("list_repositories"), "{\"repositoryId\":\"payment-service\"}"));
+                () -> registry.execute(registry.snapshot(), new ToolName("list_repositories"), "{\"repositoryId\":\"payment-service\"}"));
 
         assertEquals(ToolExecutionFailure.Kind.INVALID_INPUT, exception.kind());
     }

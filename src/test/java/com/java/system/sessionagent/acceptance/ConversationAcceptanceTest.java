@@ -19,7 +19,6 @@ import com.java.system.sessionagent.conversation.domain.SessionSequence;
 import com.java.system.sessionagent.conversation.domain.ToolMessage;
 import com.java.system.sessionagent.conversation.domain.UserMessage;
 import com.java.system.sessionagent.conversation.port.out.ConversationStore;
-import com.java.system.sessionagent.conversation.port.out.RevisionLookup;
 import com.java.system.sessionagent.semantic.domain.RepositoryId;
 import com.java.system.sessionagent.semantic.http.SemanticRepositoryClient;
 import com.java.system.sessionagent.semantic.http.SemanticSourceClient;
@@ -86,7 +85,7 @@ class ConversationAcceptanceTest {
             assertThat(sourceMessages).hasSizeGreaterThanOrEqualTo(2);
             assertThat(runtime.semantic.calls()).anySatisfy(call -> assertThat(call.path()).isEqualTo("/v1/api-routes/lookup"));
             assertThat(runtime.semantic.calls()).filteredOn(call -> call.path().equals("/v1/api-routes/lookup"))
-                    .singleElement().satisfies(call -> assertThat(call.body()).contains("\"repoId\":\"payment-service\"", "\"expectedRevision\":\"payment-revision-1\""));
+                    .singleElement().satisfies(call -> assertThat(call.body()).contains("\"repositoryId\":\"payment-service\"", "\"revision\":\"payment-revision-1\""));
             assertThat(runtime.citedTool(reply).resultJson()).contains("NOT_FOUND");
         }
     }
@@ -150,9 +149,8 @@ class ConversationAcceptanceTest {
             RestClient restClient = RestClient.builder().baseUrl(semantic.baseUrl()).build();
             SemanticRepositoryClient repositories = new SemanticRepositoryClient(restClient);
             DirectToolRegistry registry = new DirectToolRegistry(new SemanticToolProvider(repositories,
-                    new SemanticSourceClient(restClient, repositories)).registrations());
+                    new SemanticSourceClient(restClient)).registrations());
             jobs = new MessageJobService(store, model, registry,
-                    repositoryId -> new RevisionLookup.CurrentRevision(repositories.currentRevision(new RepositoryId(repositoryId)).value()),
                     Clock.fixed(Instant.parse("2026-08-16T00:00:00Z"), ZoneOffset.UTC));
         }
 

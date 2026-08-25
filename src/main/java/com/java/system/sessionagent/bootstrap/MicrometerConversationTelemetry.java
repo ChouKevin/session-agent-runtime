@@ -13,8 +13,8 @@ public final class MicrometerConversationTelemetry implements ConversationTeleme
 
     private static final Set<String> TOOL_NAMES = Set.of(
             "list_repositories", "codebase_list_entry_points", "codebase_lookup_api_route", "codebase_suggest_api_route",
-            "codebase_outgoing_call_graph", "codebase_incoming_call_graph", "codebase_discover_concepts",
-            "codebase_resolve_concept", "codebase_discover_event_listeners", "codebase_discover_method_implementations",
+            "codebase_outgoing_call_graph", "codebase_incoming_call_graph", "codebase_search_code_facts",
+            "codebase_get_code_fact", "codebase_discover_event_listeners", "codebase_discover_method_implementations",
             "codebase_discover_type_members", "codebase_find_internal_references", "codebase_get_evidence_source",
             "codebase_get_method_source", "codebase_get_source_segment", "codebase_resolve_source_symbol");
     private static final Set<String> INTAKE_OUTCOMES = Set.of("ACCEPTED", "REJECTED");
@@ -22,11 +22,13 @@ public final class MicrometerConversationTelemetry implements ConversationTeleme
     private static final Set<String> MODEL_OUTCOMES = Set.of("SUCCESS", "FAILURE");
     private static final Set<String> FINISH_REASONS = Set.of("STOP", "MAX_TOKENS", "SAFETY", "RECITATION", "OTHER", "UNAVAILABLE");
     private static final Set<String> TOOL_OUTCOMES = Set.of(
-            "SUCCESS", "INVALID_INPUT", "INPUT_TOO_LARGE", "UNKNOWN_REPOSITORY", "REVISION_CHANGED",
-            "TRANSIENT", "FORBIDDEN", "INVALID_RESPONSE", "STALE");
+            "SUCCESS", "INVALID_INPUT", "INPUT_TOO_LARGE", "REPOSITORY_NOT_FOUND", "REVISION_OUTDATED",
+            "INDEX_NOT_READY", "INDEX_CONTRACT_MISMATCH", "CODE_FACT_NOT_FOUND", "CODE_FACT_KIND_UNSUPPORTED",
+            "INVALID_QUERY", "SEMANTIC_INDEX_UNAVAILABLE", "FORBIDDEN", "INVALID_RESPONSE", "STALE");
     private static final Set<String> FEEDBACK_CODES = Set.of(
-            "CATALOG_REQUIRED", "INVALID_TOOL_INPUT", "TOOL_INPUT_TOO_LARGE", "UNKNOWN_REPOSITORY",
-            "REVISION_CHANGED", "INVALID_CITATION", "CALL_LIMIT_REACHED", "MODEL_OUTPUT_INVALID",
+            "INVALID_TOOL_INPUT", "TOOL_INPUT_TOO_LARGE", "UNKNOWN_REPOSITORY",
+            "REVISION_OUTDATED", "INDEX_NOT_READY", "INDEX_CONTRACT_MISMATCH", "CODE_FACT_NOT_FOUND",
+            "CODE_FACT_KIND_UNSUPPORTED", "INVALID_QUERY", "INVALID_CITATION", "CALL_LIMIT_REACHED", "MODEL_OUTPUT_INVALID",
             "CONTEXT_TOO_LARGE", "DATABASE_CONTRACT_ERROR", "DEPENDENCY_UNAVAILABLE", "DEPENDENCY_FORBIDDEN",
             "DEPENDENCY_INVALID_RESPONSE");
     private static final Set<String> RETRY_CATEGORIES = Set.of("MODEL", "TOOL", "STORAGE", "DEPENDENCY");

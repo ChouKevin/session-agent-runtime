@@ -311,7 +311,7 @@ class GoogleConversationModelTest {
         ToolDefinition definition = new ToolDefinition(new ToolName(toolName), "1", "Catalog repositories", "{\"type\":\"object\"}", ToolKind.CATALOG);
         ToolRegistration<String> registration = new ToolRegistration<>(definition, String.class,
                 ignored -> new ToolResult(Optional.empty(), Optional.empty(), "{}", false));
-        return new DirectToolRegistry(List.of(registration)).snapshot(false);
+        return new DirectToolRegistry(List.of(registration)).snapshot();
     }
 
     private static AssistantMessage toolResponse(String callId, String name, String arguments) {

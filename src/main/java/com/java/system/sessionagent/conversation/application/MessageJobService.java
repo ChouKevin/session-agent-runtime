@@ -6,7 +6,6 @@ import com.java.system.sessionagent.conversation.domain.MessageWorkClaim;
 import com.java.system.sessionagent.conversation.domain.ModelDecision;
 import com.java.system.sessionagent.conversation.domain.ResultId;
 import com.java.system.sessionagent.conversation.domain.SessionMessage;
-import com.java.system.sessionagent.conversation.domain.ToolMessage;
 import com.java.system.sessionagent.conversation.port.in.MessageJobPort;
 import com.java.system.sessionagent.conversation.port.in.WorkGuard;
 import com.java.system.sessionagent.conversation.port.out.ConversationModel;
@@ -14,11 +13,11 @@ import com.java.system.sessionagent.conversation.port.out.ConversationStore;
 import com.java.system.sessionagent.conversation.port.out.ConversationTelemetry;
 import com.java.system.sessionagent.conversation.port.out.ConversationStoreFailure;
 import com.java.system.sessionagent.conversation.port.out.ModelCallFailure;
-import com.java.system.sessionagent.conversation.port.out.RepositoryRevisionReader;
 import com.java.system.sessionagent.conversation.port.out.StaleWorkClaimException;
 import com.java.system.sessionagent.tool.application.DirectToolRegistry;
 import com.java.system.sessionagent.tool.application.ToolExecutionFailure;
 import com.java.system.sessionagent.tool.application.ToolResultEnvelopeFactory;
+import com.java.system.sessionagent.tool.application.ToolFailureFeedback;
 import com.java.system.sessionagent.tool.application.ToolSnapshot;
 import com.java.system.sessionagent.tool.domain.ToolExecution;
 import com.java.system.sessionagent.tool.domain.ToolKind;
@@ -50,9 +49,8 @@ public final class MessageJobService implements MessageJobPort {
             ConversationStore conversationStore,
             ConversationModel conversationModel,
             DirectToolRegistry toolRegistry,
-            RepositoryRevisionReader revisionReader,
             Clock clock) {
-        this(conversationStore, conversationModel, toolRegistry, revisionReader, clock,
+        this(conversationStore, conversationModel, toolRegistry, clock,
                 new MessageJobRetryPolicy(3, Duration.ofSeconds(60)), new com.java.system.sessionagent.conversation.port.out.NoOpConversationTelemetry());
     }
 
@@ -60,7 +58,6 @@ public final class MessageJobService implements MessageJobPort {
             ConversationStore conversationStore,
             ConversationModel conversationModel,
             DirectToolRegistry toolRegistry,
-            RepositoryRevisionReader revisionReader,
             Clock clock,
             MessageJobRetryPolicy retryPolicy,
             ConversationTelemetry telemetry) {
@@ -68,7 +65,7 @@ public final class MessageJobService implements MessageJobPort {
         this.conversationModel = Objects.requireNonNull(conversationModel, "Conversation model must not be null");
         this.toolRegistry = Objects.requireNonNull(toolRegistry, "Tool registry must not be null");
         this.envelopeFactory = new ToolResultEnvelopeFactory();
-        this.citationValidator = new CitationValidator(this.conversationStore, revisionReader);
+        this.citationValidator = new CitationValidator(this.conversationStore);
         this.clock = Objects.requireNonNull(clock, "Clock must not be null");
         this.retryPolicy = Objects.requireNonNull(retryPolicy, "Message job retry policy must not be null");
         this.telemetry = Objects.requireNonNull(telemetry, "Conversation telemetry must not be null");
@@ -88,15 +85,14 @@ public final class MessageJobService implements MessageJobPort {
     private void processClaim(MessageWorkClaim claim, WorkGuard workGuard) {
         while (workGuard.stillOwned()) {
             List<SessionMessage> history = conversationStore.loadHistory(claim.sessionId(), claim.messageJobId());
-            boolean catalogComplete = catalogComplete(history, claim.messageJobId());
             OptionalIntReservation reservation = reserve(claim, workGuard);
             if (!reservation.reserved()) {
                 appendFeedback(claim, workGuard, FeedbackCode.CALL_LIMIT_REACHED, true, ToolFeedbackDetails.empty());
                 return;
             }
-            ToolSnapshot snapshot = toolRegistry.snapshot(catalogComplete);
+            ToolSnapshot snapshot = toolRegistry.snapshot();
             boolean replyOnly = reservation.ordinal() == 12;
-            logModelCallStarted(claim, reservation.ordinal(), replyOnly, history.size(), snapshot.definitions().size(), catalogComplete);
+            logModelCallStarted(claim, reservation.ordinal(), replyOnly, history.size(), snapshot.definitions().size());
             ModelDecision decision;
             try {
                 decision = conversationModel.decide(new com.java.system.sessionagent.conversation.domain.ModelRequest(history, snapshot, replyOnly),
@@ -120,12 +116,6 @@ public final class MessageJobService implements MessageJobPort {
                 if (replyOnly) {
                     appendFeedback(claim, workGuard, FeedbackCode.CALL_LIMIT_REACHED, true, toolDetails(useTool));
                     return;
-                }
-                if (!catalogComplete && !useTool.toolName().value().equals("list_repositories")) {
-                    if (!appendFeedback(claim, workGuard, FeedbackCode.CATALOG_REQUIRED, false, toolDetails(useTool))) {
-                        return;
-                    }
-                    continue;
                 }
                 if (!executeTool(claim, workGuard, snapshot, useTool)) { return; }
                 continue;
@@ -188,6 +178,9 @@ public final class MessageJobService implements MessageJobPort {
             return appendFeedback(claim, guard, FeedbackCode.INVALID_TOOL_INPUT, false, toolDetails(toolCall));
         } catch (ToolExecutionFailure failure) {
             telemetry.tool(toolCall.toolName().value(), failure.kind().name(), Optional.empty(), Optional.empty());
+            if (failure.kind() == ToolExecutionFailure.Kind.REVISION_OUTDATED) {
+                return appendRevisionOutdatedFeedback(claim, guard, toolDetails(toolCall), failure.revisionOutdated().orElseThrow());
+            }
             return handleFailure(claim, guard, ConversationFailurePolicy.tool(failure), toolDetails(toolCall), "TOOL");
         }
         if (!guard.stillOwned()) { return false; }
@@ -246,15 +239,7 @@ public final class MessageJobService implements MessageJobPort {
             }
             return !appendFeedback(claim, guard, FeedbackCode.INVALID_CITATION, false, ToolFeedbackDetails.empty());
         }
-        if (validation instanceof CitationValidator.Validation.Retry retry) {
-            if (replyOnly) {
-                appendFeedback(claim, guard, FeedbackCode.DEPENDENCY_UNAVAILABLE, true, ToolFeedbackDetails.empty());
-                return true;
-            }
-            scheduleRetry(claim, guard, retry.retryAfter(), ToolFeedbackDetails.empty(), "DEPENDENCY");
-            return true;
-        }
-        appendFeedback(claim, guard, FeedbackCode.DEPENDENCY_INVALID_RESPONSE, true, ToolFeedbackDetails.empty());
+        appendFeedback(claim, guard, FeedbackCode.INVALID_CITATION, true, ToolFeedbackDetails.empty());
         return true;
     }
 
@@ -314,18 +299,28 @@ public final class MessageJobService implements MessageJobPort {
         }
     }
 
-    private static boolean catalogComplete(List<SessionMessage> history, MessageJobId jobId) {
-        return history.stream().filter(ToolMessage.class::isInstance).map(ToolMessage.class::cast)
-                .anyMatch(message -> message.messageJobId().filter(jobId::equals).isPresent()
-                        && message.toolName().equals("list_repositories"));
+    private boolean appendRevisionOutdatedFeedback(MessageWorkClaim claim, WorkGuard guard, ToolFeedbackDetails toolDetails,
+                                                   ToolExecutionFailure.RevisionOutdatedDetails details) {
+        if (!guard.stillOwned()) {
+            return false;
+        }
+        String payload = ToolFailureFeedback.revisionOutdated(details);
+        try {
+            conversationStore.appendFeedback(claim, FeedbackCode.REVISION_OUTDATED.name(), payload, false,
+                    toolDetails.modelCallId(), toolDetails.toolName(), toolDetails.arguments(), toolDetails.modelContext(), clock.instant());
+            telemetry.feedback(FeedbackCode.REVISION_OUTDATED.name());
+            return guard.stillOwned();
+        } catch (StaleWorkClaimException exception) {
+            return false;
+        }
     }
 
     private static String safeMessage(FeedbackCode code) { return "Runtime feedback: " + code.name(); }
 
     private static void logModelCallStarted(MessageWorkClaim claim, int ordinal, boolean replyOnly, int historyCount,
-                                            int visibleToolCount, boolean catalogComplete) {
-        LOGGER.info("model_call_started sessionId={} messageJobId={} ordinal={} replyOnly={} historyCount={} visibleToolCount={} catalogComplete={}",
-                claim.sessionId().value(), claim.messageJobId().value(), ordinal, replyOnly, historyCount, visibleToolCount, catalogComplete);
+                                            int visibleToolCount) {
+        LOGGER.info("model_call_started sessionId={} messageJobId={} ordinal={} replyOnly={} historyCount={} visibleToolCount={}",
+                claim.sessionId().value(), claim.messageJobId().value(), ordinal, replyOnly, historyCount, visibleToolCount);
     }
 
     private static void logModelCallUsage(MessageWorkClaim claim, int ordinal,

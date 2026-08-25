@@ -1,19 +1,6 @@
 package com.java.system.sessionagent.semantic.tool.input;
-
 import com.fasterxml.jackson.annotation.JsonProperty;
-import com.java.system.sessionagent.semantic.dto.MethodTarget;
-import jakarta.validation.Valid;
-import jakarta.validation.constraints.Max;
-import jakarta.validation.constraints.Min;
+import com.fasterxml.jackson.annotation.JsonPropertyDescription;
 import jakarta.validation.constraints.NotBlank;
-import jakarta.validation.constraints.Size;
-import org.springframework.util.Assert;
-
-import java.util.Objects;
-
-public record OutgoingCallGraphInput(
-        @JsonProperty(required = true) @NotBlank @Size(max = 128) String repositoryId,
-        @JsonProperty(required = true) @Valid MethodTarget target,
-        @JsonProperty(required = false) @Min(1) @Max(2) Integer depth) {
-    public OutgoingCallGraphInput { Assert.notNull(target, "Call graph target must not be null"); depth = Objects.requireNonNullElse(depth, 2); }
-}
+import java.util.List;
+public record OutgoingCallGraphInput(@JsonProperty(required = true) @JsonPropertyDescription("Exact repositoryId copied from prior evidence") @NotBlank String repositoryId, @JsonProperty(required = true) @JsonPropertyDescription("Exact revision paired with repositoryId in prior evidence") @NotBlank String revision, @JsonProperty(required = true) @NotBlank String packageName, @JsonProperty(required = true) @NotBlank String className, @JsonProperty(required = true) @NotBlank String sourceFile, @JsonProperty(required = true) @NotBlank String methodName, @JsonProperty(required = true) List<@NotBlank String> parameterTypes, Integer depth, Integer depthTwoNodeBudget) { }

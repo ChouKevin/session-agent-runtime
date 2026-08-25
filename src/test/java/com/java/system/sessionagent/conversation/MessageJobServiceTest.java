@@ -15,8 +15,6 @@ import com.java.system.sessionagent.conversation.port.out.ConversationStore;
 import com.java.system.sessionagent.conversation.port.out.ConversationTelemetry;
 import com.java.system.sessionagent.conversation.port.out.ConversationStoreFailure;
 import com.java.system.sessionagent.conversation.port.out.ModelCallFailure;
-import com.java.system.sessionagent.conversation.port.out.RepositoryRevisionReader;
-import com.java.system.sessionagent.conversation.port.out.RevisionLookup;
 import com.java.system.sessionagent.conversation.port.out.StaleWorkClaimException;
 import com.java.system.sessionagent.tool.application.DirectToolRegistry;
 import com.java.system.sessionagent.tool.application.ToolRegistration;
@@ -64,11 +62,11 @@ class MessageJobServiceTest {
                 registration("list_repositories", ToolKind.CATALOG, Optional.empty(), Optional.empty(), "{\"repositories\":[]}"),
                 registration("source", ToolKind.SOURCE, Optional.of("payment-service"), Optional.of("rev-a"), "{\"members\":[]}")));
         MessageJobService service = new MessageJobService(store, model, registry,
-                repositoryId -> new RevisionLookup.CurrentRevision("rev-a"), Clock.fixed(Instant.parse("2026-08-16T00:00:00Z"), ZoneOffset.UTC));
+                Clock.fixed(Instant.parse("2026-08-16T00:00:00Z"), ZoneOffset.UTC));
 
         service.process(store.claim, () -> true);
 
-        assertThat(model.snapshots).containsExactly(List.of("list_repositories"), List.of("list_repositories", "source"), List.of("list_repositories", "source"));
+        assertThat(model.snapshots).containsExactly(List.of("list_repositories", "source"), List.of("list_repositories", "source"), List.of("list_repositories", "source"));
         assertThat(store.toolMessages).hasSize(2);
         assertThat(store.toolMessages.get(1).arguments()).isEqualTo("{\"repositoryId\":\"payment-service\"}");
         assertThat(store.assistantReply).isEqualTo(new AssistantReply("Answer", List.of(store.toolMessages.getLast().resultId())));
@@ -87,7 +85,7 @@ class MessageJobServiceTest {
                 registration("source", ToolKind.SOURCE, Optional.of("payment-service"), Optional.of("rev-a"), "{\"members\":[]}")));
         ConversationTelemetry telemetry = mock(ConversationTelemetry.class);
         MessageJobService service = new MessageJobService(store, model, registry,
-                repositoryId -> new RevisionLookup.CurrentRevision("rev-a"), Clock.fixed(Instant.parse("2026-08-16T00:00:00Z"), ZoneOffset.UTC),
+                Clock.fixed(Instant.parse("2026-08-16T00:00:00Z"), ZoneOffset.UTC),
                 new com.java.system.sessionagent.conversation.application.MessageJobRetryPolicy(3, java.time.Duration.ofSeconds(60)), telemetry);
 
         service.process(store.claim, () -> true);
@@ -108,7 +106,7 @@ class MessageJobServiceTest {
         DirectToolRegistry registry = new DirectToolRegistry(List.of(
                 registration("list_repositories", ToolKind.CATALOG, Optional.empty(), Optional.empty(), "{\"repositories\":[]}")));
         MessageJobService service = new MessageJobService(store, model, registry,
-                repositoryId -> new RevisionLookup.CurrentRevision("rev-a"), Clock.fixed(Instant.parse("2026-08-16T00:00:00Z"), ZoneOffset.UTC));
+                Clock.fixed(Instant.parse("2026-08-16T00:00:00Z"), ZoneOffset.UTC));
 
         service.process(store.claim, () -> true);
 
@@ -123,7 +121,7 @@ class MessageJobServiceTest {
         store.calls = 11;
         ConversationModel model = (request, usageObserver) -> { throw ModelCallFailure.correctable(); };
         MessageJobService service = new MessageJobService(store, model, new DirectToolRegistry(List.of()),
-                repositoryId -> new RevisionLookup.CurrentRevision("rev-a"), Clock.fixed(Instant.parse("2026-08-16T00:00:00Z"), ZoneOffset.UTC));
+                Clock.fixed(Instant.parse("2026-08-16T00:00:00Z"), ZoneOffset.UTC));
 
         service.process(store.claim, () -> true);
 
@@ -137,7 +135,7 @@ class MessageJobServiceTest {
         store.calls = 11;
         ConversationModel model = (request, usageObserver) -> { throw ModelCallFailure.contextTooLarge(); };
         MessageJobService service = new MessageJobService(store, model, new DirectToolRegistry(List.of()),
-                repositoryId -> new RevisionLookup.CurrentRevision("rev-a"), Clock.fixed(Instant.parse("2026-08-16T00:00:00Z"), ZoneOffset.UTC));
+                Clock.fixed(Instant.parse("2026-08-16T00:00:00Z"), ZoneOffset.UTC));
 
         service.process(store.claim, () -> true);
 
@@ -153,7 +151,7 @@ class MessageJobServiceTest {
                 com.java.system.sessionagent.conversation.domain.JobStatus.WORKING, 0, 11, Optional.empty()));
         ConversationModel model = (request, usageObserver) -> { throw ModelCallFailure.transientFailure(); };
         MessageJobService service = new MessageJobService(store, model, new DirectToolRegistry(List.of()),
-                repositoryId -> new RevisionLookup.CurrentRevision("rev-a"), Clock.fixed(Instant.parse("2026-08-16T00:00:00Z"), ZoneOffset.UTC));
+                Clock.fixed(Instant.parse("2026-08-16T00:00:00Z"), ZoneOffset.UTC));
 
         service.process(store.claim, () -> true);
 
@@ -176,12 +174,12 @@ class MessageJobServiceTest {
                 registration("list_repositories", ToolKind.CATALOG, Optional.empty(), Optional.empty(), "{\"repositories\":[]}"),
                 countedRegistration("source", ToolKind.SOURCE, sourceExecutions)));
         MessageJobService service = new MessageJobService(store, model, registry,
-                repositoryId -> new RevisionLookup.CurrentRevision("rev-a"), Clock.fixed(Instant.parse("2026-08-16T00:00:00Z"), ZoneOffset.UTC));
+                Clock.fixed(Instant.parse("2026-08-16T00:00:00Z"), ZoneOffset.UTC));
 
         service.process(store.claim, () -> true);
 
         assertThat(store.feedbackMessages).singleElement().satisfies(feedback -> {
-            assertThat(feedback.code()).isEqualTo("CATALOG_REQUIRED");
+            assertThat(feedback.code()).isEqualTo("INVALID_TOOL_INPUT");
             assertThat(feedback.modelCallId()).contains("source-before-catalog");
             assertThat(feedback.toolName()).contains("source");
             assertThat(feedback.rejectedArguments()).contains("{not-json}");
@@ -191,7 +189,7 @@ class MessageJobServiceTest {
         org.springframework.ai.chat.messages.AssistantMessage request = (org.springframework.ai.chat.messages.AssistantMessage) history.get(2);
         org.springframework.ai.chat.messages.ToolResponseMessage response = (org.springframework.ai.chat.messages.ToolResponseMessage) history.get(3);
         assertThat(request.getToolCalls().getFirst().arguments()).isEqualTo("{not-json}");
-        assertThat(response.getResponses().getFirst().responseData()).contains("CATALOG_REQUIRED");
+        assertThat(response.getResponses().getFirst().responseData()).contains("INVALID_TOOL_INPUT");
         assertThat(sourceExecutions).hasValue(0);
     }
 
@@ -203,7 +201,7 @@ class MessageJobServiceTest {
         ConversationModel model = (request, usageObserver) -> new ModelDecision.Reply(
                 new AssistantReply("bad", List.of(new ResultId("unknown-result"))));
         MessageJobService service = new MessageJobService(store, model, new DirectToolRegistry(List.of()),
-                repositoryId -> new RevisionLookup.CurrentRevision("rev-a"), Clock.fixed(Instant.parse("2026-08-16T00:00:00Z"), ZoneOffset.UTC));
+                Clock.fixed(Instant.parse("2026-08-16T00:00:00Z"), ZoneOffset.UTC));
         ListAppender<ILoggingEvent> appender = attachAppender(MessageJobService.class);
 
         try {
@@ -230,12 +228,12 @@ class MessageJobServiceTest {
         ConversationModel model = (request, usageObserver) -> new ModelDecision.Reply(
                 new AssistantReply("answer", List.of(new ResultId("source-result"))));
         MessageJobService service = new MessageJobService(store, model, new DirectToolRegistry(List.of()),
-                repositoryId -> new RevisionLookup.TemporaryFailure(), Clock.fixed(Instant.parse("2026-08-16T00:00:00Z"), ZoneOffset.UTC));
+                Clock.fixed(Instant.parse("2026-08-16T00:00:00Z"), ZoneOffset.UTC));
 
         service.process(store.claim, () -> true);
 
-        assertThat(store.feedbackCodes).containsExactly("DEPENDENCY_UNAVAILABLE");
-        assertThat(store.feedbackMessages).singleElement().extracting(FeedbackMessage::terminal).isEqualTo(true);
+        assertThat(store.feedbackCodes).isEmpty();
+        assertThat(store.assistantReply.message()).isEqualTo("answer");
         assertThat(store.scheduledAt).isEmpty();
         assertThat(store.calls).isEqualTo(12);
     }
@@ -250,7 +248,7 @@ class MessageJobServiceTest {
                 "catalog-call", new ToolName("list_repositories"), arguments, MODEL_CONTEXT);
         DirectToolRegistry registry = new DirectToolRegistry(List.of(countedRegistration("list_repositories", ToolKind.CATALOG, executions)));
         MessageJobService service = new MessageJobService(store, model, registry,
-                repositoryId -> new RevisionLookup.CurrentRevision("rev-a"), Clock.fixed(Instant.parse("2026-08-16T00:00:00Z"), ZoneOffset.UTC));
+                Clock.fixed(Instant.parse("2026-08-16T00:00:00Z"), ZoneOffset.UTC));
 
         service.process(store.claim, () -> store.feedbackMessages.isEmpty());
 
@@ -274,11 +272,11 @@ class MessageJobServiceTest {
         ScriptedModel model = new ScriptedModel(store, request);
         ToolDefinition definition = new ToolDefinition(new ToolName("list_repositories"), "v1", "catalog", "{\"type\":\"object\"}", ToolKind.CATALOG);
         DirectToolRegistry registry = new DirectToolRegistry(List.of(new ToolRegistration<>(definition, Object.class,
-                ignored -> { throw ToolExecutionFailure.transientFailure(Optional.of(java.time.Duration.ofSeconds(61))); })));
+                ignored -> { throw ToolExecutionFailure.semanticIndexUnavailable(Optional.of(java.time.Duration.ofSeconds(61))); })));
         Instant now = Instant.parse("2026-08-16T00:00:00Z");
         ConversationTelemetry telemetry = mock(ConversationTelemetry.class);
         MessageJobService service = new MessageJobService(store, model, registry,
-                repositoryId -> new RevisionLookup.CurrentRevision("rev-a"), Clock.fixed(now, ZoneOffset.UTC),
+                Clock.fixed(now, ZoneOffset.UTC),
                 new com.java.system.sessionagent.conversation.application.MessageJobRetryPolicy(3, java.time.Duration.ofSeconds(60)), telemetry);
 
         service.process(store.claim, () -> true);
@@ -286,7 +284,7 @@ class MessageJobServiceTest {
         assertThat(store.scheduledAt).contains(now.plusSeconds(60));
         assertThat(store.feedbackMessages).isEmpty();
         assertThat(store.toolMessages).isEmpty();
-        verify(telemetry).tool("list_repositories", "TRANSIENT", Optional.empty(), Optional.empty());
+        verify(telemetry).tool("list_repositories", "SEMANTIC_INDEX_UNAVAILABLE", Optional.empty(), Optional.empty());
         verify(telemetry).retry("TOOL", java.time.Duration.ofSeconds(60));
     }
 
@@ -298,7 +296,7 @@ class MessageJobServiceTest {
         Instant now = Instant.parse("2026-08-16T00:00:00Z");
         MessageJobService service = new MessageJobService(store,
                 (request, usageObserver) -> { throw ModelCallFailure.transientFailure(); }, new DirectToolRegistry(List.of()),
-                repositoryId -> new RevisionLookup.CurrentRevision("rev-a"), Clock.fixed(now, ZoneOffset.UTC),
+                Clock.fixed(now, ZoneOffset.UTC),
                 new com.java.system.sessionagent.conversation.application.MessageJobRetryPolicy(64, java.time.Duration.ofSeconds(60)),
                 mock(ConversationTelemetry.class));
 
@@ -317,9 +315,9 @@ class MessageJobServiceTest {
         ScriptedModel model = new ScriptedModel(store, toolRequest);
         ToolDefinition definition = new ToolDefinition(new ToolName("list_repositories"), "v1", "catalog", "{\"type\":\"object\"}", ToolKind.CATALOG);
         DirectToolRegistry registry = new DirectToolRegistry(List.of(new ToolRegistration<>(definition, Object.class,
-                ignored -> { throw ToolExecutionFailure.transientFailure(Optional.empty()); })));
+                ignored -> { throw ToolExecutionFailure.semanticIndexUnavailable(Optional.empty()); })));
         MessageJobService service = new MessageJobService(store, model, registry,
-                repositoryId -> new RevisionLookup.CurrentRevision("rev-a"), Clock.fixed(Instant.parse("2026-08-16T00:00:00Z"), ZoneOffset.UTC));
+                Clock.fixed(Instant.parse("2026-08-16T00:00:00Z"), ZoneOffset.UTC));
 
         service.process(store.claim, () -> true);
 
@@ -338,7 +336,7 @@ class MessageJobServiceTest {
         RecordingStore store = new RecordingStore();
         ConversationModel model = (request, usageObserver) -> { throw ModelCallFailure.contextTooLarge(); };
         MessageJobService service = new MessageJobService(store, model, new DirectToolRegistry(List.of()),
-                repositoryId -> new RevisionLookup.CurrentRevision("rev-a"), Clock.fixed(Instant.parse("2026-08-16T00:00:00Z"), ZoneOffset.UTC));
+                Clock.fixed(Instant.parse("2026-08-16T00:00:00Z"), ZoneOffset.UTC));
 
         service.process(store.claim, () -> true);
 
@@ -355,7 +353,7 @@ class MessageJobServiceTest {
         ConversationTelemetry telemetry = mock(ConversationTelemetry.class);
         MessageJobService service = new MessageJobService(store,
                 (request, usageObserver) -> { throw new AssertionError("model must not be called"); }, new DirectToolRegistry(List.of()),
-                repositoryId -> new RevisionLookup.CurrentRevision("rev-a"), Clock.fixed(Instant.parse("2026-08-16T00:00:00Z"), ZoneOffset.UTC),
+                Clock.fixed(Instant.parse("2026-08-16T00:00:00Z"), ZoneOffset.UTC),
                 new com.java.system.sessionagent.conversation.application.MessageJobRetryPolicy(3, java.time.Duration.ofSeconds(60)), telemetry);
 
         service.process(store.claim, () -> true);
@@ -376,7 +374,7 @@ class MessageJobServiceTest {
         Instant now = Instant.parse("2026-08-16T00:00:00Z");
         MessageJobService service = new MessageJobService(store,
                 (request, usageObserver) -> { throw new AssertionError("model must not be called"); }, new DirectToolRegistry(List.of()),
-                repositoryId -> new RevisionLookup.CurrentRevision("rev-a"), Clock.fixed(now, ZoneOffset.UTC));
+                Clock.fixed(now, ZoneOffset.UTC));
 
         service.process(store.claim, () -> true);
 
@@ -393,7 +391,7 @@ class MessageJobServiceTest {
         store.loadFailure = Optional.of(ConversationStoreFailure.transientFailure(new IllegalStateException("connection lost")));
         MessageJobService service = new MessageJobService(store,
                 (request, usageObserver) -> { throw new AssertionError("model must not be called"); }, new DirectToolRegistry(List.of()),
-                repositoryId -> new RevisionLookup.CurrentRevision("rev-a"), Clock.fixed(Instant.parse("2026-08-16T00:00:00Z"), ZoneOffset.UTC));
+                Clock.fixed(Instant.parse("2026-08-16T00:00:00Z"), ZoneOffset.UTC));
 
         service.process(store.claim, () -> true);
 
@@ -409,7 +407,7 @@ class MessageJobServiceTest {
         store.feedbackFailure = Optional.of(new StaleWorkClaimException());
         MessageJobService service = new MessageJobService(store,
                 (request, usageObserver) -> { throw new AssertionError("model must not be called"); }, new DirectToolRegistry(List.of()),
-                repositoryId -> new RevisionLookup.CurrentRevision("rev-a"), Clock.fixed(Instant.parse("2026-08-16T00:00:00Z"), ZoneOffset.UTC));
+                Clock.fixed(Instant.parse("2026-08-16T00:00:00Z"), ZoneOffset.UTC));
 
         assertThatCode(() -> service.process(store.claim, () -> true)).doesNotThrowAnyException();
 
@@ -426,7 +424,7 @@ class MessageJobServiceTest {
         DirectToolRegistry registry = new DirectToolRegistry(List.of(new ToolRegistration<>(definition, Object.class,
                 ignored -> { throw new IllegalStateException("provider secret"); })));
         MessageJobService service = new MessageJobService(store, model, registry,
-                repositoryId -> new RevisionLookup.CurrentRevision("rev-a"), Clock.fixed(Instant.parse("2026-08-16T00:00:00Z"), ZoneOffset.UTC));
+                Clock.fixed(Instant.parse("2026-08-16T00:00:00Z"), ZoneOffset.UTC));
 
         service.process(store.claim, () -> true);
 
@@ -447,7 +445,7 @@ class MessageJobServiceTest {
                 registration("list_repositories", ToolKind.CATALOG, Optional.empty(), Optional.empty(), "not-json")));
         ConversationTelemetry telemetry = mock(ConversationTelemetry.class);
         MessageJobService service = new MessageJobService(store, model, registry,
-                repositoryId -> new RevisionLookup.CurrentRevision("rev-a"), Clock.fixed(Instant.parse("2026-08-16T00:00:00Z"), ZoneOffset.UTC),
+                Clock.fixed(Instant.parse("2026-08-16T00:00:00Z"), ZoneOffset.UTC),
                 new com.java.system.sessionagent.conversation.application.MessageJobRetryPolicy(3, java.time.Duration.ofSeconds(60)), telemetry);
 
         service.process(store.claim, () -> true);
@@ -467,14 +465,14 @@ class MessageJobServiceTest {
                     "tool-call", new ToolName("list_repositories"), "{\"apiKey\":\"runtime-secret\"}", MODEL_CONTEXT);
         };
         MessageJobService service = new MessageJobService(store, model, new DirectToolRegistry(List.of()),
-                repositoryId -> new RevisionLookup.CurrentRevision("rev-a"), Clock.fixed(Instant.parse("2026-08-16T00:00:00Z"), ZoneOffset.UTC));
+                Clock.fixed(Instant.parse("2026-08-16T00:00:00Z"), ZoneOffset.UTC));
         ListAppender<ILoggingEvent> appender = attachAppender(MessageJobService.class);
 
         try {
             service.process(store.claim, () -> true);
 
             assertThat(appender.list).extracting(ILoggingEvent::getMessage)
-                    .contains("model_call_started sessionId={} messageJobId={} ordinal={} replyOnly={} historyCount={} visibleToolCount={} catalogComplete={}",
+                    .contains("model_call_started sessionId={} messageJobId={} ordinal={} replyOnly={} historyCount={} visibleToolCount={}",
                             "model_call_usage sessionId={} messageJobId={} ordinal={} usageAvailable={} promptTokens={} completionTokens={} totalTokens={}",
                             "model_call_decision sessionId={} messageJobId={} ordinal={} decisionCategory={}");
             assertThat(logTemplatesAndArguments(appender)).doesNotContain("runtime-secret", "apiKey", "{\"apiKey\"");

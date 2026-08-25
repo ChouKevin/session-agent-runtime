@@ -14,7 +14,6 @@ import com.java.system.sessionagent.conversation.domain.SessionMessage;
 import com.java.system.sessionagent.conversation.domain.SessionSequence;
 import com.java.system.sessionagent.conversation.domain.ToolMessage;
 import com.java.system.sessionagent.conversation.domain.UserMessage;
-import com.java.system.sessionagent.conversation.port.out.RevisionLookup;
 import com.java.system.sessionagent.tool.application.DirectToolRegistry;
 import com.java.system.sessionagent.tool.application.ToolSnapshot;
 import org.junit.jupiter.api.Test;
@@ -110,7 +109,7 @@ class ConversationDomainTest {
         ToolMessage citeable = toolMessage(Optional.of("payment-service"), Optional.of("revision-1"), true);
         ToolMessage catalog = toolMessage(Optional.empty(), Optional.empty(), false);
         List<SessionMessage> history = new ArrayList<>(List.of(citeable));
-        ToolSnapshot toolSnapshot = new DirectToolRegistry(List.of()).snapshot(false);
+        ToolSnapshot toolSnapshot = new DirectToolRegistry(List.of()).snapshot();
 
         ModelRequest modelRequest = new ModelRequest(history, toolSnapshot, false);
         history.clear();
@@ -234,14 +233,6 @@ class ConversationDomainTest {
                 Optional.empty(),
                 Optional.empty(),
                 Optional.empty()).rejectedArguments()).isEmpty();
-    }
-
-    @Test
-    void keepsRevisionOutcomesClosedAndValidatesCurrentRevision() {
-        RevisionLookup revisionLookup = new RevisionLookup.CurrentRevision(" revision-1 ");
-
-        assertThat(((RevisionLookup.CurrentRevision) revisionLookup).revision()).isEqualTo(" revision-1 ");
-        assertThatIllegalArgumentException().isThrownBy(() -> new RevisionLookup.CurrentRevision(" "));
     }
 
     private static ToolMessage toolMessage(

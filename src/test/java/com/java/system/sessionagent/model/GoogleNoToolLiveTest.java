@@ -103,7 +103,7 @@ class GoogleNoToolLiveTest {
         RestClient semanticClient = RestClient.create("https://semantic.invalid");
         SemanticToolProvider toolProvider = new SemanticToolProvider(
                 List::of,
-                new SemanticSourceClient(semanticClient, new SemanticRepositoryClient(semanticClient)));
+                new SemanticSourceClient(semanticClient));
         DirectToolRegistry registry = new DirectToolRegistry(toolProvider.registrations());
         GoogleGenAiChatOptions options = (GoogleGenAiChatOptions) provider.getOptions();
         GoogleConversationModel model = new GoogleConversationModel(
@@ -117,7 +117,7 @@ class GoogleNoToolLiveTest {
                         MessageRole.USER, "Alice", "有哪些付款方式？請先呼叫 list_repositories，不要直接回答。");
 
         ModelDecision firstDecision = model.decide(
-                new ModelRequest(List.of(question), registry.snapshot(false), false), usage -> { });
+                new ModelRequest(List.of(question), registry.snapshot(), false), usage -> { });
         assertThat(firstDecision).isInstanceOf(ModelDecision.UseTool.class);
         ModelDecision.UseTool catalogRequest = (ModelDecision.UseTool) firstDecision;
         assertThat(catalogRequest.toolName().value()).isEqualTo("list_repositories");
@@ -130,7 +130,7 @@ class GoogleNoToolLiveTest {
                         """, false);
 
         ModelDecision secondDecision = model.decide(
-                new ModelRequest(List.of(question, catalogResult), registry.snapshot(true), false), usage -> { });
+                new ModelRequest(List.of(question, catalogResult), registry.snapshot(), false), usage -> { });
 
         assertThat(secondDecision).isInstanceOfAny(ModelDecision.UseTool.class, ModelDecision.Reply.class);
         System.out.printf("GOOGLE_ALL_TOOLS_LIVE_RESULT=%s%n", secondDecision.getClass().getSimpleName());

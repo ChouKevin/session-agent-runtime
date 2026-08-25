@@ -64,10 +64,10 @@ class RuntimeObservabilityTest {
         });
         RestClient.Builder builder = RestClient.builder().baseUrl("http://semantic.test").observationRegistry(observations);
         MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
-        server.expect(requestTo("http://semantic.test/v1/repositories/repo-1")).andRespond(withStatus(HttpStatus.SERVICE_UNAVAILABLE));
+        server.expect(requestTo("http://semantic.test/v1/repositories")).andRespond(withStatus(HttpStatus.SERVICE_UNAVAILABLE));
         SemanticRepositoryClient semanticClient = new SemanticRepositoryClient(builder.build());
 
-        assertThatThrownBy(() -> semanticClient.currentRevision(new RepositoryId("repo-1")))
+        assertThatThrownBy(semanticClient::listRepositories)
                 .isInstanceOf(SemanticFailure.class);
         server.verify();
 

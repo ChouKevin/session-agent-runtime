@@ -28,9 +28,14 @@ final class ConversationFailurePolicy {
         return switch (failure.kind()) {
             case INVALID_INPUT -> correctable(FeedbackCode.INVALID_TOOL_INPUT);
             case INPUT_TOO_LARGE -> correctable(FeedbackCode.TOOL_INPUT_TOO_LARGE);
-            case UNKNOWN_REPOSITORY -> correctable(FeedbackCode.UNKNOWN_REPOSITORY);
-            case REVISION_CHANGED -> correctable(FeedbackCode.REVISION_CHANGED);
-            case TRANSIENT -> new Failure(Action.RETRY, FeedbackCode.DEPENDENCY_UNAVAILABLE, failure.retryAfter());
+            case REPOSITORY_NOT_FOUND -> correctable(FeedbackCode.UNKNOWN_REPOSITORY);
+            case REVISION_OUTDATED -> correctable(FeedbackCode.REVISION_OUTDATED);
+            case INDEX_NOT_READY -> correctable(FeedbackCode.INDEX_NOT_READY);
+            case INDEX_CONTRACT_MISMATCH -> correctable(FeedbackCode.INDEX_CONTRACT_MISMATCH);
+            case CODE_FACT_NOT_FOUND -> correctable(FeedbackCode.CODE_FACT_NOT_FOUND);
+            case CODE_FACT_KIND_UNSUPPORTED -> correctable(FeedbackCode.CODE_FACT_KIND_UNSUPPORTED);
+            case INVALID_QUERY -> correctable(FeedbackCode.INVALID_QUERY);
+            case SEMANTIC_INDEX_UNAVAILABLE -> new Failure(Action.RETRY, FeedbackCode.DEPENDENCY_UNAVAILABLE, failure.retryAfter());
             case FORBIDDEN -> new Failure(Action.TERMINAL, FeedbackCode.DEPENDENCY_FORBIDDEN, Optional.empty());
             case INVALID_RESPONSE -> new Failure(Action.TERMINAL, FeedbackCode.DEPENDENCY_INVALID_RESPONSE, Optional.empty());
         };

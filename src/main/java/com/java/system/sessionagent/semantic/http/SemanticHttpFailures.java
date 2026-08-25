@@ -16,7 +16,7 @@ final class SemanticHttpFailures {
     static SemanticFailure classify(RestClientException exception) {
         Objects.requireNonNull(exception, "Semantic REST client failure must not be null");
         if (hasTimeoutCause(exception)) {
-            return SemanticFailure.transientFailure(Optional.empty(), exception);
+            return SemanticFailure.semanticIndexUnavailable(Optional.empty(), exception);
         }
         return SemanticFailure.invalidResponse();
     }

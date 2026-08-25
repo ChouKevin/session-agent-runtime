@@ -20,9 +20,9 @@ class SpringAiToolCallbackFactoryTest {
     void forwards_the_semantic_definition_without_reencoding_its_schema() {
         RestClient restClient = RestClient.create();
         SemanticToolProvider provider = new SemanticToolProvider(
-                List::of, new SemanticSourceClient(restClient, new SemanticRepositoryClient(restClient)));
+                List::of, new SemanticSourceClient(restClient));
         DirectToolRegistry registry = new DirectToolRegistry(provider.registrations());
-        ToolSnapshot snapshot = registry.snapshot(true);
+        ToolSnapshot snapshot = registry.snapshot();
         ToolDefinition sourceDefinition = snapshot.definitions().stream()
                 .filter(definition -> definition.name().value().equals("codebase_get_method_source"))
                 .findFirst()

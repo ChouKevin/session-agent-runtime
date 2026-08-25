@@ -4,7 +4,6 @@ import com.java.system.sessionagent.conversation.application.CitationValidator;
 import com.java.system.sessionagent.conversation.domain.ResultId;
 import com.java.system.sessionagent.conversation.domain.SessionId;
 import com.java.system.sessionagent.conversation.port.out.ConversationStore;
-import com.java.system.sessionagent.conversation.port.out.RevisionLookup;
 import org.junit.jupiter.api.Test;
 
 import java.util.HashMap;
@@ -24,16 +23,11 @@ class CitationValidatorTest {
         Map<ResultId, ConversationStore.ResultProjection> results = Map.of(
                 first, result(first, session, "payment", "rev-1", true),
                 second, result(second, session, "order", "rev-2", true));
-        Map<String, Integer> reads = new HashMap<>();
-        CitationValidator validator = new CitationValidator(new ResultsStore(results), repository -> {
-            reads.merge(repository, 1, Integer::sum);
-            return new RevisionLookup.CurrentRevision(repository.equals("payment") ? "rev-1" : "rev-2");
-        });
+        CitationValidator validator = new CitationValidator(new ResultsStore(results));
 
         CitationValidator.Validation outcome = validator.validate(session, List.of(second, first));
 
         assertThat(outcome).isEqualTo(new CitationValidator.Validation.Accepted(List.of(second, first)));
-        assertThat(reads).containsExactlyInAnyOrderEntriesOf(Map.of("payment", 1, "order", 1));
     }
 
     @Test
@@ -44,7 +38,7 @@ class CitationValidatorTest {
         ResultsStore store = new ResultsStore(Map.of(
                 crossSession, result(crossSession, new SessionId("session-2"), "payment", "rev-1", true),
                 catalog, result(catalog, session, "", "", false)));
-        CitationValidator validator = new CitationValidator(store, repository -> { throw new AssertionError("revision read"); });
+        CitationValidator validator = new CitationValidator(store);
 
         assertThat(validator.validate(session, List.of(new ResultId("missing"))))
                 .isEqualTo(new CitationValidator.Validation.Correctable(CitationValidator.CorrectionReason.RESULT_NOT_FOUND));
@@ -56,22 +50,6 @@ class CitationValidatorTest {
                 .isEqualTo(new CitationValidator.Validation.Correctable(CitationValidator.CorrectionReason.EMPTY_OR_DUPLICATE));
         assertThat(validator.validate(session, List.of(crossSession, crossSession)))
                 .isEqualTo(new CitationValidator.Validation.Correctable(CitationValidator.CorrectionReason.EMPTY_OR_DUPLICATE));
-    }
-
-    @Test
-    void maps_stale_unknown_temporary_and_forbidden_revision_outcomes() {
-        SessionId session = new SessionId("session-1");
-        ResultId resultId = new ResultId("result-1");
-        ResultsStore store = new ResultsStore(Map.of(resultId, result(resultId, session, "payment", "rev-1", true)));
-
-        assertThat(new CitationValidator(store, repository -> new RevisionLookup.CurrentRevision("rev-2")).validate(session, List.of(resultId)))
-                .isEqualTo(new CitationValidator.Validation.Correctable(CitationValidator.CorrectionReason.REVISION_CHANGED));
-        assertThat(new CitationValidator(store, repository -> new RevisionLookup.UnknownRepository()).validate(session, List.of(resultId)))
-                .isEqualTo(new CitationValidator.Validation.Correctable(CitationValidator.CorrectionReason.UNKNOWN_REPOSITORY));
-        assertThat(new CitationValidator(store, repository -> new RevisionLookup.TemporaryFailure()).validate(session, List.of(resultId)))
-                .isInstanceOf(CitationValidator.Validation.Retry.class);
-        assertThat(new CitationValidator(store, repository -> new RevisionLookup.Forbidden()).validate(session, List.of(resultId)))
-                .isInstanceOf(CitationValidator.Validation.Terminal.class);
     }
 
     private static ConversationStore.ResultProjection result(ResultId id, SessionId session, String repository, String revision, boolean citeable) {

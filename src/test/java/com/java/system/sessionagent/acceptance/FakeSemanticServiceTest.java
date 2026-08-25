@@ -18,15 +18,14 @@ class FakeSemanticServiceTest {
     void rejects_api_route_evidence_outside_the_payment_service_scope() {
         try (FakeSemanticService semantic = new FakeSemanticService()) {
             RestClient restClient = RestClient.builder().baseUrl(semantic.baseUrl()).build();
-            SemanticRepositoryClient repositories = new SemanticRepositoryClient(restClient);
-            SemanticSourceClient source = new SemanticSourceClient(restClient, repositories);
+            SemanticSourceClient source = new SemanticSourceClient(restClient);
 
-            assertThatThrownBy(() -> source.lookupApiRoute(new LookupApiRouteInput("order-service", "/bnpl", "GET")))
+            assertThatThrownBy(() -> source.lookupApiRoute(new LookupApiRouteInput("order-service", "order-revision-1", "GET", "/bnpl")))
                     .isInstanceOfSatisfying(SemanticFailure.class,
-                            failure -> assertThat(failure.kind()).isEqualTo(SemanticFailure.Kind.UNKNOWN_REPOSITORY));
+                            failure -> assertThat(failure.kind()).isEqualTo(SemanticFailure.Kind.REPOSITORY_NOT_FOUND));
             assertThat(semantic.calls()).filteredOn(call -> call.path().equals("/v1/api-routes/lookup"))
                     .singleElement().satisfies(call -> assertThat(call.body())
-                            .contains("\"repoId\":\"order-service\"", "\"expectedRevision\":\"order-revision-1\""));
+                            .contains("\"repositoryId\":\"order-service\"", "\"revision\":\"order-revision-1\""));
         }
     }
 

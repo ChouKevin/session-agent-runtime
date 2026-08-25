@@ -41,7 +41,7 @@ final class FakeConversationModel implements ConversationModel {
         boolean invalidRepositoryFeedback = jobHistory.stream().filter(FeedbackMessage.class::isInstance).map(FeedbackMessage.class::cast)
                 .anyMatch(message -> message.code().equals("UNKNOWN_REPOSITORY"));
         if (text.contains("invalid repository") && !invalidRepositoryFeedback) {
-            return tool("invalid-source-" + question.sequence().value(), LIST_ENTRY_POINTS, "{\"repositoryId\":\"missing-service\"}");
+            return tool("invalid-source-" + question.sequence().value(), LIST_ENTRY_POINTS, "{\"repositoryId\":\"missing-service\",\"revision\":\"missing-revision\"}");
         }
         if (text.contains("invalid repository") && jobHistory.stream().filter(ToolMessage.class::isInstance).map(ToolMessage.class::cast)
                 .filter(message -> message.toolName().equals("list_repositories")).count() < 2) {
@@ -49,24 +49,24 @@ final class FakeConversationModel implements ConversationModel {
         }
         if (text.contains("bnpl") && jobHistory.stream().filter(ToolMessage.class::isInstance).map(ToolMessage.class::cast)
                 .noneMatch(ToolMessage::citeable)) {
-            return tool("bnpl-source-" + question.sequence().value(), LIST_ENTRY_POINTS, "{\"repositoryId\":\"payment-service\"}");
+            return tool("bnpl-source-" + question.sequence().value(), LIST_ENTRY_POINTS, "{\"repositoryId\":\"payment-service\",\"revision\":\"payment-revision-1\"}");
         }
         if (text.contains("bnpl") && jobHistory.stream().filter(ToolMessage.class::isInstance).map(ToolMessage.class::cast)
                 .noneMatch(message -> message.toolName().equals(LOOKUP_API_ROUTE.value()))) {
             return tool("bnpl-route-" + question.sequence().value(), LOOKUP_API_ROUTE,
-                    "{\"repositoryId\":\"payment-service\",\"apiPath\":\"/bnpl\",\"httpMethod\":\"GET\"}");
+                    "{\"repositoryId\":\"payment-service\",\"revision\":\"payment-revision-1\",\"path\":\"/bnpl\",\"httpMethod\":\"GET\"}");
         }
         if (text.contains("cancellation") && jobHistory.stream().filter(ToolMessage.class::isInstance).map(ToolMessage.class::cast)
                 .noneMatch(message -> message.repositoryId().filter("order-service"::equals).isPresent())) {
-            return tool("order-cancellation-" + question.sequence().value(), LIST_ENTRY_POINTS, "{\"repositoryId\":\"order-service\"}");
+            return tool("order-cancellation-" + question.sequence().value(), LIST_ENTRY_POINTS, "{\"repositoryId\":\"order-service\",\"revision\":\"order-revision-1\"}");
         }
         if (text.contains("cancellation") && jobHistory.stream().filter(ToolMessage.class::isInstance).map(ToolMessage.class::cast)
                 .noneMatch(message -> message.repositoryId().filter("payment-service"::equals).isPresent())) {
-            return tool("payment-refund-" + question.sequence().value(), LIST_ENTRY_POINTS, "{\"repositoryId\":\"payment-service\"}");
+            return tool("payment-refund-" + question.sequence().value(), LIST_ENTRY_POINTS, "{\"repositoryId\":\"payment-service\",\"revision\":\"payment-revision-1\"}");
         }
         if (jobHistory.stream().filter(ToolMessage.class::isInstance).map(ToolMessage.class::cast)
                 .noneMatch(ToolMessage::citeable)) {
-            return tool("payment-source-" + question.sequence().value(), LIST_ENTRY_POINTS, "{\"repositoryId\":\"payment-service\"}");
+            return tool("payment-source-" + question.sequence().value(), LIST_ENTRY_POINTS, "{\"repositoryId\":\"payment-service\",\"revision\":\"payment-revision-1\"}");
         }
         ResultId citation = jobHistory.stream().filter(ToolMessage.class::isInstance).map(ToolMessage.class::cast)
                 .filter(ToolMessage::citeable).max(Comparator.comparingLong(message -> message.sequence().value())).orElseThrow().resultId();

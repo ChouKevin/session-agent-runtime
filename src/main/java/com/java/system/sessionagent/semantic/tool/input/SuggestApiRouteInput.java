@@ -1,21 +1,5 @@
 package com.java.system.sessionagent.semantic.tool.input;
-
 import com.fasterxml.jackson.annotation.JsonProperty;
-import jakarta.validation.constraints.Max;
-import jakarta.validation.constraints.Min;
+import com.fasterxml.jackson.annotation.JsonPropertyDescription;
 import jakarta.validation.constraints.NotBlank;
-import jakarta.validation.constraints.Size;
-
-import java.util.Objects;
-
-public record SuggestApiRouteInput(
-        @JsonProperty(required = true) @NotBlank @Size(max = 128) String repositoryId,
-        @JsonProperty(required = true) @NotBlank String apiPath,
-        @JsonProperty(required = false) String httpMethod,
-        @JsonProperty(required = false) @Min(1) @Max(20) Integer limit) {
-    public SuggestApiRouteInput {
-        apiPath = SemanticInputRules.text(apiPath, "API path");
-        httpMethod = SemanticInputRules.optionalText(httpMethod, "HTTP method");
-        limit = Objects.requireNonNullElse(limit, 10);
-    }
-}
+public record SuggestApiRouteInput(@JsonProperty(required = true) @JsonPropertyDescription("Exact repositoryId copied from prior evidence") @NotBlank String repositoryId, @JsonProperty(required = true) @JsonPropertyDescription("Exact revision paired with repositoryId in prior evidence") @NotBlank String revision, @JsonProperty(required = true) @NotBlank String httpMethod, @JsonProperty(required = true) @NotBlank String path) { }

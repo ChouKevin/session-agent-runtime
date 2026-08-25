@@ -1,8 +1,6 @@
 package com.java.system.sessionagent.bootstrap;
 
 import com.java.system.sessionagent.conversation.application.MessageJobRetryPolicy;
-import com.java.system.sessionagent.conversation.port.out.RepositoryRevisionReader;
-import com.java.system.sessionagent.conversation.port.out.RevisionLookup;
 import com.java.system.sessionagent.semantic.SemanticFailure;
 import com.java.system.sessionagent.semantic.dto.MethodTarget;
 import com.java.system.sessionagent.semantic.http.SemanticRepositoryClient;
@@ -80,38 +78,6 @@ class RuntimeConfigurationTest {
     }
 
     @Test
-    void turnsAStalledSemanticResponseIntoTransientFailureWithinConfiguredTimeout() throws Exception {
-        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
-        try {
-            server.createContext("/v1/repositories/repository-a", exchange -> {
-                try {
-                    Thread.sleep(Duration.ofMillis(500));
-                    exchange.sendResponseHeaders(200, -1);
-                } catch (InterruptedException exception) {
-                    Thread.currentThread().interrupt();
-                } finally {
-                    exchange.close();
-                }
-            });
-            server.start();
-            RuntimeConfiguration configuration = new RuntimeConfiguration();
-            RuntimeProperties properties = new RuntimeProperties(
-                    new RuntimeProperties.Semantic("http://127.0.0.1:" + server.getAddress().getPort(), "configured-token", Duration.ofSeconds(1), Duration.ofMillis(50)),
-                    new RuntimeProperties.Model("gemini-3.1-flash-lite"),
-                    new RuntimeProperties.Worker(Duration.ofSeconds(1), Duration.ofSeconds(30), 3, Duration.ofSeconds(60)));
-            SemanticRepositoryClient semanticClient = configuration.semanticRepositoryClient(
-                    configuration.semanticRestClient(properties, io.micrometer.observation.ObservationRegistry.NOOP));
-
-            assertThatThrownBy(() -> semanticClient.currentRevision(new RepositoryId("repository-a")))
-                    .isInstanceOf(com.java.system.sessionagent.semantic.SemanticFailure.class)
-                    .satisfies(exception -> assertThat(((com.java.system.sessionagent.semantic.SemanticFailure) exception).kind())
-                            .isEqualTo(com.java.system.sessionagent.semantic.SemanticFailure.Kind.TRANSIENT));
-        } finally {
-            server.stop(0);
-        }
-    }
-
-    @Test
     void turnsAStalledSemanticSourceResponseIntoTransientFailureWithinConfiguredTimeout() throws Exception {
         HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         try {
@@ -144,18 +110,13 @@ class RuntimeConfigurationTest {
                     new RuntimeProperties.Worker(Duration.ofSeconds(1), Duration.ofSeconds(30), 3, Duration.ofSeconds(60)));
             RestClient restClient = configuration.semanticRestClient(
                     properties, io.micrometer.observation.ObservationRegistry.NOOP);
-            SemanticRepositoryClient repositoryClient = configuration.semanticRepositoryClient(restClient);
-            SemanticSourceClient semanticClient = configuration.semanticSourceClient(
-                    restClient, repositoryClient);
-            MethodTarget target = new MethodTarget(new MethodTarget.SourceType(
-                    new MethodTarget.JavaType("com.example", "OrderService"),
-                    "src/main/java/com/example/OrderService.java"), "cancel", List.of("java.lang.String"));
-
+            SemanticSourceClient semanticClient = configuration.semanticSourceClient(restClient);
             assertThatThrownBy(() -> semanticClient.incomingCallGraph(
-                    new IncomingCallGraphInput("repository-a", target, 2)))
+                    new IncomingCallGraphInput("repository-a", "revision-a", "com.example", "OrderService",
+                            "src/main/java/com/example/OrderService.java", "cancel", List.of("java.lang.String"), 2, 100)))
                     .isInstanceOf(SemanticFailure.class)
                     .satisfies(exception -> assertThat(((SemanticFailure) exception).kind())
-                            .isEqualTo(SemanticFailure.Kind.TRANSIENT));
+                            .isEqualTo(SemanticFailure.Kind.SEMANTIC_INDEX_UNAVAILABLE));
         } finally {
             server.stop(0);
         }
@@ -193,23 +154,4 @@ class RuntimeConfigurationTest {
                 "jdbc:postgresql://localhost:5432/session_agent", " "));
     }
 
-    @Test
-    void closesEverySemanticFailureAtTheConversationRevisionBoundary() {
-        SemanticRepositoryClient client = mock(SemanticRepositoryClient.class);
-        RuntimeConfiguration configuration = new RuntimeConfiguration();
-        RepositoryRevisionReader reader = configuration.repositoryRevisionReader(client);
-
-        doThrow(SemanticFailure.transientFailure(java.util.Optional.empty())).when(client).currentRevision(any());
-        assertThat(reader.read("repo-a")).isInstanceOf(RevisionLookup.TemporaryFailure.class);
-        doThrow(SemanticFailure.forbidden()).when(client).currentRevision(any());
-        assertThat(reader.read("repo-a")).isInstanceOf(RevisionLookup.Forbidden.class);
-        doThrow(SemanticFailure.unknownRepository()).when(client).currentRevision(any());
-        assertThat(reader.read("repo-a")).isInstanceOf(RevisionLookup.UnknownRepository.class);
-        doThrow(SemanticFailure.revisionChanged()).when(client).currentRevision(any());
-        assertThat(reader.read("repo-a")).isInstanceOf(RevisionLookup.InvalidResponse.class);
-        doThrow(SemanticFailure.invalidResponse()).when(client).currentRevision(any());
-        assertThat(reader.read("repo-a")).isInstanceOf(RevisionLookup.InvalidResponse.class);
-        doThrow(new IllegalStateException("raw semantic detail")).when(client).currentRevision(any());
-        assertThat(reader.read("repo-a")).isInstanceOf(RevisionLookup.InvalidResponse.class);
-    }
 }

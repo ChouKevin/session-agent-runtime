@@ -3,8 +3,6 @@ package com.java.system.sessionagent.semantic.tool;
 import com.java.system.sessionagent.semantic.RepositoryCatalog;
 import com.java.system.sessionagent.semantic.domain.RepositorySummary;
 import com.java.system.sessionagent.semantic.http.SemanticSourceClient;
-import com.java.system.sessionagent.semantic.json.SemanticResultJsonWriter;
-import com.java.system.sessionagent.semantic.tool.input.DiscoverConceptsInput;
 import com.java.system.sessionagent.semantic.tool.input.DiscoverEventListenersInput;
 import com.java.system.sessionagent.semantic.tool.input.DiscoverMethodImplementationsInput;
 import com.java.system.sessionagent.semantic.tool.input.DiscoverTypeMembersInput;
@@ -16,7 +14,8 @@ import com.java.system.sessionagent.semantic.tool.input.IncomingCallGraphInput;
 import com.java.system.sessionagent.semantic.tool.input.ListEntryPointsInput;
 import com.java.system.sessionagent.semantic.tool.input.LookupApiRouteInput;
 import com.java.system.sessionagent.semantic.tool.input.OutgoingCallGraphInput;
-import com.java.system.sessionagent.semantic.tool.input.ResolveConceptInput;
+import com.java.system.sessionagent.semantic.tool.input.GetCodeFactInput;
+import com.java.system.sessionagent.semantic.tool.input.SearchCodeFactsInput;
 import com.java.system.sessionagent.semantic.tool.input.ResolveSourceSymbolInput;
 import com.java.system.sessionagent.semantic.tool.input.SuggestApiRouteInput;
 import com.java.system.sessionagent.tool.application.ToolRegistration;
@@ -42,30 +41,27 @@ public final class SemanticToolProvider {
     private final Optional<SemanticSourceClient> sourceClient;
     private final ToolSchemaFactory schemaFactory;
     private final StrictJsonCodec jsonCodec;
-    private final SemanticResultJsonWriter resultWriter;
 
     public SemanticToolProvider(RepositoryCatalog repositoryCatalog) {
-        this(repositoryCatalog, Optional.empty(), new ToolSchemaFactory(), new StrictJsonCodec(), new SemanticResultJsonWriter());
+        this(repositoryCatalog, Optional.empty(), new ToolSchemaFactory(), new StrictJsonCodec());
     }
 
     public SemanticToolProvider(RepositoryCatalog repositoryCatalog, SemanticSourceClient sourceClient) {
-        this(repositoryCatalog, Optional.of(sourceClient), new ToolSchemaFactory(), new StrictJsonCodec(), new SemanticResultJsonWriter());
+        this(repositoryCatalog, Optional.of(sourceClient), new ToolSchemaFactory(), new StrictJsonCodec());
     }
 
     SemanticToolProvider(
             RepositoryCatalog repositoryCatalog, Optional<SemanticSourceClient> sourceClient,
             ToolSchemaFactory schemaFactory,
-            StrictJsonCodec jsonCodec, SemanticResultJsonWriter resultWriter) {
+            StrictJsonCodec jsonCodec) {
         Assert.notNull(repositoryCatalog, "Repository catalog must not be null");
         Assert.notNull(schemaFactory, "Tool schema factory must not be null");
         Assert.notNull(jsonCodec, "JSON codec must not be null");
         Assert.notNull(sourceClient, "Semantic source client must not be null");
-        Assert.notNull(resultWriter, "Semantic result writer must not be null");
         this.repositoryCatalog = repositoryCatalog;
         this.sourceClient = sourceClient;
         this.schemaFactory = schemaFactory;
         this.jsonCodec = jsonCodec;
-        this.resultWriter = resultWriter;
     }
 
     public List<ToolRegistration<?>> registrations() {
@@ -113,12 +109,12 @@ public final class SemanticToolProvider {
                 source(SemanticToolName.INCOMING_CALL_GRAPH,
                         "Find callers of one complete method target in one repository at depth 1 or 2.",
                         IncomingCallGraphInput.class, IncomingCallGraphInput::repositoryId, client::incomingCallGraph),
-                source(SemanticToolName.DISCOVER_CONCEPTS,
-                        "Discover codebase concepts from one to four conjunctive terms; every term must match the same concept. Synonyms or alternatives require separate searches; method bodies are not searched.",
-                        DiscoverConceptsInput.class, DiscoverConceptsInput::repositoryId, client::discoverConcepts),
-                source(SemanticToolName.RESOLVE_CONCEPT,
-                        "Resolve the exact concept identity copied from a prior Semantic result.",
-                        ResolveConceptInput.class, ResolveConceptInput::repositoryId, client::resolveConcept),
+                source(SemanticToolName.SEARCH_CODE_FACTS,
+                        "Search code-derived facts. Copy repositoryId and revision from prior evidence; omit unknown optional filters rather than guessing.",
+                        SearchCodeFactsInput.class, SearchCodeFactsInput::repositoryId, client::searchCodeFacts),
+                source(SemanticToolName.GET_CODE_FACT,
+                        "Get one exact factId copied from a prior code-fact search, using the same repositoryId and revision from prior evidence.",
+                        GetCodeFactInput.class, GetCodeFactInput::repositoryId, client::getCodeFact),
                 source(SemanticToolName.DISCOVER_EVENT_LISTENERS,
                         "Discover listeners for a fully qualified Java event type, for example com.example.order.OrderCancelledEvent.",
                         DiscoverEventListenersInput.class, DiscoverEventListenersInput::repositoryId, client::discoverEventListeners),
@@ -166,10 +162,18 @@ public final class SemanticToolProvider {
 
     private static ToolExecutionFailure translate(com.java.system.sessionagent.semantic.SemanticFailure failure) {
         return switch (failure.kind()) {
-            case INVALID_INPUT -> ToolExecutionFailure.invalidInput();
-            case UNKNOWN_REPOSITORY -> ToolExecutionFailure.unknownRepository();
-            case REVISION_CHANGED -> ToolExecutionFailure.revisionChanged();
-            case TRANSIENT -> ToolExecutionFailure.transientFailure(failure.retryAfter());
+            case INVALID_ARGUMENT -> ToolExecutionFailure.invalidInput();
+            case REPOSITORY_NOT_FOUND -> ToolExecutionFailure.repositoryNotFound();
+            case REVISION_OUTDATED -> {
+                com.java.system.sessionagent.semantic.SemanticFailure.RevisionOutdatedDetails details = failure.revisionOutdated().orElseThrow();
+                yield ToolExecutionFailure.revisionOutdated(details.repositoryId(), details.requestedRevision(), details.currentRevision(), details.retryGuidance());
+            }
+            case INDEX_NOT_READY -> ToolExecutionFailure.indexNotReady();
+            case INDEX_CONTRACT_MISMATCH -> ToolExecutionFailure.indexContractMismatch();
+            case CODE_FACT_NOT_FOUND -> ToolExecutionFailure.codeFactNotFound();
+            case CODE_FACT_KIND_UNSUPPORTED -> ToolExecutionFailure.codeFactKindUnsupported();
+            case INVALID_QUERY -> ToolExecutionFailure.invalidQuery();
+            case SEMANTIC_INDEX_UNAVAILABLE -> ToolExecutionFailure.semanticIndexUnavailable(failure.retryAfter());
             case FORBIDDEN -> ToolExecutionFailure.forbidden();
             case INVALID_RESPONSE -> ToolExecutionFailure.invalidResponse();
         };
@@ -177,18 +181,18 @@ public final class SemanticToolProvider {
 
     private <T> ToolResult sourceResult(String repositoryId, SemanticSourceClient.SourceResult<T> sourceResult) {
         return new ToolResult(Optional.of(repositoryId), Optional.of(sourceResult.revision().value()),
-                resultWriter.write(sourceResult.response()), true);
+                jsonCodec.canonicalize(sourceResult.response()), true);
     }
 
     private record ListRepositoriesResult(List<RepositorySummaryResult> repositories) {
 
         private static ListRepositoriesResult from(List<RepositorySummary> repositories) {
             return new ListRepositoriesResult(repositories.stream()
-                    .map(repository -> new RepositorySummaryResult(repository.repositoryId().value(), repository.displayName()))
+                    .map(repository -> new RepositorySummaryResult(repository.repositoryId().value(), repository.revision().value()))
                     .toList());
         }
     }
 
-    private record RepositorySummaryResult(String repositoryId, String displayName) {
+    private record RepositorySummaryResult(String repositoryId, String revision) {
     }
 }

@@ -67,7 +67,7 @@ class ApplicationStartupTest {
         contextRunner.run(context -> {
             assertThat(context).hasNotFailed();
             assertThat(context.getBeansOfType(DirectToolRegistry.class)).hasSize(1);
-            assertThat(context.getBean(DirectToolRegistry.class).snapshot(true).definitions()).hasSize(16);
+            assertThat(context.getBean(DirectToolRegistry.class).snapshot().definitions()).hasSize(16);
             assertThat(context.getBeansOfType(ConversationStore.class)).hasSize(1);
             assertThat(context.getBeansOfType(com.java.system.sessionagent.model.GoogleConversationModel.class)).hasSize(1);
             assertThat(context.getBeansOfType(com.java.system.sessionagent.conversation.application.MessageJobService.class)).hasSize(1);
@@ -140,7 +140,7 @@ class ApplicationStartupTest {
 
                     ModelDecision decision = model.decide(new ModelRequest(List.of(new UserMessage(new SessionId("session-1"),
                             new SessionSequence(1), Optional.empty(), Instant.parse("2026-08-16T00:00:00Z"), MessageRole.USER,
-                            "alice", "question")), registry.snapshot(false), false), usage -> { });
+                            "alice", "question")), registry.snapshot(), false), usage -> { });
 
                     assertThat(decision).isInstanceOf(ModelDecision.UseTool.class);
                     assertThat(chatModel.prompt.getOptions()).isInstanceOf(GoogleGenAiChatOptions.class);

@@ -1,12 +1,5 @@
 package com.java.system.sessionagent.semantic.tool.input;
-
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.fasterxml.jackson.annotation.JsonPropertyDescription;
 import jakarta.validation.constraints.NotBlank;
-import jakarta.validation.constraints.Size;
-
-public record LookupApiRouteInput(
-        @JsonProperty(required = true) @NotBlank @Size(max = 128) String repositoryId,
-        @JsonProperty(required = true) @NotBlank String apiPath,
-        @JsonProperty(required = false) String httpMethod) {
-    public LookupApiRouteInput { apiPath = SemanticInputRules.text(apiPath, "API path"); httpMethod = SemanticInputRules.optionalText(httpMethod, "HTTP method"); }
-}
+public record LookupApiRouteInput(@JsonProperty(required = true) @JsonPropertyDescription("Exact repositoryId copied from prior evidence") @NotBlank String repositoryId, @JsonProperty(required = true) @JsonPropertyDescription("Exact revision paired with repositoryId in prior evidence") @NotBlank String revision, @JsonProperty(required = true) @NotBlank String httpMethod, @JsonProperty(required = true) @NotBlank String path) { }

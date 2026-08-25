@@ -60,11 +60,11 @@ final class FakeSemanticService implements AutoCloseable {
         }
         if (path.equals("/v1/api-routes/lookup")) {
             String repositoryId = repositoryId(body);
-            if (!PAYMENT_SERVICE.equals(repositoryId) || !hasExpectedRevision(body, PAYMENT_REVISION)) {
+            if (!PAYMENT_SERVICE.equals(repositoryId) || !hasRevision(body, PAYMENT_REVISION)) {
                 respond(exchange, 404, repositoryNotFound());
                 return;
             }
-            respond(exchange, 200, "{\"candidates\":[],\"observations\":[{\"code\":\"NOT_FOUND\",\"description\":\"No BNPL route was found\"}]}");
+            respond(exchange, 200, envelope(repositoryId, PAYMENT_REVISION, "{\"candidates\":[],\"observations\":[{\"code\":\"NOT_FOUND\",\"description\":\"No BNPL route was found\"}]}"));
             return;
         }
         respond(exchange, 404, "{}");
@@ -74,15 +74,15 @@ final class FakeSemanticService implements AutoCloseable {
         String suffix = path.substring("/v1/repositories/".length());
         String repositoryId = suffix.contains("/") ? suffix.substring(0, suffix.indexOf('/')) : suffix;
         if (!PAYMENT_SERVICE.equals(repositoryId) && !ORDER_SERVICE.equals(repositoryId)) {
-            respond(exchange, 404, "{}");
+            respond(exchange, 404, repositoryNotFound());
             return;
         }
         if (suffix.endsWith("/entry-points")) {
-            if (!hasExpectedRevision(requestUri, revision(repositoryId))) {
+            if (!hasRevision(requestUri, revision(repositoryId))) {
                 respond(exchange, 409, "{}");
                 return;
             }
-            respond(exchange, 200, entryPoints(repositoryId));
+                respond(exchange, 200, envelope(repositoryId, revision(repositoryId), entryPoints(repositoryId)));
             return;
         }
         respond(exchange, 200, repository(repositoryId));
@@ -90,21 +90,19 @@ final class FakeSemanticService implements AutoCloseable {
 
     private static String repositories() {
         return """
-                [{"repoId":"payment-service","mode":"REMOTE","displayName":"Payment Service","currentBranch":"main","currentRevision":"payment-revision-1","cloned":true},
-                 {"repoId":"order-service","mode":"REMOTE","displayName":"Order Service","currentBranch":"main","currentRevision":"order-revision-1","cloned":true}]
+                [{"repositoryId":{"value":"payment-service"},"revision":{"value":"payment-revision-1"},"generationId":{"value":"g-payment"},"manifestDigest":{"value":"d-payment"},"publishedAt":"2026-08-25T00:00:00Z"},
+                 {"repositoryId":{"value":"order-service"},"revision":{"value":"order-revision-1"},"generationId":{"value":"g-order"},"manifestDigest":{"value":"d-order"},"publishedAt":"2026-08-25T00:00:00Z"}]
                 """;
     }
 
     private static String repository(String repositoryId) {
-        String displayName = PAYMENT_SERVICE.equals(repositoryId) ? "Payment Service" : "Order Service";
         String revision = revision(repositoryId);
-        return "{\"repoId\":\"%s\",\"mode\":\"REMOTE\",\"displayName\":\"%s\",\"currentBranch\":\"main\",\"currentRevision\":\"%s\",\"cloned\":true}"
-                .formatted(repositoryId, displayName, revision);
+        return "{\"repositoryId\":{\"value\":\"%s\"},\"revision\":{\"value\":\"%s\"},\"generationId\":{\"value\":\"g\"},\"manifestDigest\":{\"value\":\"d\"},\"publishedAt\":\"2026-08-25T00:00:00Z\"}".formatted(repositoryId, revision);
     }
 
     private static String repositoryNotFound() {
         return """
-                {"errorCode":"REPOSITORY_NOT_FOUND","message":"repository is not configured","repoId":null,"expectedRevision":null,"currentRevision":null,"target":null,"candidates":[],"requestId":"fake-request-1"}
+                {"code":"REPOSITORY_NOT_FOUND","message":"repository is not configured"}
                 """;
     }
 
@@ -114,20 +112,20 @@ final class FakeSemanticService implements AutoCloseable {
                 ? "Payment methods include credit card, bank transfer, and wallet; fee formula is loaded from JSON settings."
                 : "Order cancellation is implemented before payment refund handling.";
         return """
-                {"repoId":"%s","analyzedRevision":"%s","entryPoints":[{
+                {"entryPoints":[{
                   "sourceType":{
                     "javaType":{"packageName":"com.example","className":"ConversationFixture"},
                     "sourceFile":"src/main/java/com/example/ConversationFixture.java"
                   },
                   "description":"%s","basePaths":[],"methods":[]
                 }]}
-                """.formatted(repositoryId, revision, description);
+                """.formatted(description);
     }
 
     private static String repositoryId(String requestBody) {
-        int key = requestBody.indexOf("\"repoId\":\"");
+        int key = requestBody.indexOf("\"repositoryId\":\"");
         Assert.isTrue(key >= 0, "Typed request must include repository ID");
-        int start = key + "\"repoId\":\"".length();
+        int start = key + "\"repositoryId\":\"".length();
         int end = requestBody.indexOf('"', start);
         Assert.isTrue(end > start, "Typed request repository ID must be populated");
         return requestBody.substring(start, end);
@@ -137,14 +135,18 @@ final class FakeSemanticService implements AutoCloseable {
         return PAYMENT_SERVICE.equals(repositoryId) ? PAYMENT_REVISION : ORDER_REVISION;
     }
 
-    private static boolean hasExpectedRevision(String requestBody, String revision) {
-        return requestBody.contains("\"expectedRevision\":\"" + revision + "\"");
+    private static String envelope(String repositoryId, String revision, String result) {
+        return "{\"repositoryId\":\"%s\",\"revision\":\"%s\",\"result\":%s}".formatted(repositoryId, revision, result);
     }
 
-    private static boolean hasExpectedRevision(URI requestUri, String revision) {
+    private static boolean hasRevision(String requestBody, String revision) {
+        return requestBody.contains("\"revision\":\"" + revision + "\"");
+    }
+
+    private static boolean hasRevision(URI requestUri, String revision) {
         return Optional.ofNullable(requestUri.getQuery()).stream()
                 .flatMap(query -> Arrays.stream(query.split("&")))
-                .anyMatch(parameter -> parameter.equals("expectedRevision=" + revision));
+                .anyMatch(parameter -> parameter.equals("revision=" + revision));
     }
 
     private static void respond(HttpExchange exchange, int status, String response) throws IOException {

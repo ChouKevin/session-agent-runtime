@@ -4,8 +4,6 @@ import com.fasterxml.jackson.annotation.JsonAnySetter;
 import com.java.system.sessionagent.semantic.RepositoryCatalog;
 import com.java.system.sessionagent.semantic.SemanticFailure;
 import com.java.system.sessionagent.semantic.domain.RepositoryId;
-import com.java.system.sessionagent.semantic.domain.RepositoryRevision;
-import com.java.system.sessionagent.semantic.domain.RepositoryStatus;
 import com.java.system.sessionagent.semantic.domain.RepositorySummary;
 import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.http.HttpHeaders;
@@ -32,7 +30,7 @@ import tools.jackson.databind.json.JsonMapper;
 public final class SemanticRepositoryClient implements RepositoryCatalog {
 
     private static final BigInteger MAX_RETRY_AFTER_SECONDS = BigInteger.valueOf(60);
-    private static final ParameterizedTypeReference<List<RepositoryStatusResponse>> REPOSITORY_STATUS_LIST =
+    private static final ParameterizedTypeReference<List<CurrentGenerationResponse>> CURRENT_GENERATION_LIST =
             new ParameterizedTypeReference<>() {
             };
     private static final JsonMapper RESPONSE_MAPPER = JsonMapper.builder()
@@ -62,75 +60,40 @@ public final class SemanticRepositoryClient implements RepositoryCatalog {
     @Override
     public List<RepositorySummary> listRepositories() {
         try {
-            List<RepositoryStatusResponse> response = restClient.get().uri("/v1/repositories")
-                    .retrieve().body(REPOSITORY_STATUS_LIST);
+            List<CurrentGenerationResponse> response = restClient.get().uri("/v1/repositories")
+                    .retrieve().body(CURRENT_GENERATION_LIST);
             return requiredResponse(response).stream()
-                    .map(this::toStatus)
-                    .map(RepositoryStatus::repository)
+                    .map(this::toSummary)
                     .toList();
         } catch (RestClientResponseException exception) {
             throw classifyCatalogResponse(exception);
         } catch (ResourceAccessException exception) {
-            throw SemanticFailure.transientFailure(Optional.empty(), exception);
+            throw SemanticFailure.semanticIndexUnavailable(Optional.empty(), exception);
         } catch (RestClientException exception) {
             throw SemanticHttpFailures.classify(exception);
-        } catch (IllegalArgumentException exception) {
-            throw SemanticFailure.invalidResponse();
-        }
-    }
-
-    public RepositoryRevision currentRevision(RepositoryId repositoryId) {
-        Assert.notNull(repositoryId, "Repository ID must not be null");
-        try {
-            RepositoryStatusResponse response = restClient.get()
-                    .uri("/v1/repositories/{repositoryId}", repositoryId.value())
-                    .retrieve().body(RepositoryStatusResponse.class);
-            RepositoryStatus status = requiredResponse(response);
-            if (!repositoryId.equals(status.repository().repositoryId())) {
-                throw SemanticFailure.invalidResponse();
-            }
-            return status.currentRevision()
-                    .orElseThrow(SemanticFailure::invalidResponse);
         } catch (SemanticFailure exception) {
             throw exception;
-        } catch (RestClientResponseException exception) {
-            throw classifyRepositoryResponse(exception);
-        } catch (ResourceAccessException exception) {
-            throw SemanticFailure.transientFailure(Optional.empty(), exception);
-        } catch (RestClientException exception) {
-            throw SemanticHttpFailures.classify(exception);
         } catch (IllegalArgumentException exception) {
             throw SemanticFailure.invalidResponse();
-        }
-    }
-
-    private RepositoryStatus requiredResponse(RepositoryStatusResponse response) {
-        if (Objects.isNull(response)) {
+        } catch (RuntimeException exception) {
             throw SemanticFailure.invalidResponse();
         }
-        return toStatus(response);
     }
 
-    private List<RepositoryStatusResponse> requiredResponse(List<RepositoryStatusResponse> response) {
+    private List<CurrentGenerationResponse> requiredResponse(List<CurrentGenerationResponse> response) {
         if (Objects.isNull(response)) {
             throw SemanticFailure.invalidResponse();
         }
         return response;
     }
 
-    private RepositoryStatus toStatus(RepositoryStatusResponse response) {
+    private RepositorySummary toSummary(CurrentGenerationResponse response) {
         if (Objects.isNull(response)) {
             throw SemanticFailure.invalidResponse();
         }
         try {
-            RepositorySummary summary = new RepositorySummary(new RepositoryId(response.repoId()), response.displayName());
-            boolean validRepositoryLocation = "LOCAL_FIXTURE".equals(response.mode())
-                    || ("REMOTE".equals(response.mode()) && StringUtils.hasText(response.currentBranch()));
-            if (!validRepositoryLocation || !Boolean.TRUE.equals(response.cloned())
-                    || !StringUtils.hasText(response.currentRevision())) {
-                throw SemanticFailure.invalidResponse();
-            }
-            return new RepositoryStatus(summary, Optional.of(new RepositoryRevision(response.currentRevision())));
+            return new RepositorySummary(new RepositoryId(response.repositoryId().value()),
+                    new com.java.system.sessionagent.semantic.domain.RepositoryRevision(response.revision().value()));
         } catch (IllegalArgumentException exception) {
             throw SemanticFailure.invalidResponse();
         }
@@ -140,20 +103,13 @@ public final class SemanticRepositoryClient implements RepositoryCatalog {
         return classifySharedResponse(exception);
     }
 
-    private static SemanticFailure classifyRepositoryResponse(RestClientResponseException exception) {
-        if (exception.getStatusCode().value() == 404) {
-            return SemanticFailure.unknownRepository();
-        }
-        return classifySharedResponse(exception);
-    }
-
     private static SemanticFailure classifySharedResponse(RestClientResponseException exception) {
         HttpStatusCode statusCode = exception.getStatusCode();
         if (statusCode.value() == 401 || statusCode.value() == 403) {
             return SemanticFailure.forbidden();
         }
         if (statusCode.value() == 429 || statusCode.value() == 503) {
-            return SemanticFailure.transientFailure(retryAfter(exception.getResponseHeaders()), exception);
+            return SemanticFailure.semanticIndexUnavailable(retryAfter(exception.getResponseHeaders()), exception);
         }
         return SemanticFailure.invalidResponse();
     }
@@ -179,13 +135,20 @@ public final class SemanticRepositoryClient implements RepositoryCatalog {
         }
     }
 
-    private record RepositoryStatusResponse(
-            String repoId,
-            String mode,
-            String displayName,
-            String currentBranch,
-            String currentRevision,
-            Boolean cloned) {
+    private record CurrentGenerationResponse(
+            ValueResponse repositoryId,
+            ValueResponse revision,
+            ValueResponse generationId,
+            ValueResponse manifestDigest,
+            java.time.Instant publishedAt) {
+
+        @JsonAnySetter
+        private void rejectUnknownProperty(String property, Object value) {
+            throw new IllegalArgumentException();
+        }
+    }
+
+    private record ValueResponse(String value) {
 
         @JsonAnySetter
         private void rejectUnknownProperty(String property, Object value) {

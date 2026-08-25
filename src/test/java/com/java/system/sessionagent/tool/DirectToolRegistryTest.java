@@ -45,7 +45,7 @@ class DirectToolRegistryTest {
         DirectToolRegistry registry = new DirectToolRegistry(List.of(registration));
 
         ToolExecutionFailure failure = assertThrows(ToolExecutionFailure.class,
-                () -> registry.execute(registry.snapshot(false), CATALOG_TOOL, "{\"repositoryId\":\"repo-a\"}"));
+                () -> registry.execute(registry.snapshot(), CATALOG_TOOL, "{\"repositoryId\":\"repo-a\"}"));
 
         assertEquals(ToolExecutionFailure.Kind.INVALID_RESPONSE, failure.kind());
         assertThat(failure.getMessage()).doesNotContain("provider secret");
@@ -59,7 +59,7 @@ class DirectToolRegistryTest {
         DirectToolRegistry registry = new DirectToolRegistry(List.of(registration));
 
         ToolExecutionFailure failure = assertThrows(ToolExecutionFailure.class,
-                () -> registry.execute(registry.snapshot(false), CATALOG_TOOL, "{\"repositoryId\":\"repo-a\"}"));
+                () -> registry.execute(registry.snapshot(), CATALOG_TOOL, "{\"repositoryId\":\"repo-a\"}"));
 
         assertEquals(ToolExecutionFailure.Kind.INVALID_RESPONSE, failure.kind());
         assertThat(failure.getMessage()).doesNotContain("JSON contract");
@@ -74,7 +74,7 @@ class DirectToolRegistryTest {
         DirectToolRegistry registry = new DirectToolRegistry(List.of(registration));
 
         ToolExecutionFailure failure = assertThrows(ToolExecutionFailure.class,
-                () -> registry.execute(registry.snapshot(false), CATALOG_TOOL, "{\"repositoryId\":\"repo-a\"}"));
+                () -> registry.execute(registry.snapshot(), CATALOG_TOOL, "{\"repositoryId\":\"repo-a\"}"));
 
         assertEquals(ToolExecutionFailure.Kind.INVALID_RESPONSE, failure.kind());
         assertThat(failure.getMessage()).doesNotContain("private-repository", "private-revision", "executor-private");
@@ -88,7 +88,7 @@ class DirectToolRegistryTest {
         DirectToolRegistry registry = new DirectToolRegistry(List.of(registration));
 
         ToolExecutionFailure failure = assertThrows(ToolExecutionFailure.class,
-                () -> registry.execute(registry.snapshot(true), SOURCE_TOOL, "{\"repositoryId\":\"repo-a\"}"));
+                () -> registry.execute(registry.snapshot(), SOURCE_TOOL, "{\"repositoryId\":\"repo-a\"}"));
 
         assertEquals(ToolExecutionFailure.Kind.INVALID_RESPONSE, failure.kind());
         assertThat(failure.getMessage()).doesNotContain("executor-private");
@@ -98,16 +98,14 @@ class DirectToolRegistryTest {
     private static final ToolName SOURCE_TOOL = new ToolName("source.read");
 
     @Test
-    void exposes_catalog_or_full_immutable_snapshots_in_registration_order() {
+    void exposes_every_registered_tool_in_its_immutable_snapshot_from_the_first_model_call() {
         AtomicInteger invocations = new AtomicInteger();
         DirectToolRegistry registry = new DirectToolRegistry(List.of(
                 registration(CATALOG_TOOL, ToolKind.CATALOG, invocations),
                 registration(SOURCE_TOOL, ToolKind.SOURCE, invocations)));
 
-        ToolSnapshot catalogSnapshot = registry.snapshot(false);
-        ToolSnapshot fullSnapshot = registry.snapshot(true);
+        ToolSnapshot fullSnapshot = registry.snapshot();
 
-        assertEquals(List.of(CATALOG_TOOL), catalogSnapshot.definitions().stream().map(ToolDefinition::name).toList());
         assertEquals(List.of(CATALOG_TOOL, SOURCE_TOOL), fullSnapshot.definitions().stream().map(ToolDefinition::name).toList());
         assertThrows(UnsupportedOperationException.class, () -> fullSnapshot.definitions().add(fullSnapshot.definitions().getFirst()));
     }
@@ -118,7 +116,7 @@ class DirectToolRegistryTest {
         DirectToolRegistry registry = new DirectToolRegistry(List.of(registration(CATALOG_TOOL, ToolKind.CATALOG, invocations)));
 
         ToolExecution execution = registry.execute(
-                registry.snapshot(false), CATALOG_TOOL, "{\"repositoryId\":\"repo-a\",\"limit\":2}");
+                registry.snapshot(), CATALOG_TOOL, "{\"repositoryId\":\"repo-a\",\"limit\":2}");
 
         assertEquals(1, invocations.get());
         assertEquals(CATALOG_TOOL, execution.name());
@@ -138,7 +136,7 @@ class DirectToolRegistryTest {
         DirectToolRegistry registry = new DirectToolRegistry(List.of(registration(CATALOG_TOOL, ToolKind.CATALOG, invocations)));
 
         ToolExecutionFailure exception = assertThrows(ToolExecutionFailure.class,
-                () -> registry.execute(registry.snapshot(false), CATALOG_TOOL, rawArguments));
+                () -> registry.execute(registry.snapshot(), CATALOG_TOOL, rawArguments));
 
         assertEquals(ToolExecutionFailure.Kind.INVALID_INPUT, exception.kind());
         assertEquals(0, invocations.get());
@@ -151,7 +149,7 @@ class DirectToolRegistryTest {
                 registration(CATALOG_TOOL, ToolKind.CATALOG, acceptedInvocations)));
         String acceptedArguments = validInputWithUtf8Length(65_536);
 
-        acceptingRegistry.execute(acceptingRegistry.snapshot(false), CATALOG_TOOL, acceptedArguments);
+        acceptingRegistry.execute(acceptingRegistry.snapshot(), CATALOG_TOOL, acceptedArguments);
 
         assertEquals(1, acceptedInvocations.get());
 
@@ -161,7 +159,7 @@ class DirectToolRegistryTest {
         String rejectedArguments = validInputWithUtf8Length(65_537);
 
         ToolExecutionFailure exception = assertThrows(ToolExecutionFailure.class,
-                () -> rejectingRegistry.execute(rejectingRegistry.snapshot(false), CATALOG_TOOL, rejectedArguments));
+                () -> rejectingRegistry.execute(rejectingRegistry.snapshot(), CATALOG_TOOL, rejectedArguments));
 
         assertEquals(ToolExecutionFailure.Kind.INPUT_TOO_LARGE, exception.kind());
         assertEquals(0, rejectedInvocations.get());
@@ -184,7 +182,7 @@ class DirectToolRegistryTest {
         String rawArguments = "{\"repositoryId\":\"" + "界".repeat(22_000) + "\"}";
 
         ToolExecutionFailure exception = assertThrows(ToolExecutionFailure.class,
-                () -> registry.execute(registry.snapshot(false), CATALOG_TOOL, rawArguments));
+                () -> registry.execute(registry.snapshot(), CATALOG_TOOL, rawArguments));
 
         assertEquals(ToolExecutionFailure.Kind.INPUT_TOO_LARGE, exception.kind());
         assertEquals(0, invocations.get());
@@ -198,7 +196,7 @@ class DirectToolRegistryTest {
                 registration(SOURCE_TOOL, ToolKind.SOURCE, invocations)));
 
         ToolExecutionFailure failure = assertThrows(ToolExecutionFailure.class,
-                () -> registry.execute(registry.snapshot(false), SOURCE_TOOL, "not json"));
+                () -> registry.execute(registry.snapshot(), SOURCE_TOOL, "not json"));
 
         assertEquals(ToolExecutionFailure.Kind.INVALID_INPUT, failure.kind());
         assertEquals(0, invocations.get());

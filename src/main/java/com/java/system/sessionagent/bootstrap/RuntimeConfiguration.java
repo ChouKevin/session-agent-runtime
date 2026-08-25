@@ -9,12 +9,8 @@ import com.java.system.sessionagent.conversation.port.in.MessageIntakePort;
 import com.java.system.sessionagent.conversation.port.out.ConversationModel;
 import com.java.system.sessionagent.conversation.port.out.ConversationStore;
 import com.java.system.sessionagent.conversation.port.out.ConversationTelemetry;
-import com.java.system.sessionagent.conversation.port.out.RepositoryRevisionReader;
-import com.java.system.sessionagent.conversation.port.out.RevisionLookup;
 import com.java.system.sessionagent.model.GoogleConversationModel;
 import com.java.system.sessionagent.model.PromptResource;
-import com.java.system.sessionagent.semantic.SemanticFailure;
-import com.java.system.sessionagent.semantic.domain.RepositoryId;
 import com.java.system.sessionagent.semantic.http.SemanticRepositoryClient;
 import com.java.system.sessionagent.semantic.http.SemanticSourceClient;
 import com.java.system.sessionagent.semantic.tool.SemanticToolProvider;
@@ -91,8 +87,8 @@ public class RuntimeConfiguration {
     }
 
     @Bean
-    SemanticSourceClient semanticSourceClient(RestClient semanticRestClient, SemanticRepositoryClient semanticRepositoryClient) {
-        return new SemanticSourceClient(semanticRestClient, semanticRepositoryClient);
+    SemanticSourceClient semanticSourceClient(RestClient semanticRestClient) {
+        return new SemanticSourceClient(semanticRestClient);
     }
 
     @Bean
@@ -117,25 +113,6 @@ public class RuntimeConfiguration {
     }
 
     @Bean
-    RepositoryRevisionReader repositoryRevisionReader(SemanticRepositoryClient semanticRepositoryClient) {
-        return repositoryId -> {
-            try {
-                return new RevisionLookup.CurrentRevision(semanticRepositoryClient.currentRevision(new RepositoryId(repositoryId)).value());
-            } catch (SemanticFailure failure) {
-                return switch (failure.kind()) {
-                    case INVALID_INPUT -> new RevisionLookup.InvalidResponse();
-                    case UNKNOWN_REPOSITORY -> new RevisionLookup.UnknownRepository();
-                    case TRANSIENT -> new RevisionLookup.TemporaryFailure();
-                    case FORBIDDEN -> new RevisionLookup.Forbidden();
-                    case REVISION_CHANGED, INVALID_RESPONSE -> new RevisionLookup.InvalidResponse();
-                };
-            } catch (RuntimeException exception) {
-                return new RevisionLookup.InvalidResponse();
-            }
-        };
-    }
-
-    @Bean
     MessageIntakePort messageIntakePort(ConversationStore conversationStore, ConversationTelemetry conversationTelemetry) {
         return new ConversationMessageService(conversationStore, conversationTelemetry);
     }
@@ -155,11 +132,10 @@ public class RuntimeConfiguration {
             ConversationStore conversationStore,
             ConversationModel conversationModel,
             DirectToolRegistry directToolRegistry,
-            RepositoryRevisionReader repositoryRevisionReader,
             Clock runtimeClock,
             MessageJobRetryPolicy messageJobRetryPolicy,
             ConversationTelemetry conversationTelemetry) {
-        return new MessageJobService(conversationStore, conversationModel, directToolRegistry, repositoryRevisionReader,
+        return new MessageJobService(conversationStore, conversationModel, directToolRegistry,
                 runtimeClock, messageJobRetryPolicy, conversationTelemetry);
     }
 

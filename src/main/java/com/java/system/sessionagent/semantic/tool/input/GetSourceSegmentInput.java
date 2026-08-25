@@ -1,17 +1,5 @@
 package com.java.system.sessionagent.semantic.tool.input;
-
 import com.fasterxml.jackson.annotation.JsonProperty;
-import com.java.system.sessionagent.semantic.dto.SemanticLocation;
-import jakarta.validation.Valid;
-import jakarta.validation.constraints.Max;
-import jakarta.validation.constraints.Min;
+import com.fasterxml.jackson.annotation.JsonPropertyDescription;
 import jakarta.validation.constraints.NotBlank;
-import jakarta.validation.constraints.Size;
-import org.springframework.util.Assert;
-import java.util.Objects;
-
-public record GetSourceSegmentInput(@JsonProperty(required = true) @NotBlank @Size(max = 128) String repositoryId,
-                                    @JsonProperty(required = true) @Valid SemanticLocation location,
-                                    @JsonProperty(required = false) @Min(0) @Max(20) Integer contextLines) {
-    public GetSourceSegmentInput { Assert.notNull(location, "Source location must not be null"); contextLines = Objects.requireNonNullElse(contextLines, 0); }
-}
+public record GetSourceSegmentInput(@JsonProperty(required = true) @JsonPropertyDescription("Exact repositoryId copied from prior evidence") @NotBlank String repositoryId, @JsonProperty(required = true) @JsonPropertyDescription("Exact revision paired with repositoryId in prior evidence") @NotBlank String revision, @JsonProperty(required = true) @NotBlank String packageName, @JsonProperty(required = true) @NotBlank String className, @JsonProperty(required = true) @NotBlank String sourceFile, @JsonProperty(required = true) Integer startLine, @JsonProperty(required = true) Integer startCharacter, @JsonProperty(required = true) Integer endLine, @JsonProperty(required = true) Integer endCharacter) { }
