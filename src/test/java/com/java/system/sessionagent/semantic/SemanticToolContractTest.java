@@ -78,10 +78,27 @@ class SemanticToolContractTest {
         assertThat(fieldNames(schema.required("properties"))).isEqualTo(properties);
         assertThat(textValues(schema.required("required"))).isEqualTo(required);
         for (String property : properties) {
-            JsonNode description = schema.required("properties").required(property).path("description");
+            JsonNode propertySchema = schema.required("properties").required(property);
+            JsonNode description = propertySchema.path("description");
             assertThat(description.isTextual() && StringUtils.hasText(description.textValue()))
                     .as("%s.%s description", toolName, property)
                     .isTrue();
+            assertThat(propertySchema.path("pattern").isMissingNode()).as("%s.%s pattern", toolName, property)
+                    .isTrue();
+            assertThat(propertySchema.path("minimum").isMissingNode()).as("%s.%s minimum", toolName, property)
+                    .isTrue();
+            assertThat(propertySchema.path("maximum").isMissingNode()).as("%s.%s maximum", toolName, property)
+                    .isTrue();
+            assertThat(propertySchema.path("maxLength").isMissingNode()).as("%s.%s maxLength", toolName, property)
+                    .isTrue();
+            assertThat(propertySchema.path("minItems").isMissingNode()).as("%s.%s minItems", toolName, property)
+                    .isTrue();
+            assertThat(propertySchema.path("maxItems").isMissingNode()).as("%s.%s maxItems", toolName, property)
+                    .isTrue();
+            if (propertySchema.path("minLength").isNumber()) {
+                assertThat(propertySchema.path("minLength").intValue()).as("%s.%s minLength", toolName, property)
+                        .isLessThanOrEqualTo(1);
+            }
         }
     }
 

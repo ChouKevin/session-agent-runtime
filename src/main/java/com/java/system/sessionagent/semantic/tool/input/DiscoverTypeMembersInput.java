@@ -2,11 +2,8 @@ package com.java.system.sessionagent.semantic.tool.input;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.annotation.JsonPropertyDescription;
-import jakarta.validation.constraints.Max;
-import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
-import jakarta.validation.constraints.Size;
 
 import java.util.List;
 
@@ -23,7 +20,7 @@ public record DiscoverTypeMembersInput(
         @NotBlank String sourceFile,
         @JsonProperty(required = true)
         @JsonPropertyDescription("Exact member CodeFactKind values needed for this type; copy known kinds and never guess")
-        @NotNull @Size(min = 1) List<CodeFactKind> kinds,
-        @JsonPropertyDescription(SemanticInputDescriptions.OFFSET) @Min(0) Integer offset,
-        @JsonPropertyDescription(SemanticInputDescriptions.LIMIT) @Min(1) @Max(100) Integer limit) {
+        @NotNull List<CodeFactKind> kinds,
+        @JsonPropertyDescription(SemanticInputDescriptions.OFFSET) Integer offset,
+        @JsonPropertyDescription(SemanticInputDescriptions.LIMIT) Integer limit) {
 }

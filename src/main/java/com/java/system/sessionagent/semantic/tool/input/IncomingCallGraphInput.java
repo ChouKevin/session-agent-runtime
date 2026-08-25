@@ -2,8 +2,6 @@ package com.java.system.sessionagent.semantic.tool.input;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.annotation.JsonPropertyDescription;
-import jakarta.validation.constraints.Max;
-import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 
@@ -24,8 +22,7 @@ public record IncomingCallGraphInput(
         @NotBlank String methodName,
         @JsonProperty(required = true) @JsonPropertyDescription(SemanticInputDescriptions.PARAMETER_TYPES)
         @NotNull List<@NotBlank String> parameterTypes,
-        @JsonPropertyDescription("Call-graph depth from 1 to 2; omit to use the provider default")
-        @Min(1) @Max(2) Integer depth,
-        @JsonPropertyDescription("Optional node budget for depth-two expansion; omit unless the query needs a known bound")
-        @Min(0) Integer depthTwoNodeBudget) {
+        @JsonPropertyDescription("Call-graph depth accepted by Semantic; omit to use the provider default") Integer depth,
+        @JsonPropertyDescription("Optional node budget for deeper expansion; omit unless the query needs a known bound")
+        Integer depthTwoNodeBudget) {
 }

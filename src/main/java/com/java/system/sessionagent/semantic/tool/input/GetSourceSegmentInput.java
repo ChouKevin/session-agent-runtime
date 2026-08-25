@@ -2,7 +2,6 @@ package com.java.system.sessionagent.semantic.tool.input;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.annotation.JsonPropertyDescription;
-import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 
@@ -19,14 +18,14 @@ public record GetSourceSegmentInput(
         @NotBlank String sourceFile,
         @JsonProperty(required = true)
         @JsonPropertyDescription("Exact zero-based startLine copied from a prior Semantic source range")
-        @NotNull @Min(0) Integer startLine,
+        @NotNull Integer startLine,
         @JsonProperty(required = true)
         @JsonPropertyDescription("Exact zero-based startCharacter copied from the same prior source range")
-        @NotNull @Min(0) Integer startCharacter,
+        @NotNull Integer startCharacter,
         @JsonProperty(required = true)
         @JsonPropertyDescription("Exact zero-based endLine copied from the same prior source range")
-        @NotNull @Min(0) Integer endLine,
+        @NotNull Integer endLine,
         @JsonProperty(required = true)
         @JsonPropertyDescription("Exact zero-based endCharacter copied from the same prior source range")
-        @NotNull @Min(0) Integer endCharacter) {
+        @NotNull Integer endCharacter) {
 }

@@ -2,28 +2,23 @@ package com.java.system.sessionagent.semantic.tool.input;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.annotation.JsonPropertyDescription;
-import jakarta.validation.constraints.Max;
-import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotBlank;
-import jakarta.validation.constraints.Size;
 
 import java.util.List;
 
 /** Revision-pinned query. Optional filters are intentionally passed through when absent. */
 public record SearchCodeFactsInput(
         @JsonProperty(required = true) @JsonPropertyDescription("Exact repositoryId copied from list_repositories or visible prior evidence")
-        @NotBlank @Size(max = 128) String repositoryId,
+        @NotBlank String repositoryId,
         @JsonProperty(required = true) @JsonPropertyDescription("Exact revision paired with repositoryId in visible prior evidence; never invent or normalize it")
-        @NotBlank @Size(max = 128) String revision,
+        @NotBlank String revision,
         @JsonProperty(required = true)
         @JsonPropertyDescription("Code or business search terms from the user question; use code-derived names when known")
-        @NotBlank @Size(min = 2, max = 128) String query,
+        @NotBlank String query,
         @JsonProperty(required = false)
         @JsonPropertyDescription("Optional exact CodeFactKind filters; omit unknown kinds rather than guessing")
         List<CodeFactKind> kinds,
         @JsonProperty(required = false) @JsonPropertyDescription("Omit packagePrefix when unknown rather than guessing") String packagePrefix,
-        @JsonProperty(required = false) @JsonPropertyDescription(SemanticInputDescriptions.OFFSET)
-        @Min(0) Integer offset,
-        @JsonProperty(required = false) @JsonPropertyDescription(SemanticInputDescriptions.LIMIT)
-        @Min(1) @Max(100) Integer limit) {
+        @JsonProperty(required = false) @JsonPropertyDescription(SemanticInputDescriptions.OFFSET) Integer offset,
+        @JsonProperty(required = false) @JsonPropertyDescription(SemanticInputDescriptions.LIMIT) Integer limit) {
 }

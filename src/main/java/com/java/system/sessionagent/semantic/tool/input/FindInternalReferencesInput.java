@@ -2,8 +2,6 @@ package com.java.system.sessionagent.semantic.tool.input;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.annotation.JsonPropertyDescription;
-import jakarta.validation.constraints.Max;
-import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 
@@ -24,6 +22,6 @@ public record FindInternalReferencesInput(
         @NotBlank String methodName,
         @JsonProperty(required = true) @JsonPropertyDescription(SemanticInputDescriptions.PARAMETER_TYPES)
         @NotNull List<@NotBlank String> parameterTypes,
-        @JsonPropertyDescription(SemanticInputDescriptions.OFFSET) @Min(0) Integer offset,
-        @JsonPropertyDescription(SemanticInputDescriptions.LIMIT) @Min(1) @Max(100) Integer limit) {
+        @JsonPropertyDescription(SemanticInputDescriptions.OFFSET) Integer offset,
+        @JsonPropertyDescription(SemanticInputDescriptions.LIMIT) Integer limit) {
 }
