@@ -34,6 +34,7 @@ class PromptResourceTest {
                 .contains("coverage.issues")
                 .contains("codebase does not contain")
                 .contains("Do not conclude that the product currently")
+                .contains("MUST include that search result's exact `resultId`")
                 .contains("\"message\":\"<answer>\"")
                 .contains("\"citations\":[{\"value\":\"<resultId>\"}]");
     }
