@@ -161,7 +161,9 @@ public final class GoogleConversationModel implements com.java.system.sessionage
             messages.add(new org.springframework.ai.chat.messages.UserMessage(
                     "Runtime final reply requirement: no tools are available. Return only the final JSON object described "
                             + "by the system instruction. Every citation value must be chosen from this exact list: "
-                            + jsonCodec.canonicalize(resultIds)));
+                            + jsonCodec.canonicalize(resultIds)
+                            + ". Re-read the tool results in history before choosing citations. If the answer reports codebase "
+                            + "absence, cite a supporting complete empty code search; a source citation does not replace it."));
         }
         return List.copyOf(messages);
     }

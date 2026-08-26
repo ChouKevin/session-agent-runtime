@@ -137,6 +137,8 @@ class GoogleConversationModelTest {
         assertThat(finalInstruction).isInstanceOf(org.springframework.ai.chat.messages.UserMessage.class);
         assertThat(finalInstruction.getText())
                 .contains("source-result")
+                .contains("complete empty code search")
+                .contains("source citation does not replace")
                 .doesNotContain("catalog-result", "catalog-payload", "private-source-payload");
     }
 

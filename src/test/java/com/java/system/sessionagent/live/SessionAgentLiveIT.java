@@ -155,12 +155,15 @@ class SessionAgentLiveIT {
     private ScenarioReport runAbsentBnpl(LiveRuntime runtime) throws Exception {
         ScenarioState state = runtime.ask("live-bnpl-absence-" + UUID.randomUUID(), "目前是否支援先買後付？");
         assertContainsOneOf(state.assistantText(), "未發現", "未包含", "沒有", "未支援", "不支援", "not found", "not support", "not implemented");
-        ToolResult fullCoverageEmptySearch = state.toolResults().stream()
+        List<String> fullCoverageEmptySearchIds = state.toolResults().stream()
                 .filter(tool -> tool.toolName().equals("codebase_search_code_facts"))
                 .filter(tool -> hasFullCoverageEmptyResult(tool.resultJson()))
-                .findFirst()
-                .orElseThrow(() -> new AssertionError("absence answer did not use a full-coverage empty code search"));
-        assertThat(state.citations()).contains(fullCoverageEmptySearch.resultId());
+                .map(ToolResult::resultId)
+                .toList();
+        assertThat(fullCoverageEmptySearchIds)
+                .withFailMessage("absence answer did not use a full-coverage empty code search")
+                .isNotEmpty();
+        assertThat(state.citations()).anyMatch(fullCoverageEmptySearchIds::contains);
         return state.toReport("ABSENT_BEHAVIOR_REPORTED");
     }
 
