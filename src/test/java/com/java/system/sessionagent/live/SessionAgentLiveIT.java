@@ -33,7 +33,6 @@ class SessionAgentLiveIT {
     private static final Duration JOB_TIMEOUT = Duration.ofMinutes(4);
     private static final Duration POLL_DELAY = Duration.ofMillis(500);
     private static final Path REPORT_DIRECTORY = Path.of("target", "live-reports");
-    private static final String SESSION_AGENT_HISTORY_KEY = "session-agent-history";
 
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final HttpClient httpClient = HttpClient.newBuilder().connectTimeout(HTTP_TIMEOUT).build();
@@ -55,8 +54,9 @@ class SessionAgentLiveIT {
 
     @Test
     void records_repository_catalog_at_r1() throws Exception {
+        String sessionKey = requiredHistorySessionKey();
         LiveRuntime runtime = liveRuntime();
-        ScenarioState state = runtime.ask(SESSION_AGENT_HISTORY_KEY, "影片上傳支援哪些格式？");
+        ScenarioState state = runtime.ask(sessionKey, "影片上傳支援哪些格式？");
 
         assertContainsOneOf(state.assistantText(), "MP4", "mp4");
         assertContainsOneOf(state.assistantText(), "WEBM", "webm");
@@ -68,9 +68,11 @@ class SessionAgentLiveIT {
 
     @Test
     void recovers_payment_query_at_r2() throws Exception {
+        String sessionKey = requiredHistorySessionKey();
         LiveRuntime runtime = liveRuntime();
-        ScenarioState state = runtime.ask(SESSION_AGENT_HISTORY_KEY, "目前有哪些支付方式？");
+        ScenarioState state = runtime.ask(sessionKey, "目前有哪些支付方式？");
         JsonNode outdatedFeedback = revisionOutdatedFeedback(state);
+        long feedbackSequence = requiredSequence(outdatedFeedback);
         JsonNode payload = parseStructuredJson(requiredText(outdatedFeedback, "message"));
         JsonNode rejectedArguments = parseStructuredJson(requiredText(outdatedFeedback, "rejectedArguments"));
         String failedToolName = requiredText(outdatedFeedback, "toolName");
@@ -81,6 +83,7 @@ class SessionAgentLiveIT {
                 .filter(tool -> tool.toolName().equals(failedToolName))
                 .filter(tool -> tool.repositoryId().filter(rejectedRepositoryId::equals).isPresent())
                 .filter(tool -> tool.revision().isPresent())
+                .filter(tool -> tool.messageSequence() > feedbackSequence)
                 .findFirst()
                 .orElseThrow(() -> new AssertionError("session did not retry the useful tool"));
         String currentRevision = retry.revision().orElseThrow();
@@ -98,6 +101,14 @@ class SessionAgentLiveIT {
         assertThat(state.citations()).isNotEmpty();
         assertThat(state.citations()).allSatisfy(citation ->
                 assertThat(state.resultById(citation).revision()).contains(currentRevision));
+    }
+
+    @Test
+    void retains_only_nonblank_external_history_keys() {
+        assertThat(externalHistorySessionKey("history-key")).contains("history-key");
+        assertThat(externalHistorySessionKey("  history-key  ")).contains("  history-key  ");
+        assertThat(externalHistorySessionKey(" ")).isEmpty();
+        assertThat(externalHistorySessionKey(null)).isEmpty();
     }
 
     private ScenarioReport runPaymentMethods(LiveRuntime runtime) throws Exception {
@@ -168,6 +179,19 @@ class SessionAgentLiveIT {
         Assumptions.assumeTrue("true".equals(System.getenv("SESSION_AGENT_LIVE")), "live opt-in is absent");
         requiredEnvironment("GOOGLE_API_KEY");
         return new LiveRuntime(requiredEnvironment("SESSION_AGENT_BASE_URL"));
+    }
+
+    private String requiredHistorySessionKey() {
+        Optional<String> sessionKey = externalHistorySessionKey(System.getenv("SESSION_AGENT_HISTORY_KEY"));
+        Assumptions.assumeTrue(sessionKey.isPresent(), "SESSION_AGENT_HISTORY_KEY is absent");
+        return sessionKey.orElseThrow();
+    }
+
+    private static Optional<String> externalHistorySessionKey(String sessionKey) {
+        if (StringUtils.hasText(sessionKey)) {
+            return Optional.of(sessionKey);
+        }
+        return Optional.empty();
     }
 
     private ToolResult currentCatalog(ScenarioState state) {
@@ -303,7 +327,7 @@ class SessionAgentLiveIT {
             if (revision.isPresent()) {
                 assertThat(requiredText(result, "revision")).isEqualTo(revision.orElseThrow());
             }
-            return new ToolResult(resultId, requiredText(toolMessage, "toolName"), repositoryId, revision,
+            return new ToolResult(requiredSequence(toolMessage), resultId, requiredText(toolMessage, "toolName"), repositoryId, revision,
                     result.path("citeable").asBoolean(false), requiredText(result, "canonicalArguments"), requiredText(result, "resultJson"));
         }
 
@@ -363,6 +387,12 @@ class SessionAgentLiveIT {
         return value.asText();
     }
 
+    private long requiredSequence(JsonNode message) {
+        JsonNode sequence = message.path("sequence");
+        assertThat(sequence.isIntegralNumber()).isTrue();
+        return sequence.asLong();
+    }
+
     private Optional<String> optionalText(JsonNode node, String field) {
         JsonNode value = node.path(field);
         if (value.isTextual() && StringUtils.hasText(value.asText())) {
@@ -400,6 +430,7 @@ class SessionAgentLiveIT {
     }
 
     private record ToolResult(
+            long messageSequence,
             String resultId,
             String toolName,
             Optional<String> repositoryId,

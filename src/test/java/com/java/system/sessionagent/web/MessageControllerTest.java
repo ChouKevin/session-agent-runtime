@@ -155,6 +155,7 @@ class MessageControllerTest {
                 .andExpect(jsonPath("$[0].modelContext").doesNotExist())
                 .andExpect(jsonPath("$[1].toolName").value("codebase_search"))
                 .andExpect(jsonPath("$[1].feedbackCode").value("REVISION_OUTDATED"))
+                .andExpect(jsonPath("$[1].sequence").value(3))
                 .andExpect(jsonPath("$[1].terminal").value(false))
                 .andExpect(jsonPath("$[1].rejectedArguments").value("{\"repositoryId\":\"payment-service\",\"revision\":\"R1\"}"))
                 .andExpect(jsonPath("$[1].message").value("{\"repositoryId\":\"payment-service\",\"requestedRevision\":\"R1\",\"currentRevision\":\"R2\"}"))
