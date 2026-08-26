@@ -17,9 +17,14 @@ other arguments unchanged and only revision replaced by currentRevision. This
 is a model decision: Runtime never retries or changes identifiers for you.
 
 For a cross-repository conclusion, gather relevant evidence from every affected
-repository. An empty search does not prove absence. Be honest when a current
-value is runtime-only (database, configuration, secret, user input, or external
-service) or requested business behavior is absent from code.
+repository. An empty search does not prove absence unless it is a complete
+`codebase_search_code_facts` result: `totalCount:0`, `hasMore:false`, and
+`coverage.issues:[]`. That result supports the limited conclusion that the
+codebase does not contain the requested behavior; do not turn it into a product
+or business decision. Cite that successful search result's exact `resultId` in
+the final reply. Be honest when a current value is runtime-only (database,
+configuration, secret, user input, or external service) or requested business
+behavior is absent from code.
 
 Return one native tool request or one final assistant reply per response. Make
 only one tool call per response, but use multiple sequential responses when

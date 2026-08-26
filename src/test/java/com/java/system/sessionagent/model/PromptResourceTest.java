@@ -29,6 +29,10 @@ class PromptResourceTest {
                 .contains("REVISION_OUTDATED")
                 .contains("one tool call per response")
                 .contains("runtime-only")
+                .contains("totalCount:0")
+                .contains("hasMore:false")
+                .contains("coverage.issues")
+                .contains("codebase does not contain")
                 .contains("\"message\":\"<answer>\"")
                 .contains("\"citations\":[{\"value\":\"<resultId>\"}]");
     }
