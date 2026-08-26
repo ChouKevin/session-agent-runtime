@@ -98,7 +98,7 @@ class MessageJobServiceTest {
     }
 
     @Test
-    void retries_the_model_after_a_correctable_citation_feedback() {
+    void continues_direct_reply_correction_until_the_call_limit() {
         RecordingStore store = new RecordingStore();
         store.seedSource();
         ScriptedModel model = new ScriptedModel(store,
@@ -110,9 +110,73 @@ class MessageJobServiceTest {
 
         service.process(store.claim, () -> true);
 
-        assertThat(store.feedbackCodes).containsExactly("CALL_LIMIT_REACHED");
-        assertThat(store.calls).isEqualTo(2);
+        assertThat(store.feedbackCodes).containsExactly(
+                "INVALID_CITATION", "INVALID_CITATION", "INVALID_CITATION", "INVALID_CITATION", "INVALID_CITATION",
+                "INVALID_CITATION", "INVALID_CITATION", "INVALID_CITATION", "INVALID_CITATION", "INVALID_CITATION",
+                "CALL_LIMIT_REACHED");
+        assertThat(store.calls).isEqualTo(12);
         assertThat(store.assistantReply).isNull(); // cs-allow terminal feedback means no assistant message
+    }
+
+    @Test
+    void schedules_the_existing_model_retry_after_an_early_direct_reply_transient_failure() {
+        RecordingStore store = new RecordingStore();
+        store.job = Optional.of(new ConversationStore.MessageJobProjection(store.claim.messageJobId(), store.claim.sessionId(),
+                com.java.system.sessionagent.conversation.domain.JobStatus.WORKING, 0, 1, Optional.empty()));
+        List<Integer> planOrdinals = new java.util.ArrayList<>();
+        List<Integer> replyOrdinals = new java.util.ArrayList<>();
+        ConversationModel model = model(
+                (request, usageObserver) -> {
+                    planOrdinals.add(request.callContext().ordinal());
+                    return new ModelDecision.AnswerReady();
+                },
+                (request, usageObserver) -> {
+                    replyOrdinals.add(request.callContext().ordinal());
+                    throw ModelCallFailure.transientFailure();
+                });
+        MessageJobService service = new MessageJobService(store, model, new DirectToolRegistry(List.of()),
+                Clock.fixed(Instant.parse("2026-08-16T00:00:00Z"), ZoneOffset.UTC));
+
+        service.process(store.claim, () -> true);
+
+        assertThat(planOrdinals).containsExactly(1);
+        assertThat(replyOrdinals).containsExactly(2);
+        assertThat(store.calls).isEqualTo(2);
+        assertThat(store.scheduledAt).contains(store.claim.claimedAt().plusSeconds(1));
+        assertThat(store.feedbackMessages).isEmpty();
+    }
+
+    @Test
+    void corrects_an_early_invalid_citation_with_another_direct_reply() {
+        RecordingStore store = new RecordingStore();
+        store.seedSource();
+        List<Integer> planOrdinals = new java.util.ArrayList<>();
+        List<Integer> replyOrdinals = new java.util.ArrayList<>();
+        ConversationModel model = model(
+                (request, usageObserver) -> {
+                    planOrdinals.add(request.callContext().ordinal());
+                    return new ModelDecision.AnswerReady();
+                },
+                (request, usageObserver) -> {
+                    replyOrdinals.add(request.callContext().ordinal());
+                    if (request.callContext().ordinal() == 2) {
+                        return new AssistantReply("bad", List.of(new ResultId("not-a-result")));
+                    }
+                    return new AssistantReply("answer", List.of(new ResultId("source-result")));
+                });
+        MessageJobService service = new MessageJobService(store, model, new DirectToolRegistry(List.of()),
+                Clock.fixed(Instant.parse("2026-08-16T00:00:00Z"), ZoneOffset.UTC));
+
+        service.process(store.claim, () -> true);
+
+        assertThat(planOrdinals).containsExactly(1);
+        assertThat(replyOrdinals).containsExactly(2, 3);
+        assertThat(store.calls).isEqualTo(3);
+        assertThat(store.feedbackMessages).singleElement().satisfies(feedback -> {
+            assertThat(feedback.code()).isEqualTo("INVALID_CITATION");
+            assertThat(feedback.terminal()).isFalse();
+        });
+        assertThat(store.assistantReply).isEqualTo(new AssistantReply("answer", List.of(new ResultId("source-result"))));
     }
 
     @Test

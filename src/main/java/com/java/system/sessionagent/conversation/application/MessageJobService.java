@@ -96,9 +96,12 @@ public final class MessageJobService implements MessageJobPort {
                 return;
             }
             ModelCallContext callContext = new ModelCallContext(claim.sessionId(), claim.messageJobId(), reservation.ordinal());
-            if (finalReplyRequested || reservation.ordinal() == MAX_MODEL_CALLS) {
-                processFinalReply(claim, workGuard, history, callContext);
-                return;
+            boolean finalCall = reservation.ordinal() == MAX_MODEL_CALLS;
+            if (finalReplyRequested || finalCall) {
+                if (!processFinalReply(claim, workGuard, history, callContext, finalCall)) {
+                    return;
+                }
+                continue;
             }
             ToolSnapshot snapshot = toolRegistry.snapshot();
             logModelCallStarted(claim, reservation.ordinal(), "PLAN", history.size(), snapshot.definitions().size());
@@ -121,8 +124,8 @@ public final class MessageJobService implements MessageJobPort {
         }
     }
 
-    private void processFinalReply(MessageWorkClaim claim, WorkGuard workGuard, List<SessionMessage> history,
-                                   ModelCallContext callContext) {
+    private boolean processFinalReply(MessageWorkClaim claim, WorkGuard workGuard, List<SessionMessage> history,
+                                      ModelCallContext callContext, boolean finalCall) {
         logModelCallStarted(claim, callContext.ordinal(), "FINAL_REPLY", history.size(), 0);
         AssistantReply reply;
         try {
@@ -130,22 +133,21 @@ public final class MessageJobService implements MessageJobPort {
                     usage -> logModelCallUsage(claim, callContext.ordinal(), usage));
         } catch (ModelCallFailure failure) {
             logModelCallFailed(claim, callContext.ordinal(), failure.kind());
-            if (failure.kind() == ModelCallFailure.Kind.TRANSIENT) {
+            if (finalCall && failure.kind() == ModelCallFailure.Kind.TRANSIENT) {
                 appendFeedback(claim, workGuard, FeedbackCode.DEPENDENCY_UNAVAILABLE, true, ToolFeedbackDetails.empty());
-                return;
+                return false;
             }
-            if (failure.kind() == ModelCallFailure.Kind.CORRECTABLE) {
+            if (finalCall && failure.kind() == ModelCallFailure.Kind.CORRECTABLE) {
                 appendFeedback(claim, workGuard, FeedbackCode.CALL_LIMIT_REACHED, true, ToolFeedbackDetails.empty());
-                return;
+                return false;
             }
-            handleFailure(claim, workGuard, ConversationFailurePolicy.model(failure), ToolFeedbackDetails.empty(), "MODEL");
-            return;
+            return handleFailure(claim, workGuard, ConversationFailurePolicy.model(failure), ToolFeedbackDetails.empty(), "MODEL");
         }
         logModelCallDecision(claim, callContext.ordinal(), "ASSISTANT_REPLY");
         if (!workGuard.stillOwned()) {
-            return;
+            return false;
         }
-        validateReply(claim, workGuard, reply, true);
+        return validateReply(claim, workGuard, reply, finalCall);
     }
 
     private void recoverStorageFailure(MessageWorkClaim claim, WorkGuard guard, ConversationStoreFailure failure) {
@@ -250,21 +252,21 @@ public final class MessageJobService implements MessageJobPort {
                 try {
                     conversationStore.appendAssistant(claim, new AssistantReply(reply.message(), accepted.citations()), clock.instant());
                 } catch (StaleWorkClaimException exception) {
-                    return true;
+                    return false;
                 }
             }
-            return true;
+            return false;
         }
         if (validation instanceof CitationValidator.Validation.Correctable correctable) {
             logCitationRejected(claim, finalReply, correctable.reason(), reply.citations().size());
             if (finalReply) {
                 appendFeedback(claim, guard, FeedbackCode.CALL_LIMIT_REACHED, true, ToolFeedbackDetails.empty());
-                return true;
+                return false;
             }
-            return !appendFeedback(claim, guard, FeedbackCode.INVALID_CITATION, false, ToolFeedbackDetails.empty());
+            return appendFeedback(claim, guard, FeedbackCode.INVALID_CITATION, false, ToolFeedbackDetails.empty());
         }
         appendFeedback(claim, guard, FeedbackCode.INVALID_CITATION, true, ToolFeedbackDetails.empty());
-        return true;
+        return false;
     }
 
     private boolean handleFailure(MessageWorkClaim claim, WorkGuard guard, ConversationFailurePolicy.Failure failure,
