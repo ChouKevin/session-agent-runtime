@@ -116,8 +116,8 @@ class GoogleNoToolLiveTest {
                         sessionId, new SessionSequence(1), Optional.of(jobId), createdAt,
                         MessageRole.USER, "Alice", "有哪些付款方式？請先呼叫 list_repositories，不要直接回答。");
 
-        ModelDecision firstDecision = model.decide(
-                new ModelRequest(List.of(question), registry.snapshot(), false), usage -> { });
+        ModelDecision firstDecision = model.plan(
+                new ModelRequest(List.of(question), registry.snapshot(), new com.java.system.sessionagent.conversation.domain.ModelCallContext(sessionId, jobId, 1)), usage -> { });
         assertThat(firstDecision).isInstanceOf(ModelDecision.UseTool.class);
         ModelDecision.UseTool catalogRequest = (ModelDecision.UseTool) firstDecision;
         assertThat(catalogRequest.toolName().value()).isEqualTo("list_repositories");
@@ -129,10 +129,10 @@ class GoogleNoToolLiveTest {
                         {"data":{"repositories":[{"displayName":"Payment Service","repositoryId":"payment-service"}]},"resultId":"catalog-result","toolName":"list_repositories"}
                         """, false);
 
-        ModelDecision secondDecision = model.decide(
-                new ModelRequest(List.of(question, catalogResult), registry.snapshot(), false), usage -> { });
+        ModelDecision secondDecision = model.plan(
+                new ModelRequest(List.of(question, catalogResult), registry.snapshot(), new com.java.system.sessionagent.conversation.domain.ModelCallContext(sessionId, jobId, 2)), usage -> { });
 
-        assertThat(secondDecision).isInstanceOfAny(ModelDecision.UseTool.class, ModelDecision.Reply.class);
+        assertThat(secondDecision).isInstanceOfAny(ModelDecision.UseTool.class, ModelDecision.AnswerReady.class);
         System.out.printf("GOOGLE_ALL_TOOLS_LIVE_RESULT=%s%n", secondDecision.getClass().getSimpleName());
     }
 

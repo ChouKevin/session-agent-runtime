@@ -138,9 +138,10 @@ class ApplicationStartupTest {
                     DirectToolRegistry registry = new DirectToolRegistry(List.of(new ToolRegistration<>(definition, Object.class,
                             ignored -> new ToolResult(Optional.empty(), Optional.empty(), "{}", false))));
 
-                    ModelDecision decision = model.decide(new ModelRequest(List.of(new UserMessage(new SessionId("session-1"),
+                    ModelDecision decision = model.plan(new ModelRequest(List.of(new UserMessage(new SessionId("session-1"),
                             new SessionSequence(1), Optional.empty(), Instant.parse("2026-08-16T00:00:00Z"), MessageRole.USER,
-                            "alice", "question")), registry.snapshot(), false), usage -> { });
+                            "alice", "question")), registry.snapshot(), new com.java.system.sessionagent.conversation.domain.ModelCallContext(
+                                    new SessionId("session-1"), new com.java.system.sessionagent.conversation.domain.MessageJobId("job-1"), 1)), usage -> { });
 
                     assertThat(decision).isInstanceOf(ModelDecision.UseTool.class);
                     assertThat(chatModel.prompt.getOptions()).isInstanceOf(GoogleGenAiChatOptions.class);

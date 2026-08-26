@@ -15,10 +15,5 @@ public sealed interface ModelDecision {
         }
     }
 
-    record Reply(AssistantReply reply) implements ModelDecision {
-
-        public Reply {
-            Assert.notNull(reply, "Assistant reply must not be null");
-        }
-    }
+    record AnswerReady() implements ModelDecision { }
 }

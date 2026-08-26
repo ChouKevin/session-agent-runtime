@@ -4,6 +4,7 @@ import com.java.system.sessionagent.conversation.domain.AssistantReply;
 import com.java.system.sessionagent.conversation.domain.FeedbackMessage;
 import com.java.system.sessionagent.conversation.domain.ModelDecision;
 import com.java.system.sessionagent.conversation.domain.ModelRequest;
+import com.java.system.sessionagent.conversation.domain.ReplyRequest;
 import com.java.system.sessionagent.conversation.domain.ResultId;
 import com.java.system.sessionagent.conversation.domain.SessionMessage;
 import com.java.system.sessionagent.conversation.domain.ToolMessage;
@@ -28,7 +29,7 @@ final class FakeConversationModel implements ConversationModel {
     }
 
     @Override
-    public ModelDecision decide(ModelRequest request, Consumer<com.java.system.sessionagent.conversation.domain.ModelUsage> usageObserver) {
+    public ModelDecision plan(ModelRequest request, Consumer<com.java.system.sessionagent.conversation.domain.ModelUsage> usageObserver) {
         requests.add(request);
         UserMessage question = request.history().stream().filter(UserMessage.class::isInstance).map(UserMessage.class::cast)
                 .max(Comparator.comparingLong(message -> message.sequence().value())).orElseThrow();
@@ -68,6 +69,16 @@ final class FakeConversationModel implements ConversationModel {
                 .noneMatch(ToolMessage::citeable)) {
             return tool("payment-source-" + question.sequence().value(), LIST_ENTRY_POINTS, "{\"repositoryId\":\"payment-service\",\"revision\":\"payment-revision-1\"}");
         }
+        return new ModelDecision.AnswerReady();
+    }
+
+    @Override
+    public AssistantReply reply(ReplyRequest request, Consumer<com.java.system.sessionagent.conversation.domain.ModelUsage> usageObserver) {
+        UserMessage question = request.history().stream().filter(UserMessage.class::isInstance).map(UserMessage.class::cast)
+                .max(Comparator.comparingLong(message -> message.sequence().value())).orElseThrow();
+        List<SessionMessage> jobHistory = request.history().stream()
+                .filter(message -> message.messageJobId().equals(question.messageJobId())).toList();
+        String text = question.message().toLowerCase(java.util.Locale.ROOT);
         ResultId citation = jobHistory.stream().filter(ToolMessage.class::isInstance).map(ToolMessage.class::cast)
                 .filter(ToolMessage::citeable).max(Comparator.comparingLong(message -> message.sequence().value())).orElseThrow().resultId();
         List<ResultId> citations = text.contains("cancellation")
@@ -81,7 +92,7 @@ final class FakeConversationModel implements ConversationModel {
                 : text.contains("bnpl") ? "No BNPL behavior was found in the typed repository queries."
                 : text.contains("cancellation") ? "Cancellation and refund evidence was inspected across both repositories."
                 : "The source-backed repository information is available.";
-        return new ModelDecision.Reply(new AssistantReply(answer, citations));
+        return new AssistantReply(answer, citations);
     }
 
     private static ModelDecision.UseTool tool(String callId, ToolName toolName, String arguments) {

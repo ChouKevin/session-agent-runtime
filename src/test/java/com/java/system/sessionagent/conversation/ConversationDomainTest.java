@@ -8,6 +8,8 @@ import com.java.system.sessionagent.conversation.domain.MessageJobId;
 import com.java.system.sessionagent.conversation.domain.MessageRole;
 import com.java.system.sessionagent.conversation.domain.MessageWorkClaim;
 import com.java.system.sessionagent.conversation.domain.ModelRequest;
+import com.java.system.sessionagent.conversation.domain.ModelCallContext;
+import com.java.system.sessionagent.conversation.domain.ReplyRequest;
 import com.java.system.sessionagent.conversation.domain.ResultId;
 import com.java.system.sessionagent.conversation.domain.SessionId;
 import com.java.system.sessionagent.conversation.domain.SessionMessage;
@@ -111,14 +113,19 @@ class ConversationDomainTest {
         List<SessionMessage> history = new ArrayList<>(List.of(citeable));
         ToolSnapshot toolSnapshot = new DirectToolRegistry(List.of()).snapshot();
 
-        ModelRequest modelRequest = new ModelRequest(history, toolSnapshot, false);
+        ModelCallContext callContext = new ModelCallContext(SESSION_ID, JOB_ID, 1);
+        ModelRequest modelRequest = new ModelRequest(history, toolSnapshot, callContext);
+        ReplyRequest replyRequest = new ReplyRequest(history, callContext);
         history.clear();
 
         assertThat(citeable.repositoryId()).contains("payment-service");
         assertThat(catalog.repositoryId()).isEmpty();
         assertThat(modelRequest.history()).containsExactly(citeable);
+        assertThat(replyRequest.history()).containsExactly(citeable);
         assertThatThrownBy(() -> modelRequest.history().add(catalog))
                 .isInstanceOf(UnsupportedOperationException.class);
+        assertThatIllegalArgumentException().isThrownBy(() -> new ModelCallContext(SESSION_ID, JOB_ID, 0));
+        assertThatIllegalArgumentException().isThrownBy(() -> new ModelCallContext(SESSION_ID, JOB_ID, 13));
         assertThatIllegalArgumentException().isThrownBy(
                 () -> toolMessage(Optional.of("payment-service"), Optional.empty(), true));
         assertThatIllegalArgumentException().isThrownBy(

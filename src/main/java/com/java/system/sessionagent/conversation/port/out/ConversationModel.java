@@ -1,13 +1,16 @@
 package com.java.system.sessionagent.conversation.port.out;
 
+import com.java.system.sessionagent.conversation.domain.AssistantReply;
 import com.java.system.sessionagent.conversation.domain.ModelDecision;
 import com.java.system.sessionagent.conversation.domain.ModelRequest;
 import com.java.system.sessionagent.conversation.domain.ModelUsage;
+import com.java.system.sessionagent.conversation.domain.ReplyRequest;
 
 import java.util.function.Consumer;
 
-@FunctionalInterface
 public interface ConversationModel {
 
-    ModelDecision decide(ModelRequest request, Consumer<ModelUsage> usageObserver);
+    ModelDecision plan(ModelRequest request, Consumer<ModelUsage> usageObserver);
+
+    AssistantReply reply(ReplyRequest request, Consumer<ModelUsage> usageObserver);
 }

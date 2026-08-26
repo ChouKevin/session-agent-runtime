@@ -3,8 +3,10 @@ package com.java.system.sessionagent.model;
 import com.java.system.sessionagent.conversation.domain.AssistantReply;
 import com.java.system.sessionagent.conversation.domain.MessageJobId;
 import com.java.system.sessionagent.conversation.domain.ModelDecision;
+import com.java.system.sessionagent.conversation.domain.ModelCallContext;
 import com.java.system.sessionagent.conversation.domain.ModelRequest;
 import com.java.system.sessionagent.conversation.domain.ModelUsage;
+import com.java.system.sessionagent.conversation.domain.ReplyRequest;
 import com.java.system.sessionagent.conversation.domain.ResultId;
 import com.java.system.sessionagent.conversation.domain.SessionMessage;
 import com.java.system.sessionagent.conversation.domain.SessionId;
@@ -70,7 +72,7 @@ class GoogleConversationModelTest {
         GoogleConversationModel model = new GoogleConversationModel(chatModel, new PromptResource());
         List<ModelUsage> observedUsage = new ArrayList<>();
 
-        ModelDecision decision = model.decide(request(snapshot("catalog"), false), observedUsage::add);
+        ModelDecision decision = model.plan(request(snapshot("catalog")), observedUsage::add);
 
         assertThat(decision).isEqualTo(new ModelDecision.UseTool("call-1", new ToolName("catalog"), "{}", MODEL_CONTEXT));
         assertThat(chatModel.prompt.getInstructions().getFirst()).isInstanceOf(org.springframework.ai.chat.messages.SystemMessage.class);
@@ -86,7 +88,7 @@ class GoogleConversationModelTest {
         RecordingChatModel chatModel = new RecordingChatModel(response(toolResponse("", "catalog", "{}")));
         GoogleConversationModel model = new GoogleConversationModel(chatModel, new PromptResource());
 
-        ModelDecision decision = model.decide(request(snapshot("catalog"), false), usage -> { });
+        ModelDecision decision = model.plan(request(snapshot("catalog")), usage -> { });
 
         assertThat(decision).isInstanceOfSatisfying(ModelDecision.UseTool.class, tool -> {
             assertThat(tool.callId()).startsWith("runtime-").hasSize(44);
@@ -97,22 +99,22 @@ class GoogleConversationModelTest {
     }
 
     @Test
-    void decodes_a_strict_final_reply_and_uses_no_callbacks_when_reply_only() {
+    void decodes_a_strict_final_reply_and_uses_no_callbacks() {
         RecordingChatModel chatModel = new RecordingChatModel(response(
                 new AssistantMessage("{\"citations\":[{\"value\":\"result-1\"}],\"message\":\"Answer\"}"), null));
         GoogleConversationModel model = new GoogleConversationModel(chatModel, new PromptResource());
         List<ModelUsage> observedUsage = new ArrayList<>();
 
-        ModelDecision decision = model.decide(request(snapshot("catalog"), true), observedUsage::add);
+        AssistantReply decision = model.reply(replyRequest(), observedUsage::add);
 
-        assertThat(decision).isEqualTo(new ModelDecision.Reply(new AssistantReply("Answer", List.of(new ResultId("result-1")))));
+        assertThat(decision).isEqualTo(new AssistantReply("Answer", List.of(new ResultId("result-1"))));
         ToolCallingChatOptions options = (ToolCallingChatOptions) chatModel.prompt.getOptions();
         assertThat(CollectionUtils.isEmpty(options.getToolCallbacks())).isTrue();
         assertThat(observedUsage).containsExactly(new ModelUsage(0, 0, 0, false));
     }
 
     @Test
-    void appends_exact_citeable_result_ids_to_the_reply_only_request() {
+    void appends_exact_citeable_result_ids_to_the_final_reply_request() {
         RecordingChatModel chatModel = new RecordingChatModel(response(
                 new AssistantMessage("{\"citations\":[{\"value\":\"source-result\"}],\"message\":\"Answer\"}"), null));
         GoogleConversationModel model = new GoogleConversationModel(chatModel, new PromptResource());
@@ -131,7 +133,7 @@ class GoogleConversationModelTest {
                         "codebase_get_method_source", "1", "{}", Optional.of("payment-service"), Optional.of("revision-1"),
                         "{\"resultId\":\"source-result\",\"data\":{\"source\":\"private-source-payload\"}}", true));
 
-        model.decide(new ModelRequest(history, snapshot("catalog"), true), usage -> { });
+        model.reply(new ReplyRequest(history, new ModelCallContext(sessionId, jobId, 2)), usage -> { });
 
         org.springframework.ai.chat.messages.Message finalInstruction = chatModel.prompt.getInstructions().getLast();
         assertThat(finalInstruction).isInstanceOf(org.springframework.ai.chat.messages.UserMessage.class);
@@ -149,7 +151,7 @@ class GoogleConversationModelTest {
         GoogleConversationModel model = new GoogleConversationModel(
                 chatModel, new PromptResource(), new NoOpConversationTelemetry(), "gemini-3.1-flash-lite");
 
-        model.decide(request(snapshot("catalog"), true), usage -> { });
+        model.reply(replyRequest(), usage -> { });
 
         GoogleGenAiChatOptions options = (GoogleGenAiChatOptions) chatModel.prompt.getOptions();
         assertThat(options.getResponseMimeType()).isEqualTo("application/json");
@@ -164,7 +166,7 @@ class GoogleConversationModelTest {
     }
 
     @Test
-    void ignores_google_thought_summary_and_decodes_the_single_actionable_reply() {
+    void ignores_google_thought_summary_and_decodes_the_single_actionable_final_reply() {
         AssistantMessage thought = AssistantMessage.builder()
                 .properties(Map.of("isThought", true))
                 .content("internal summary")
@@ -176,20 +178,21 @@ class GoogleConversationModelTest {
         RecordingChatModel chatModel = new RecordingChatModel(response(thought, reply));
         GoogleConversationModel model = new GoogleConversationModel(chatModel, new PromptResource());
 
-        ModelDecision decision = model.decide(request(snapshot("catalog"), true), usage -> { });
+        AssistantReply decision = model.reply(replyRequest(), usage -> { });
 
-        assertThat(decision).isEqualTo(new ModelDecision.Reply(
-                new AssistantReply("Answer", List.of(new ResultId("result-1")))));
+        assertThat(decision).isEqualTo(new AssistantReply("Answer", List.of(new ResultId("result-1"))));
     }
 
     @Test
-    void decodes_a_tool_call_when_reply_only_so_the_service_can_apply_terminal_policy() {
+    void rejects_a_tool_call_during_final_reply() {
         RecordingChatModel chatModel = new RecordingChatModel(response(toolResponse("call-1", "catalog", "{}")));
         GoogleConversationModel model = new GoogleConversationModel(chatModel, new PromptResource());
 
-        ModelDecision decision = model.decide(request(snapshot("catalog"), true), usage -> { });
+        assertThatThrownBy(() -> model.reply(replyRequest(), usage -> { }))
+                .isInstanceOf(ModelCallFailure.class)
+                .extracting(exception -> ((ModelCallFailure) exception).kind())
+                .isEqualTo(ModelCallFailure.Kind.CORRECTABLE);
 
-        assertThat(decision).isEqualTo(new ModelDecision.UseTool("call-1", new ToolName("catalog"), "{}", MODEL_CONTEXT));
         ToolCallingChatOptions options = (ToolCallingChatOptions) chatModel.prompt.getOptions();
         assertThat(CollectionUtils.isEmpty(options.getToolCallbacks())).isTrue();
     }
@@ -200,15 +203,14 @@ class GoogleConversationModelTest {
                 response(toolResponse("call-1", "catalog", "{}"), toolResponse("call-2", "catalog", "{}")),
                 response(AssistantMessage.builder().content("prose")
                         .toolCalls(List.of(new AssistantMessage.ToolCall("call-1", "function", "catalog", "{}"))).build()),
-                response(new AssistantMessage("not-json")),
-                response(new AssistantMessage("{\"citations\":[],\"message\":\"Answer\"}")),
+                response(new AssistantMessage("")),
                 response(unsignedToolResponse("call-1", "catalog", "{}")),
                 responseWithNullOutput());
 
         for (ChatResponse invalidResponse : invalidResponses) {
             GoogleConversationModel model = new GoogleConversationModel(new RecordingChatModel(invalidResponse), new PromptResource());
 
-            assertThatThrownBy(() -> model.decide(request(snapshot("catalog"), false), usage -> { }))
+            assertThatThrownBy(() -> model.plan(request(snapshot("catalog")), usage -> { }))
                     .isInstanceOf(ModelCallFailure.class)
                     .extracting(exception -> ((ModelCallFailure) exception).kind())
                     .isEqualTo(ModelCallFailure.Kind.CORRECTABLE);
@@ -216,12 +218,12 @@ class GoogleConversationModelTest {
     }
 
     @Test
-    void recordsExactlyOneTerminalModelOutcomeWhenResponseDecodingFails() {
+    void recordsExactlyOneTerminalModelOutcomeWhenFinalReplyDecodingFails() {
         ConversationTelemetry telemetry = mock(ConversationTelemetry.class);
         GoogleConversationModel model = new GoogleConversationModel(
                 new RecordingChatModel(response(new AssistantMessage("not-json"))), new PromptResource(), telemetry);
 
-        assertThatThrownBy(() -> model.decide(request(snapshot("catalog"), false), usage -> { }))
+        assertThatThrownBy(() -> model.reply(replyRequest(), usage -> { }))
                 .isInstanceOf(ModelCallFailure.class);
 
         verify(telemetry).model("FAILURE", Optional.of("CORRECTABLE"), new ModelUsage(0, 0, 0, false));
@@ -233,7 +235,7 @@ class GoogleConversationModelTest {
         RecordingChatModel chatModel = new RecordingChatModel(response(toolResponse("unissued-call", "not-issued", "{\"value\":1}")));
         GoogleConversationModel model = new GoogleConversationModel(chatModel, new PromptResource());
 
-        ModelDecision decision = model.decide(request(snapshot("catalog"), false), usage -> { });
+        ModelDecision decision = model.plan(request(snapshot("catalog")), usage -> { });
 
         assertThat(decision).isEqualTo(new ModelDecision.UseTool(
                 "unissued-call", new ToolName("not-issued"), "{\"value\":1}", MODEL_CONTEXT));
@@ -257,17 +259,17 @@ class GoogleConversationModelTest {
         ListAppender<ILoggingEvent> appender = attachAppender(GoogleConversationModel.class);
 
         try {
-            model.decide(request(snapshot("catalog"), true), usage -> { });
+            model.plan(request(snapshot("catalog")), usage -> { });
             GoogleConversationModel failingModel = new GoogleConversationModel(
                     new FailingChatModel(new TransientAiException("provider-secret-failure")), new PromptResource());
-            assertThatThrownBy(() -> failingModel.decide(request(snapshot("catalog"), false), usage -> { }))
+            assertThatThrownBy(() -> failingModel.plan(request(snapshot("catalog")), usage -> { }))
                     .isInstanceOf(ModelCallFailure.class);
 
             assertThat(appender.list).extracting(ILoggingEvent::getMessage)
-                    .contains("google_model_request replyOnly={} messageCount={} callbackCount={}",
+                    .contains("google_model_request phase=PLAN messageCount={} callbackCount={}",
                             "google_model_response_shape resultCount={} outputPresent={} toolCallCount={} textPresent={}",
-                            "google_model_response replyOnly={} resultCategory={} resultCount={} usageAvailable={}",
-                            "google_model_failed replyOnly={} closedFailureKind={}");
+                            "google_model_response phase=PLAN resultCategory={} resultCount={} usageAvailable={}",
+                            "google_model_failed phase=PLAN closedFailureKind={}");
             assertThat(logTemplatesAndArguments(appender)).doesNotContain("Question", "Alice", "provider-secret", "apiKey",
                     "provider-secret-failure", "catalog");
         } finally {
@@ -278,7 +280,7 @@ class GoogleConversationModelTest {
     private static void assertFailure(RuntimeException providerFailure, ModelCallFailure.Kind expectedKind) {
         GoogleConversationModel model = new GoogleConversationModel(new FailingChatModel(providerFailure), new PromptResource());
 
-        assertThatThrownBy(() -> model.decide(request(snapshot("catalog"), false), usage -> { }))
+        assertThatThrownBy(() -> model.plan(request(snapshot("catalog")), usage -> { }))
                 .isInstanceOf(ModelCallFailure.class)
                 .extracting(exception -> ((ModelCallFailure) exception).kind())
                 .isEqualTo(expectedKind);
@@ -304,9 +306,15 @@ class GoogleConversationModelTest {
                 .collect(Collectors.joining("\n"));
     }
 
-    private static ModelRequest request(ToolSnapshot snapshot, boolean replyOnly) {
+    private static ModelRequest request(ToolSnapshot snapshot) {
         return new ModelRequest(List.of(new UserMessage(new SessionId("session-1"), new SessionSequence(1), Optional.empty(),
-                Instant.parse("2026-08-15T10:15:30Z"), MessageRole.USER, "Alice", "Question")), snapshot, replyOnly);
+                Instant.parse("2026-08-15T10:15:30Z"), MessageRole.USER, "Alice", "Question")), snapshot,
+                new ModelCallContext(new SessionId("session-1"), new MessageJobId("job-1"), 1));
+    }
+
+    private static ReplyRequest replyRequest() {
+        return new ReplyRequest(request(snapshot("catalog")).history(),
+                new ModelCallContext(new SessionId("session-1"), new MessageJobId("job-1"), 2));
     }
 
     private static ToolSnapshot snapshot(String toolName) {

@@ -102,7 +102,7 @@ class MessageJobServiceTest {
         RecordingStore store = new RecordingStore();
         store.seedSource();
         ScriptedModel model = new ScriptedModel(store,
-                new ModelDecision.Reply(new AssistantReply("bad", List.of(new ResultId("not-a-result")))));
+                new AssistantReply("bad", List.of(new ResultId("not-a-result"))), new ModelDecision.AnswerReady());
         DirectToolRegistry registry = new DirectToolRegistry(List.of(
                 registration("list_repositories", ToolKind.CATALOG, Optional.empty(), Optional.empty(), "{\"repositories\":[]}")));
         MessageJobService service = new MessageJobService(store, model, registry,
@@ -110,16 +110,18 @@ class MessageJobServiceTest {
 
         service.process(store.claim, () -> true);
 
-        assertThat(store.feedbackCodes).containsExactly("INVALID_CITATION");
+        assertThat(store.feedbackCodes).containsExactly("CALL_LIMIT_REACHED");
         assertThat(store.calls).isEqualTo(2);
-        assertThat(store.assistantReply.citations()).containsExactly(store.toolMessages.getLast().resultId());
+        assertThat(store.assistantReply).isNull(); // cs-allow terminal feedback means no assistant message
     }
 
     @Test
     void turns_a_twelfth_call_model_failure_into_one_terminal_call_limit_feedback() {
         RecordingStore store = new RecordingStore();
         store.calls = 11;
-        ConversationModel model = (request, usageObserver) -> { throw ModelCallFailure.correctable(); };
+        ConversationModel model = model(
+                (request, usageObserver) -> { throw new AssertionError("plan must not be called"); },
+                (request, usageObserver) -> { throw ModelCallFailure.correctable(); });
         MessageJobService service = new MessageJobService(store, model, new DirectToolRegistry(List.of()),
                 Clock.fixed(Instant.parse("2026-08-16T00:00:00Z"), ZoneOffset.UTC));
 
@@ -133,7 +135,9 @@ class MessageJobServiceTest {
     void preserves_context_too_large_feedback_on_the_twelfth_model_call() {
         RecordingStore store = new RecordingStore();
         store.calls = 11;
-        ConversationModel model = (request, usageObserver) -> { throw ModelCallFailure.contextTooLarge(); };
+        ConversationModel model = model(
+                (request, usageObserver) -> { throw new AssertionError("plan must not be called"); },
+                (request, usageObserver) -> { throw ModelCallFailure.contextTooLarge(); });
         MessageJobService service = new MessageJobService(store, model, new DirectToolRegistry(List.of()),
                 Clock.fixed(Instant.parse("2026-08-16T00:00:00Z"), ZoneOffset.UTC));
 
@@ -149,7 +153,9 @@ class MessageJobServiceTest {
         store.calls = 11;
         store.job = Optional.of(new ConversationStore.MessageJobProjection(store.claim.messageJobId(), store.claim.sessionId(),
                 com.java.system.sessionagent.conversation.domain.JobStatus.WORKING, 0, 11, Optional.empty()));
-        ConversationModel model = (request, usageObserver) -> { throw ModelCallFailure.transientFailure(); };
+        ConversationModel model = model(
+                (request, usageObserver) -> { throw new AssertionError("plan must not be called"); },
+                (request, usageObserver) -> { throw ModelCallFailure.transientFailure(); });
         MessageJobService service = new MessageJobService(store, model, new DirectToolRegistry(List.of()),
                 Clock.fixed(Instant.parse("2026-08-16T00:00:00Z"), ZoneOffset.UTC));
 
@@ -168,8 +174,8 @@ class MessageJobServiceTest {
         AtomicInteger sourceExecutions = new AtomicInteger();
         ModelDecision.UseTool rejected = new ModelDecision.UseTool(
                 "source-before-catalog", new ToolName("source"), "{not-json}", MODEL_CONTEXT);
-        ScriptedModel model = new ScriptedModel(store, rejected,
-                new ModelDecision.Reply(new AssistantReply("done", List.of(new ResultId("source-result")))));
+        ScriptedModel model = new ScriptedModel(store,
+                new AssistantReply("done", List.of(new ResultId("source-result"))), rejected, new ModelDecision.AnswerReady());
         DirectToolRegistry registry = new DirectToolRegistry(List.of(
                 registration("list_repositories", ToolKind.CATALOG, Optional.empty(), Optional.empty(), "{\"repositories\":[]}"),
                 countedRegistration("source", ToolKind.SOURCE, sourceExecutions)));
@@ -198,8 +204,9 @@ class MessageJobServiceTest {
         RecordingStore store = new RecordingStore();
         store.calls = 11;
         store.seedSource();
-        ConversationModel model = (request, usageObserver) -> new ModelDecision.Reply(
-                new AssistantReply("bad", List.of(new ResultId("unknown-result"))));
+        ConversationModel model = model(
+                (request, usageObserver) -> { throw new AssertionError("plan must not be called"); },
+                (request, usageObserver) -> new AssistantReply("bad", List.of(new ResultId("unknown-result"))));
         MessageJobService service = new MessageJobService(store, model, new DirectToolRegistry(List.of()),
                 Clock.fixed(Instant.parse("2026-08-16T00:00:00Z"), ZoneOffset.UTC));
         ListAppender<ILoggingEvent> appender = attachAppender(MessageJobService.class);
@@ -210,7 +217,7 @@ class MessageJobServiceTest {
             assertThat(store.feedbackCodes).containsExactly("CALL_LIMIT_REACHED");
             assertThat(store.feedbackMessages).singleElement().extracting(FeedbackMessage::terminal).isEqualTo(true);
             assertThat(appender.list).extracting(ILoggingEvent::getFormattedMessage)
-                    .contains("assistant_citation_rejected sessionId=session-1 messageJobId=job-1 replyOnly=true "
+                    .contains("assistant_citation_rejected sessionId=session-1 messageJobId=job-1 phase=FINAL_REPLY "
                             + "reason=RESULT_NOT_FOUND citationCount=1");
             assertThat(logTemplatesAndArguments(appender)).doesNotContain("unknown-result");
         } finally {
@@ -225,8 +232,9 @@ class MessageJobServiceTest {
         store.seedSource();
         store.job = Optional.of(new ConversationStore.MessageJobProjection(store.claim.messageJobId(), store.claim.sessionId(),
                 com.java.system.sessionagent.conversation.domain.JobStatus.WORKING, 0, 11, Optional.empty()));
-        ConversationModel model = (request, usageObserver) -> new ModelDecision.Reply(
-                new AssistantReply("answer", List.of(new ResultId("source-result"))));
+        ConversationModel model = model(
+                (request, usageObserver) -> { throw new AssertionError("plan must not be called"); },
+                (request, usageObserver) -> new AssistantReply("answer", List.of(new ResultId("source-result"))));
         MessageJobService service = new MessageJobService(store, model, new DirectToolRegistry(List.of()),
                 Clock.fixed(Instant.parse("2026-08-16T00:00:00Z"), ZoneOffset.UTC));
 
@@ -238,14 +246,60 @@ class MessageJobServiceTest {
         assertThat(store.calls).isEqualTo(12);
     }
 
+    @Test
+    void reserves_a_separate_reply_call_after_answer_ready() {
+        RecordingStore store = new RecordingStore();
+        store.seedSource();
+        List<Integer> planOrdinals = new java.util.ArrayList<>();
+        List<Integer> replyOrdinals = new java.util.ArrayList<>();
+        ConversationModel model = model(
+                (request, usageObserver) -> {
+                    planOrdinals.add(request.callContext().ordinal());
+                    return new ModelDecision.AnswerReady();
+                },
+                (request, usageObserver) -> {
+                    replyOrdinals.add(request.callContext().ordinal());
+                    return new AssistantReply("answer", List.of(new ResultId("source-result")));
+                });
+        MessageJobService service = new MessageJobService(store, model, new DirectToolRegistry(List.of()),
+                Clock.fixed(Instant.parse("2026-08-16T00:00:00Z"), ZoneOffset.UTC));
+
+        service.process(store.claim, () -> true);
+
+        assertThat(planOrdinals).containsExactly(1);
+        assertThat(replyOrdinals).containsExactly(2);
+        assertThat(store.calls).isEqualTo(2);
+    }
+
+    @Test
+    void uses_the_twelfth_call_as_a_direct_final_reply_fallback() {
+        RecordingStore store = new RecordingStore();
+        store.calls = 11;
+        store.seedSource();
+        List<Integer> replyOrdinals = new java.util.ArrayList<>();
+        ConversationModel model = model(
+                (request, usageObserver) -> { throw new AssertionError("plan must not be called"); },
+                (request, usageObserver) -> {
+                    replyOrdinals.add(request.callContext().ordinal());
+                    return new AssistantReply("answer", List.of(new ResultId("source-result")));
+                });
+        MessageJobService service = new MessageJobService(store, model, new DirectToolRegistry(List.of()),
+                Clock.fixed(Instant.parse("2026-08-16T00:00:00Z"), ZoneOffset.UTC));
+
+        service.process(store.claim, () -> true);
+
+        assertThat(replyOrdinals).containsExactly(12);
+        assertThat(store.calls).isEqualTo(12);
+    }
+
     @ParameterizedTest
     @MethodSource("rejectedCatalogArguments")
     void persists_original_malformed_or_oversize_tool_arguments_without_executing(String arguments, String expectedCode) {
         RecordingStore store = new RecordingStore();
         store.seedCatalog();
         AtomicInteger executions = new AtomicInteger();
-        ConversationModel model = (request, usageObserver) -> new ModelDecision.UseTool(
-                "catalog-call", new ToolName("list_repositories"), arguments, MODEL_CONTEXT);
+        ConversationModel model = model((request, usageObserver) -> new ModelDecision.UseTool(
+                "catalog-call", new ToolName("list_repositories"), arguments, MODEL_CONTEXT));
         DirectToolRegistry registry = new DirectToolRegistry(List.of(countedRegistration("list_repositories", ToolKind.CATALOG, executions)));
         MessageJobService service = new MessageJobService(store, model, registry,
                 Clock.fixed(Instant.parse("2026-08-16T00:00:00Z"), ZoneOffset.UTC));
@@ -295,7 +349,7 @@ class MessageJobServiceTest {
                 com.java.system.sessionagent.conversation.domain.JobStatus.WORKING, 63, 0, Optional.empty()));
         Instant now = Instant.parse("2026-08-16T00:00:00Z");
         MessageJobService service = new MessageJobService(store,
-                (request, usageObserver) -> { throw ModelCallFailure.transientFailure(); }, new DirectToolRegistry(List.of()),
+                model((request, usageObserver) -> { throw ModelCallFailure.transientFailure(); }), new DirectToolRegistry(List.of()),
                 Clock.fixed(now, ZoneOffset.UTC),
                 new com.java.system.sessionagent.conversation.application.MessageJobRetryPolicy(64, java.time.Duration.ofSeconds(60)),
                 mock(ConversationTelemetry.class));
@@ -334,7 +388,7 @@ class MessageJobServiceTest {
     @Test
     void records_context_too_large_as_terminal_feedback() {
         RecordingStore store = new RecordingStore();
-        ConversationModel model = (request, usageObserver) -> { throw ModelCallFailure.contextTooLarge(); };
+        ConversationModel model = model((request, usageObserver) -> { throw ModelCallFailure.contextTooLarge(); });
         MessageJobService service = new MessageJobService(store, model, new DirectToolRegistry(List.of()),
                 Clock.fixed(Instant.parse("2026-08-16T00:00:00Z"), ZoneOffset.UTC));
 
@@ -352,7 +406,7 @@ class MessageJobServiceTest {
         store.loadFailure = Optional.of(ConversationStoreFailure.contract(new IllegalStateException("bad persisted row")));
         ConversationTelemetry telemetry = mock(ConversationTelemetry.class);
         MessageJobService service = new MessageJobService(store,
-                (request, usageObserver) -> { throw new AssertionError("model must not be called"); }, new DirectToolRegistry(List.of()),
+                model((request, usageObserver) -> { throw new AssertionError("model must not be called"); }), new DirectToolRegistry(List.of()),
                 Clock.fixed(Instant.parse("2026-08-16T00:00:00Z"), ZoneOffset.UTC),
                 new com.java.system.sessionagent.conversation.application.MessageJobRetryPolicy(3, java.time.Duration.ofSeconds(60)), telemetry);
 
@@ -373,7 +427,7 @@ class MessageJobServiceTest {
         store.loadFailure = Optional.of(ConversationStoreFailure.transientFailure(new IllegalStateException("connection lost")));
         Instant now = Instant.parse("2026-08-16T00:00:00Z");
         MessageJobService service = new MessageJobService(store,
-                (request, usageObserver) -> { throw new AssertionError("model must not be called"); }, new DirectToolRegistry(List.of()),
+                model((request, usageObserver) -> { throw new AssertionError("model must not be called"); }), new DirectToolRegistry(List.of()),
                 Clock.fixed(now, ZoneOffset.UTC));
 
         service.process(store.claim, () -> true);
@@ -390,7 +444,7 @@ class MessageJobServiceTest {
                 com.java.system.sessionagent.conversation.domain.JobStatus.WORKING, 0, 12, Optional.empty()));
         store.loadFailure = Optional.of(ConversationStoreFailure.transientFailure(new IllegalStateException("connection lost")));
         MessageJobService service = new MessageJobService(store,
-                (request, usageObserver) -> { throw new AssertionError("model must not be called"); }, new DirectToolRegistry(List.of()),
+                model((request, usageObserver) -> { throw new AssertionError("model must not be called"); }), new DirectToolRegistry(List.of()),
                 Clock.fixed(Instant.parse("2026-08-16T00:00:00Z"), ZoneOffset.UTC));
 
         service.process(store.claim, () -> true);
@@ -406,7 +460,7 @@ class MessageJobServiceTest {
         store.loadFailure = Optional.of(ConversationStoreFailure.contract(new IllegalStateException("bad persisted row")));
         store.feedbackFailure = Optional.of(new StaleWorkClaimException());
         MessageJobService service = new MessageJobService(store,
-                (request, usageObserver) -> { throw new AssertionError("model must not be called"); }, new DirectToolRegistry(List.of()),
+                model((request, usageObserver) -> { throw new AssertionError("model must not be called"); }), new DirectToolRegistry(List.of()),
                 Clock.fixed(Instant.parse("2026-08-16T00:00:00Z"), ZoneOffset.UTC));
 
         assertThatCode(() -> service.process(store.claim, () -> true)).doesNotThrowAnyException();
@@ -458,21 +512,20 @@ class MessageJobServiceTest {
     @Test
     void emits_correlated_model_events_without_sensitive_tool_arguments() {
         RecordingStore store = new RecordingStore();
-        store.calls = 11;
-        ConversationModel model = (request, usageObserver) -> {
+        ConversationModel model = model((request, usageObserver) -> {
             usageObserver.accept(new com.java.system.sessionagent.conversation.domain.ModelUsage(5, 4, 9, true));
             return new ModelDecision.UseTool(
                     "tool-call", new ToolName("list_repositories"), "{\"apiKey\":\"runtime-secret\"}", MODEL_CONTEXT);
-        };
+        });
         MessageJobService service = new MessageJobService(store, model, new DirectToolRegistry(List.of()),
                 Clock.fixed(Instant.parse("2026-08-16T00:00:00Z"), ZoneOffset.UTC));
         ListAppender<ILoggingEvent> appender = attachAppender(MessageJobService.class);
 
         try {
-            service.process(store.claim, () -> true);
+            service.process(store.claim, () -> store.calls < 2);
 
             assertThat(appender.list).extracting(ILoggingEvent::getMessage)
-                    .contains("model_call_started sessionId={} messageJobId={} ordinal={} replyOnly={} historyCount={} visibleToolCount={}",
+                    .contains("model_call_started sessionId={} messageJobId={} ordinal={} phase={} historyCount={} visibleToolCount={}",
                             "model_call_usage sessionId={} messageJobId={} ordinal={} usageAvailable={} promptTokens={} completionTokens={} totalTokens={}",
                             "model_call_decision sessionId={} messageJobId={} ordinal={} decisionCategory={}");
             assertThat(logTemplatesAndArguments(appender)).doesNotContain("runtime-secret", "apiKey", "{\"apiKey\"");
@@ -522,23 +575,81 @@ class MessageJobServiceTest {
                 .collect(Collectors.joining("\n"));
     }
 
+    private static ConversationModel model(PlanAction planAction) {
+        return model(planAction, (request, usageObserver) -> {
+            throw new AssertionError("reply must not be called");
+        });
+    }
+
+    private static ConversationModel model(PlanAction planAction, ReplyAction replyAction) {
+        return new ConversationModel() {
+            @Override
+            public ModelDecision plan(com.java.system.sessionagent.conversation.domain.ModelRequest request,
+                                      java.util.function.Consumer<com.java.system.sessionagent.conversation.domain.ModelUsage> usageObserver) {
+                return planAction.plan(request, usageObserver);
+            }
+
+            @Override
+            public AssistantReply reply(com.java.system.sessionagent.conversation.domain.ReplyRequest request,
+                                        java.util.function.Consumer<com.java.system.sessionagent.conversation.domain.ModelUsage> usageObserver) {
+                return replyAction.reply(request, usageObserver);
+            }
+        };
+    }
+
+    @FunctionalInterface
+    private interface PlanAction {
+        ModelDecision plan(com.java.system.sessionagent.conversation.domain.ModelRequest request,
+                           java.util.function.Consumer<com.java.system.sessionagent.conversation.domain.ModelUsage> usageObserver);
+    }
+
+    @FunctionalInterface
+    private interface ReplyAction {
+        AssistantReply reply(com.java.system.sessionagent.conversation.domain.ReplyRequest request,
+                             java.util.function.Consumer<com.java.system.sessionagent.conversation.domain.ModelUsage> usageObserver);
+    }
+
     private static final class ScriptedModel implements ConversationModel {
         private final List<ModelDecision> decisions;
         private final RecordingStore store;
+        private final Optional<AssistantReply> scriptedReply;
         private final List<List<String>> snapshots = new java.util.ArrayList<>();
         private int index;
 
-        private ScriptedModel(RecordingStore store, ModelDecision... decisions) { this.store = store; this.decisions = List.of(decisions); }
+        private ScriptedModel(RecordingStore store, ModelDecision... decisions) {
+            this.store = store;
+            this.scriptedReply = Optional.empty();
+            this.decisions = List.of(decisions);
+        }
+
+        private ScriptedModel(RecordingStore store, AssistantReply reply, ModelDecision... decisions) {
+            this.store = store;
+            this.scriptedReply = Optional.of(reply);
+            this.decisions = List.of(decisions);
+        }
 
         @Override
-        public ModelDecision decide(com.java.system.sessionagent.conversation.domain.ModelRequest request,
-                                    java.util.function.Consumer<com.java.system.sessionagent.conversation.domain.ModelUsage> usageObserver) {
+        public ModelDecision plan(com.java.system.sessionagent.conversation.domain.ModelRequest request,
+                                  java.util.function.Consumer<com.java.system.sessionagent.conversation.domain.ModelUsage> usageObserver) {
             snapshots.add(request.toolSnapshot().definitions().stream().map(definition -> definition.name().value()).toList());
             if (index == decisions.size()) {
                 index++;
-                return new ModelDecision.Reply(new AssistantReply("Answer", List.of(store.toolMessages.getLast().resultId())));
+                return new ModelDecision.AnswerReady();
             }
             return decisions.get(index++);
+        }
+
+        @Override
+        public AssistantReply reply(com.java.system.sessionagent.conversation.domain.ReplyRequest request,
+                                    java.util.function.Consumer<com.java.system.sessionagent.conversation.domain.ModelUsage> usageObserver) {
+            return scriptedReply.orElseGet(() -> new AssistantReply("Answer", request.history().stream()
+                    .filter(com.java.system.sessionagent.conversation.domain.ToolMessage.class::isInstance)
+                    .map(com.java.system.sessionagent.conversation.domain.ToolMessage.class::cast)
+                    .filter(com.java.system.sessionagent.conversation.domain.ToolMessage::citeable)
+                    .map(com.java.system.sessionagent.conversation.domain.ToolMessage::resultId)
+                    .reduce((first, second) -> second)
+                    .map(List::of)
+                    .orElseThrow()));
         }
     }
 

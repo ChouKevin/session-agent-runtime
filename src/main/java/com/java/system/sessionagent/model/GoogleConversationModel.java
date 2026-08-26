@@ -4,6 +4,7 @@ import com.java.system.sessionagent.conversation.domain.AssistantReply;
 import com.java.system.sessionagent.conversation.domain.ModelDecision;
 import com.java.system.sessionagent.conversation.domain.ModelRequest;
 import com.java.system.sessionagent.conversation.domain.ModelUsage;
+import com.java.system.sessionagent.conversation.domain.ReplyRequest;
 import com.java.system.sessionagent.conversation.domain.ToolMessage;
 import com.java.system.sessionagent.conversation.port.out.ModelCallFailure;
 import com.java.system.sessionagent.conversation.port.out.ConversationTelemetry;
@@ -123,48 +124,76 @@ public final class GoogleConversationModel implements com.java.system.sessionage
     }
 
     @Override
-    public ModelDecision decide(ModelRequest request, Consumer<ModelUsage> usageObserver) {
+    public ModelDecision plan(ModelRequest request, Consumer<ModelUsage> usageObserver) {
         Assert.notNull(request, "Model request must not be null");
         Assert.notNull(usageObserver, "Model usage observer must not be null");
-        List<ToolCallback> callbacks = request.replyOnly() ? List.of() : callbackFactory.create(request.toolSnapshot());
-        List<Message> messages = messagesFor(request);
-        LOGGER.info("google_model_request replyOnly={} messageCount={} callbackCount={}", request.replyOnly(), messages.size(), callbacks.size());
+        List<ToolCallback> callbacks = callbackFactory.create(request.toolSnapshot());
+        List<Message> messages = planMessagesFor(request);
+        LOGGER.info("google_model_request phase=PLAN messageCount={} callbackCount={}", messages.size(), callbacks.size());
         try {
-            ChatResponse response = call(messages, callbacks, request.replyOnly());
+            ChatResponse response = call(messages, callbacks, false);
             logResponseShape(response);
             ModelUsage modelUsage = usage(response);
-            ModelDecision modelDecision = decision(response);
-            LOGGER.info("google_model_response replyOnly={} resultCategory={} resultCount={} usageAvailable={}", request.replyOnly(), resultCategory(response),
+            ModelDecision modelDecision = planDecision(response);
+            LOGGER.info("google_model_response phase=PLAN resultCategory={} resultCount={} usageAvailable={}", resultCategory(response),
                     resultCount(response), modelUsage.available());
             usageObserver.accept(modelUsage);
             telemetry.model("SUCCESS", Optional.of(finishReason(response)), modelUsage);
             return modelDecision;
         } catch (ModelCallFailure failure) {
-            LOGGER.info("google_model_failed replyOnly={} closedFailureKind={}", request.replyOnly(), failure.kind());
+            LOGGER.info("google_model_failed phase=PLAN closedFailureKind={}", failure.kind());
             telemetry.model("FAILURE", Optional.of(failure.kind().name()), new ModelUsage(0, 0, 0, false));
             throw failure;
         }
     }
 
-    private List<Message> messagesFor(ModelRequest request) {
+    @Override
+    public AssistantReply reply(ReplyRequest request, Consumer<ModelUsage> usageObserver) {
+        Assert.notNull(request, "Reply request must not be null");
+        Assert.notNull(usageObserver, "Model usage observer must not be null");
+        List<Message> messages = replyMessagesFor(request);
+        LOGGER.info("google_model_request phase=FINAL_REPLY messageCount={} callbackCount={}", messages.size(), 0);
+        try {
+            ChatResponse response = call(messages, List.of(), true);
+            logResponseShape(response);
+            ModelUsage modelUsage = usage(response);
+            AssistantReply reply = replyDecision(response);
+            LOGGER.info("google_model_response phase=FINAL_REPLY resultCategory={} resultCount={} usageAvailable={}", resultCategory(response),
+                    resultCount(response), modelUsage.available());
+            usageObserver.accept(modelUsage);
+            telemetry.model("SUCCESS", Optional.of(finishReason(response)), modelUsage);
+            return reply;
+        } catch (ModelCallFailure failure) {
+            LOGGER.info("google_model_failed phase=FINAL_REPLY closedFailureKind={}", failure.kind());
+            telemetry.model("FAILURE", Optional.of(failure.kind().name()), new ModelUsage(0, 0, 0, false));
+            throw failure;
+        }
+    }
+
+    private List<Message> planMessagesFor(ModelRequest request) {
         List<Message> messages = new ArrayList<>();
         messages.add(new org.springframework.ai.chat.messages.SystemMessage(promptResource.content()));
         messages.addAll(historyProjector.project(request.history()));
-        if (request.replyOnly()) {
-            List<String> resultIds = request.history().stream()
-                    .filter(ToolMessage.class::isInstance)
-                    .map(ToolMessage.class::cast)
-                    .filter(ToolMessage::citeable)
-                    .map(message -> message.resultId().value())
-                    .distinct()
-                    .toList();
-            messages.add(new org.springframework.ai.chat.messages.UserMessage(
-                    "Runtime final reply requirement: no tools are available. Return only the final JSON object described "
-                            + "by the system instruction. Every citation value must be chosen from this exact list: "
-                            + jsonCodec.canonicalize(resultIds)
-                            + ". Re-read the tool results in history before choosing citations. If the answer reports codebase "
-                            + "absence, cite a supporting complete empty code search; a source citation does not replace it."));
-        }
+        return List.copyOf(messages);
+    }
+
+    private List<Message> replyMessagesFor(ReplyRequest request) {
+        List<Message> messages = new ArrayList<>();
+        messages.add(new org.springframework.ai.chat.messages.SystemMessage(promptResource.content()));
+        messages.addAll(historyProjector.project(request.history()));
+        List<String> resultIds = request.history().stream()
+                .filter(ToolMessage.class::isInstance)
+                .map(ToolMessage.class::cast)
+                .filter(ToolMessage::citeable)
+                .map(message -> message.resultId().value())
+                .distinct()
+                .toList();
+        messages.add(new org.springframework.ai.chat.messages.UserMessage(
+                "Runtime final reply requirement: no tools are available. Return only the final JSON object described "
+                        + "by the system instruction. Every citation value must be chosen from this exact list: "
+                        + jsonCodec.canonicalize(resultIds)
+                        + ". Re-read the tool results in history before choosing citations. If the answer reports codebase "
+                        + "absence, cite a supporting complete empty code search; a source citation does not replace it."));
         return List.copyOf(messages);
     }
 
@@ -200,7 +229,7 @@ public final class GoogleConversationModel implements com.java.system.sessionage
                 .build();
     }
 
-    private ModelDecision decision(ChatResponse response) {
+    private ModelDecision planDecision(ChatResponse response) {
         List<Generation> results = response.getResults().stream()
                 .filter(result -> !isThought(result))
                 .toList();
@@ -212,7 +241,10 @@ public final class GoogleConversationModel implements com.java.system.sessionage
         if (message.hasToolCalls()) {
             return toolDecision(message);
         }
-        return replyDecision(message.getText());
+        if (!StringUtils.hasText(message.getText())) {
+            throw ModelCallFailure.correctable();
+        }
+        return new ModelDecision.AnswerReady();
     }
 
     private static boolean isThought(Generation generation) {
@@ -249,9 +281,20 @@ public final class GoogleConversationModel implements com.java.system.sessionage
         return Base64.getEncoder().encodeToString(signature);
     }
 
-    private ModelDecision replyDecision(String content) {
+    private AssistantReply replyDecision(ChatResponse response) {
+        List<Generation> results = response.getResults().stream()
+                .filter(result -> !isThought(result))
+                .toList();
+        if (CollectionUtils.isEmpty(results) || results.size() != 1) {
+            throw ModelCallFailure.correctable();
+        }
+        AssistantMessage message = Optional.ofNullable(results.getFirst().getOutput())
+                .orElseThrow(ModelCallFailure::correctable);
+        if (message.hasToolCalls() || !StringUtils.hasText(message.getText())) {
+            throw ModelCallFailure.correctable();
+        }
         try {
-            return new ModelDecision.Reply(jsonCodec.decode(content, AssistantReply.class));
+            return jsonCodec.decode(message.getText(), AssistantReply.class);
         } catch (JsonContractException | IllegalArgumentException exception) {
             throw ModelCallFailure.correctable();
         }

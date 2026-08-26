@@ -3,7 +3,10 @@ package com.java.system.sessionagent.conversation.application;
 import com.java.system.sessionagent.conversation.domain.AssistantReply;
 import com.java.system.sessionagent.conversation.domain.MessageJobId;
 import com.java.system.sessionagent.conversation.domain.MessageWorkClaim;
+import com.java.system.sessionagent.conversation.domain.ModelCallContext;
 import com.java.system.sessionagent.conversation.domain.ModelDecision;
+import com.java.system.sessionagent.conversation.domain.ModelRequest;
+import com.java.system.sessionagent.conversation.domain.ReplyRequest;
 import com.java.system.sessionagent.conversation.domain.ResultId;
 import com.java.system.sessionagent.conversation.domain.SessionMessage;
 import com.java.system.sessionagent.conversation.port.in.MessageJobPort;
@@ -36,6 +39,7 @@ import java.util.UUID;
 public final class MessageJobService implements MessageJobPort {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(MessageJobService.class);
+    private static final int MAX_MODEL_CALLS = 12;
     private final ConversationStore conversationStore;
     private final ConversationModel conversationModel;
     private final DirectToolRegistry toolRegistry;
@@ -83,6 +87,7 @@ public final class MessageJobService implements MessageJobPort {
     }
 
     private void processClaim(MessageWorkClaim claim, WorkGuard workGuard) {
+        boolean finalReplyRequested = false;
         while (workGuard.stillOwned()) {
             List<SessionMessage> history = conversationStore.loadHistory(claim.sessionId(), claim.messageJobId());
             OptionalIntReservation reservation = reserve(claim, workGuard);
@@ -90,38 +95,57 @@ public final class MessageJobService implements MessageJobPort {
                 appendFeedback(claim, workGuard, FeedbackCode.CALL_LIMIT_REACHED, true, ToolFeedbackDetails.empty());
                 return;
             }
+            ModelCallContext callContext = new ModelCallContext(claim.sessionId(), claim.messageJobId(), reservation.ordinal());
+            if (finalReplyRequested || reservation.ordinal() == MAX_MODEL_CALLS) {
+                processFinalReply(claim, workGuard, history, callContext);
+                return;
+            }
             ToolSnapshot snapshot = toolRegistry.snapshot();
-            boolean replyOnly = reservation.ordinal() == 12;
-            logModelCallStarted(claim, reservation.ordinal(), replyOnly, history.size(), snapshot.definitions().size());
+            logModelCallStarted(claim, reservation.ordinal(), "PLAN", history.size(), snapshot.definitions().size());
             ModelDecision decision;
             try {
-                decision = conversationModel.decide(new com.java.system.sessionagent.conversation.domain.ModelRequest(history, snapshot, replyOnly),
+                decision = conversationModel.plan(new ModelRequest(history, snapshot, callContext),
                         usage -> logModelCallUsage(claim, reservation.ordinal(), usage));
             } catch (ModelCallFailure failure) {
                 logModelCallFailed(claim, reservation.ordinal(), failure.kind());
-                if (replyOnly && failure.kind() == ModelCallFailure.Kind.TRANSIENT) {
-                    appendFeedback(claim, workGuard, FeedbackCode.DEPENDENCY_UNAVAILABLE, true, ToolFeedbackDetails.empty());
-                    return;
-                }
-                if (replyOnly && failure.kind() == ModelCallFailure.Kind.CORRECTABLE) {
-                    appendFeedback(claim, workGuard, FeedbackCode.CALL_LIMIT_REACHED, true, ToolFeedbackDetails.empty());
-                    return;
-                }
                 if (!handleFailure(claim, workGuard, ConversationFailurePolicy.model(failure), ToolFeedbackDetails.empty(), "MODEL")) { return; }
                 continue;
             }
             logModelCallDecision(claim, reservation.ordinal(), decision);
             if (!workGuard.stillOwned()) { return; }
             if (decision instanceof ModelDecision.UseTool useTool) {
-                if (replyOnly) {
-                    appendFeedback(claim, workGuard, FeedbackCode.CALL_LIMIT_REACHED, true, toolDetails(useTool));
-                    return;
-                }
                 if (!executeTool(claim, workGuard, snapshot, useTool)) { return; }
                 continue;
             }
-            if (validateReply(claim, workGuard, ((ModelDecision.Reply) decision).reply(), replyOnly)) { return; }
+            finalReplyRequested = true;
         }
+    }
+
+    private void processFinalReply(MessageWorkClaim claim, WorkGuard workGuard, List<SessionMessage> history,
+                                   ModelCallContext callContext) {
+        logModelCallStarted(claim, callContext.ordinal(), "FINAL_REPLY", history.size(), 0);
+        AssistantReply reply;
+        try {
+            reply = conversationModel.reply(new ReplyRequest(history, callContext),
+                    usage -> logModelCallUsage(claim, callContext.ordinal(), usage));
+        } catch (ModelCallFailure failure) {
+            logModelCallFailed(claim, callContext.ordinal(), failure.kind());
+            if (failure.kind() == ModelCallFailure.Kind.TRANSIENT) {
+                appendFeedback(claim, workGuard, FeedbackCode.DEPENDENCY_UNAVAILABLE, true, ToolFeedbackDetails.empty());
+                return;
+            }
+            if (failure.kind() == ModelCallFailure.Kind.CORRECTABLE) {
+                appendFeedback(claim, workGuard, FeedbackCode.CALL_LIMIT_REACHED, true, ToolFeedbackDetails.empty());
+                return;
+            }
+            handleFailure(claim, workGuard, ConversationFailurePolicy.model(failure), ToolFeedbackDetails.empty(), "MODEL");
+            return;
+        }
+        logModelCallDecision(claim, callContext.ordinal(), "ASSISTANT_REPLY");
+        if (!workGuard.stillOwned()) {
+            return;
+        }
+        validateReply(claim, workGuard, reply, true);
     }
 
     private void recoverStorageFailure(MessageWorkClaim claim, WorkGuard guard, ConversationStoreFailure failure) {
@@ -134,7 +158,7 @@ public final class MessageJobService implements MessageJobPort {
         }
         try {
             Optional<ConversationStore.MessageJobProjection> job = conversationStore.readJob(claim.messageJobId());
-            if (job.isPresent() && job.get().modelCallCount() >= 12) {
+            if (job.isPresent() && job.get().modelCallCount() >= MAX_MODEL_CALLS) {
                 appendStorageFeedback(claim, guard, FeedbackCode.DEPENDENCY_UNAVAILABLE);
                 return;
             }
@@ -219,7 +243,7 @@ public final class MessageJobService implements MessageJobPort {
         }
     }
 
-    private boolean validateReply(MessageWorkClaim claim, WorkGuard guard, AssistantReply reply, boolean replyOnly) {
+    private boolean validateReply(MessageWorkClaim claim, WorkGuard guard, AssistantReply reply, boolean finalReply) {
         CitationValidator.Validation validation = citationValidator.validate(claim.sessionId(), reply.citations());
         if (validation instanceof CitationValidator.Validation.Accepted accepted) {
             if (guard.stillOwned()) {
@@ -232,8 +256,8 @@ public final class MessageJobService implements MessageJobPort {
             return true;
         }
         if (validation instanceof CitationValidator.Validation.Correctable correctable) {
-            logCitationRejected(claim, replyOnly, correctable.reason(), reply.citations().size());
-            if (replyOnly) {
+            logCitationRejected(claim, finalReply, correctable.reason(), reply.citations().size());
+            if (finalReply) {
                 appendFeedback(claim, guard, FeedbackCode.CALL_LIMIT_REACHED, true, ToolFeedbackDetails.empty());
                 return true;
             }
@@ -317,10 +341,10 @@ public final class MessageJobService implements MessageJobPort {
 
     private static String safeMessage(FeedbackCode code) { return "Runtime feedback: " + code.name(); }
 
-    private static void logModelCallStarted(MessageWorkClaim claim, int ordinal, boolean replyOnly, int historyCount,
+    private static void logModelCallStarted(MessageWorkClaim claim, int ordinal, String phase, int historyCount,
                                             int visibleToolCount) {
-        LOGGER.info("model_call_started sessionId={} messageJobId={} ordinal={} replyOnly={} historyCount={} visibleToolCount={}",
-                claim.sessionId().value(), claim.messageJobId().value(), ordinal, replyOnly, historyCount, visibleToolCount);
+        LOGGER.info("model_call_started sessionId={} messageJobId={} ordinal={} phase={} historyCount={} visibleToolCount={}",
+                claim.sessionId().value(), claim.messageJobId().value(), ordinal, phase, historyCount, visibleToolCount);
     }
 
     private static void logModelCallUsage(MessageWorkClaim claim, int ordinal,
@@ -331,7 +355,11 @@ public final class MessageJobService implements MessageJobPort {
     }
 
     private static void logModelCallDecision(MessageWorkClaim claim, int ordinal, ModelDecision decision) {
-        String category = decision instanceof ModelDecision.UseTool ? "USE_TOOL" : "REPLY";
+        String category = decision instanceof ModelDecision.UseTool ? "USE_TOOL" : "ANSWER_READY";
+        logModelCallDecision(claim, ordinal, category);
+    }
+
+    private static void logModelCallDecision(MessageWorkClaim claim, int ordinal, String category) {
         LOGGER.info("model_call_decision sessionId={} messageJobId={} ordinal={} decisionCategory={}",
                 claim.sessionId().value(), claim.messageJobId().value(), ordinal, category);
     }
@@ -341,10 +369,10 @@ public final class MessageJobService implements MessageJobPort {
                 claim.sessionId().value(), claim.messageJobId().value(), ordinal, kind);
     }
 
-    private static void logCitationRejected(MessageWorkClaim claim, boolean replyOnly,
+    private static void logCitationRejected(MessageWorkClaim claim, boolean finalReply,
                                             CitationValidator.CorrectionReason reason, int citationCount) {
-        LOGGER.info("assistant_citation_rejected sessionId={} messageJobId={} replyOnly={} reason={} citationCount={}",
-                claim.sessionId().value(), claim.messageJobId().value(), replyOnly, reason, citationCount);
+        LOGGER.info("assistant_citation_rejected sessionId={} messageJobId={} phase={} reason={} citationCount={}",
+                claim.sessionId().value(), claim.messageJobId().value(), finalReply ? "FINAL_REPLY" : "PLAN", reason, citationCount);
     }
 
     private static ToolFeedbackDetails toolDetails(ModelDecision.UseTool toolCall) {
