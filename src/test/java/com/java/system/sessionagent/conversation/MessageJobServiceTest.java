@@ -166,17 +166,25 @@ class MessageJobServiceTest {
                 });
         MessageJobService service = new MessageJobService(store, model, new DirectToolRegistry(List.of()),
                 Clock.fixed(Instant.parse("2026-08-16T00:00:00Z"), ZoneOffset.UTC));
+        ListAppender<ILoggingEvent> appender = attachAppender(MessageJobService.class);
 
-        service.process(store.claim, () -> true);
+        try {
+            service.process(store.claim, () -> true);
 
-        assertThat(planOrdinals).containsExactly(1);
-        assertThat(replyOrdinals).containsExactly(2, 3);
-        assertThat(store.calls).isEqualTo(3);
-        assertThat(store.feedbackMessages).singleElement().satisfies(feedback -> {
-            assertThat(feedback.code()).isEqualTo("INVALID_CITATION");
-            assertThat(feedback.terminal()).isFalse();
-        });
-        assertThat(store.assistantReply).isEqualTo(new AssistantReply("answer", List.of(new ResultId("source-result"))));
+            assertThat(planOrdinals).containsExactly(1);
+            assertThat(replyOrdinals).containsExactly(2, 3);
+            assertThat(store.calls).isEqualTo(3);
+            assertThat(store.feedbackMessages).singleElement().satisfies(feedback -> {
+                assertThat(feedback.code()).isEqualTo("INVALID_CITATION");
+                assertThat(feedback.terminal()).isFalse();
+            });
+            assertThat(store.assistantReply).isEqualTo(new AssistantReply("answer", List.of(new ResultId("source-result"))));
+            assertThat(appender.list).extracting(ILoggingEvent::getFormattedMessage)
+                    .contains("assistant_citation_rejected sessionId=session-1 messageJobId=job-1 phase=FINAL_REPLY "
+                            + "reason=RESULT_NOT_FOUND citationCount=1");
+        } finally {
+            detachAppender(MessageJobService.class, appender);
+        }
     }
 
     @Test

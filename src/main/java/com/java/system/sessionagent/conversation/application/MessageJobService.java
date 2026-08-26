@@ -245,7 +245,7 @@ public final class MessageJobService implements MessageJobPort {
         }
     }
 
-    private boolean validateReply(MessageWorkClaim claim, WorkGuard guard, AssistantReply reply, boolean finalReply) {
+    private boolean validateReply(MessageWorkClaim claim, WorkGuard guard, AssistantReply reply, boolean finalCall) {
         CitationValidator.Validation validation = citationValidator.validate(claim.sessionId(), reply.citations());
         if (validation instanceof CitationValidator.Validation.Accepted accepted) {
             if (guard.stillOwned()) {
@@ -258,8 +258,8 @@ public final class MessageJobService implements MessageJobPort {
             return false;
         }
         if (validation instanceof CitationValidator.Validation.Correctable correctable) {
-            logCitationRejected(claim, finalReply, correctable.reason(), reply.citations().size());
-            if (finalReply) {
+            logCitationRejected(claim, correctable.reason(), reply.citations().size());
+            if (finalCall) {
                 appendFeedback(claim, guard, FeedbackCode.CALL_LIMIT_REACHED, true, ToolFeedbackDetails.empty());
                 return false;
             }
@@ -371,10 +371,10 @@ public final class MessageJobService implements MessageJobPort {
                 claim.sessionId().value(), claim.messageJobId().value(), ordinal, kind);
     }
 
-    private static void logCitationRejected(MessageWorkClaim claim, boolean finalReply,
-                                            CitationValidator.CorrectionReason reason, int citationCount) {
-        LOGGER.info("assistant_citation_rejected sessionId={} messageJobId={} phase={} reason={} citationCount={}",
-                claim.sessionId().value(), claim.messageJobId().value(), finalReply ? "FINAL_REPLY" : "PLAN", reason, citationCount);
+    private static void logCitationRejected(MessageWorkClaim claim, CitationValidator.CorrectionReason reason,
+                                            int citationCount) {
+        LOGGER.info("assistant_citation_rejected sessionId={} messageJobId={} phase=FINAL_REPLY reason={} citationCount={}",
+                claim.sessionId().value(), claim.messageJobId().value(), reason, citationCount);
     }
 
     private static ToolFeedbackDetails toolDetails(ModelDecision.UseTool toolCall) {
