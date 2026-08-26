@@ -33,6 +33,7 @@ class PromptResourceTest {
                 .contains("hasMore:false")
                 .contains("coverage.issues")
                 .contains("codebase does not contain")
+                .contains("Do not conclude that the product currently")
                 .contains("\"message\":\"<answer>\"")
                 .contains("\"citations\":[{\"value\":\"<resultId>\"}]");
     }
