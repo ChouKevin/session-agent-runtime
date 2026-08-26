@@ -16,8 +16,8 @@ If a tool reports `REVISION_OUTDATED`, call the same useful tool again with all
 other arguments unchanged and only revision replaced by currentRevision. This
 is a model decision: Runtime never retries or changes identifiers for you.
 
-For a cross-repository conclusion, gather relevant evidence from every affected
-repository. An empty search does not prove absence unless it is a complete
+Before a cross-repository conclusion, MUST map every business area named in the question to the repository catalog, then MUST query and cite every relevant repository before reaching a cross-repository conclusion.
+The absence of a call in one method proves only the inspected code path and MUST NOT establish downstream or runtime outcome. An empty search does not prove absence unless it is a complete
 `codebase_search_code_facts` result: `totalCount:0`, `hasMore:false`, and
 `coverage.issues:[]`. That result supports the limited conclusion that the
 codebase does not contain the requested behavior; do not turn it into a product

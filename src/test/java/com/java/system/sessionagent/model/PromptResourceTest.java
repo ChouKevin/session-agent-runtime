@@ -35,6 +35,10 @@ class PromptResourceTest {
                 .contains("codebase does not contain")
                 .contains("Do not conclude that the product currently")
                 .contains("MUST include that search result's exact `resultId`")
+                .contains("MUST map every business area named in the question to the repository catalog")
+                .contains("MUST query and cite every relevant repository before reaching a cross-repository conclusion")
+                .contains("absence of a call in one method proves only the inspected code path")
+                .contains("MUST NOT establish downstream or runtime outcome")
                 .contains("\"message\":\"<answer>\"")
                 .contains("\"citations\":[{\"value\":\"<resultId>\"}]");
     }

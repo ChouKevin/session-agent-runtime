@@ -53,6 +53,17 @@ class SessionAgentLiveIT {
     }
 
     @Test
+    void completes_cancellation_and_refund_scenario_through_http_and_worker() throws Exception {
+        LiveRuntime runtime = liveRuntime();
+        List<ScenarioReport> reports = new ArrayList<>();
+        try {
+            reports.add(runCancellationAndRefund(runtime));
+        } finally {
+            writeSafeReport(reports);
+        }
+    }
+
+    @Test
     void records_repository_catalog_at_r1() throws Exception {
         String sessionKey = requiredHistorySessionKey();
         LiveRuntime runtime = liveRuntime();
@@ -157,7 +168,7 @@ class SessionAgentLiveIT {
         ScenarioState state = runtime.ask("live-cancellation-refund-" + UUID.randomUUID(), "取消訂單後，付款會自動退款嗎？");
         String answer = state.assistantText();
         assertContainsOneOf(answer, "取消", "cancel");
-        assertContainsOneOf(answer, "無法確認", "未能確認", "不能確認", "無法證明", "未能證明", "not proven", "cannot confirm", "could not confirm");
+        assertContainsOneOf(answer, "無法確認", "未能確認", "不能確認", "無法證明", "未能證明", "需要進一步確認", "not proven", "cannot confirm", "could not confirm");
         assertThat(state.sourceRepositoryIds()).contains("order-service", "payment-service");
         assertThat(state.citedRepositoryIds()).contains("order-service", "payment-service");
         return state.toReport("CANCELLATION_PROVEN_REFUND_UNPROVEN");
