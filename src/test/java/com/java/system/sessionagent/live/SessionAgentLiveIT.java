@@ -268,7 +268,7 @@ class SessionAgentLiveIT {
             List<JsonNode> feedbackMessages = new ArrayList<>();
             JsonNode assistant = objectMapper.createObjectNode();
             for (JsonNode message : messages) {
-                if (!jobId.equals(requiredText(message, "messageJobId"))) {
+                if (!belongsToJob(message, jobId)) {
                     continue;
                 }
                 if ("TOOL".equals(requiredText(message, "role"))) {
@@ -334,7 +334,7 @@ class SessionAgentLiveIT {
         private Optional<ToolResult> previousCatalog(String sessionId, String jobId, JsonNode messages) throws Exception {
             List<JsonNode> catalogMessages = new ArrayList<>();
             for (JsonNode message : messages) {
-                if (!jobId.equals(requiredText(message, "messageJobId"))
+                if (!belongsToJob(message, jobId)
                         && "TOOL".equals(requiredText(message, "role"))
                         && "list_repositories".equals(requiredText(message, "toolName"))) {
                     catalogMessages.add(message);
@@ -344,6 +344,10 @@ class SessionAgentLiveIT {
                 return Optional.empty();
             }
             return Optional.of(readToolResult(sessionId, catalogMessages.getLast()));
+        }
+
+        private boolean belongsToJob(JsonNode message, String jobId) {
+            return optionalText(message, "messageJobId").filter(jobId::equals).isPresent();
         }
 
         private JsonNode request(String method, String url, Optional<JsonNode> payload) throws Exception {
