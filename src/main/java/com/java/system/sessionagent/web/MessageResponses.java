@@ -48,25 +48,28 @@ public final class MessageResponses {
             Optional<String> revision,
             Optional<Boolean> citeable,
             Optional<String> feedbackCode,
-            Optional<Boolean> terminal) {
+            Optional<Boolean> terminal,
+            Optional<String> rejectedArguments) {
         static SessionMessageResponse from(SessionMessage message) {
             if (message instanceof UserMessage user) {
                 return base(message, Optional.of(user.participantId()), Optional.of(user.message()), Optional.empty(), Optional.empty(),
-                        Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty());
+                        Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(),
+                        Optional.empty());
             }
             if (message instanceof AssistantMessage assistant) {
                 return base(message, Optional.empty(), Optional.of(assistant.message()),
                         Optional.of(assistant.citations().stream().map(citation -> citation.value()).toList()), Optional.empty(), Optional.empty(),
-                        Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty());
+                        Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty());
             }
             if (message instanceof ToolMessage tool) {
                 return base(message, Optional.empty(), Optional.empty(), Optional.empty(), Optional.of(tool.resultId().value()),
                         Optional.of(tool.toolName()), Optional.of(tool.toolVersion()), tool.repositoryId(), tool.revision(), Optional.of(tool.citeable()),
-                        Optional.empty(), Optional.empty());
+                        Optional.empty(), Optional.empty(), Optional.empty());
             }
             FeedbackMessage feedback = (FeedbackMessage) message;
-            return base(message, Optional.empty(), Optional.of(feedback.message()), Optional.empty(), Optional.empty(), Optional.empty(),
-                    Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(), Optional.of(feedback.code()), Optional.of(feedback.terminal()));
+            return base(message, Optional.empty(), Optional.of(feedback.message()), Optional.empty(), Optional.empty(), feedback.toolName(),
+                    Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(), Optional.of(feedback.code()), Optional.of(feedback.terminal()),
+                    feedback.rejectedArguments());
         }
 
         private static SessionMessageResponse base(
@@ -81,10 +84,11 @@ public final class MessageResponses {
                 Optional<String> revision,
                 Optional<Boolean> citeable,
                 Optional<String> feedbackCode,
-                Optional<Boolean> terminal) {
+                Optional<Boolean> terminal,
+                Optional<String> rejectedArguments) {
             return new SessionMessageResponse(message.sequence().value(), message.createdAt(), message.role().name(),
                     message.messageJobId().map(jobId -> jobId.value()), participantId, content, citations, resultId, toolName, toolVersion,
-                    repositoryId, revision, citeable, feedbackCode, terminal);
+                    repositoryId, revision, citeable, feedbackCode, terminal, rejectedArguments);
         }
     }
 

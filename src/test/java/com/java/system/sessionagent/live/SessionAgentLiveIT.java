@@ -33,22 +33,19 @@ class SessionAgentLiveIT {
     private static final Duration JOB_TIMEOUT = Duration.ofMinutes(4);
     private static final Duration POLL_DELAY = Duration.ofMillis(500);
     private static final Path REPORT_DIRECTORY = Path.of("target", "live-reports");
+    private static final String SESSION_AGENT_HISTORY_KEY = "session-agent-history";
 
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final HttpClient httpClient = HttpClient.newBuilder().connectTimeout(HTTP_TIMEOUT).build();
 
     @Test
-    void completes_four_real_conversation_scenarios_through_http_and_worker() throws Exception {
-        Assumptions.assumeTrue("true".equals(System.getenv("SESSION_AGENT_LIVE")), "live opt-in is absent");
-        String runtimeBaseUrl = requiredEnvironment("SESSION_AGENT_BASE_URL");
-        String semanticBaseUrl = requiredEnvironment("SEMANTIC_BASE_URL");
-        requiredEnvironment("GOOGLE_API_KEY");
-
-        LiveRuntime runtime = new LiveRuntime(runtimeBaseUrl, semanticBaseUrl);
+    void completes_five_real_conversation_scenarios_through_http_and_worker() throws Exception {
+        LiveRuntime runtime = liveRuntime();
         List<ScenarioReport> reports = new ArrayList<>();
         try {
             reports.add(runPaymentMethods(runtime));
             reports.add(runRuntimeOnlyFee(runtime));
+            reports.add(runVideoFormats(runtime));
             reports.add(runAbsentBnpl(runtime));
             reports.add(runCancellationAndRefund(runtime));
         } finally {
@@ -56,8 +53,55 @@ class SessionAgentLiveIT {
         }
     }
 
+    @Test
+    void records_repository_catalog_at_r1() throws Exception {
+        LiveRuntime runtime = liveRuntime();
+        ScenarioState state = runtime.ask(SESSION_AGENT_HISTORY_KEY, "影片上傳支援哪些格式？");
+
+        assertContainsOneOf(state.assistantText(), "MP4", "mp4");
+        assertContainsOneOf(state.assistantText(), "WEBM", "webm");
+        assertContainsOneOf(state.assistantText(), "MOV", "mov");
+        assertThat(state.sourceRepositoryIds()).contains("video-service");
+        assertThat(state.citedRepositoryIds()).contains("video-service");
+        assertThat(catalogRevision(currentCatalog(state), "payment-service")).isNotBlank();
+    }
+
+    @Test
+    void recovers_payment_query_at_r2() throws Exception {
+        LiveRuntime runtime = liveRuntime();
+        ScenarioState state = runtime.ask(SESSION_AGENT_HISTORY_KEY, "目前有哪些支付方式？");
+        JsonNode outdatedFeedback = revisionOutdatedFeedback(state);
+        JsonNode payload = parseStructuredJson(requiredText(outdatedFeedback, "message"));
+        JsonNode rejectedArguments = parseStructuredJson(requiredText(outdatedFeedback, "rejectedArguments"));
+        String failedToolName = requiredText(outdatedFeedback, "toolName");
+        String rejectedRepositoryId = requiredText(rejectedArguments, "repositoryId");
+        String requestedRevision = catalogRevision(state.previousCatalog().orElseThrow(
+                () -> new AssertionError("session did not retain the earlier repository catalog")), "payment-service");
+        ToolResult retry = state.toolResults().stream()
+                .filter(tool -> tool.toolName().equals(failedToolName))
+                .filter(tool -> tool.repositoryId().filter(rejectedRepositoryId::equals).isPresent())
+                .filter(tool -> tool.revision().isPresent())
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("session did not retry the useful tool"));
+        String currentRevision = retry.revision().orElseThrow();
+        JsonNode retriedArguments = parseStructuredJson(retry.canonicalArguments());
+
+        assertThat(requiredText(payload, "repositoryId")).isEqualTo("payment-service");
+        assertThat(requestedRevision).isNotBlank();
+        assertThat(currentRevision).isNotBlank().isNotEqualTo(requestedRevision);
+        assertThat(requiredText(payload, "requestedRevision")).isEqualTo(requestedRevision);
+        assertThat(requiredText(payload, "currentRevision")).isEqualTo(currentRevision);
+        assertThat(rejectedRepositoryId).isEqualTo("payment-service");
+        assertThat(requiredText(rejectedArguments, "revision")).isEqualTo(requestedRevision);
+        assertThat(requiredText(retriedArguments, "revision")).isEqualTo(currentRevision);
+        assertThat(state.assistantText()).contains("MOBILE_PAYMENT");
+        assertThat(state.citations()).isNotEmpty();
+        assertThat(state.citations()).allSatisfy(citation ->
+                assertThat(state.resultById(citation).revision()).contains(currentRevision));
+    }
+
     private ScenarioReport runPaymentMethods(LiveRuntime runtime) throws Exception {
-        ScenarioState state = runtime.ask("payment-methods", "目前有哪些支付方式？");
+        ScenarioState state = runtime.ask("live-payment-methods-" + UUID.randomUUID(), "目前有哪些支付方式？");
         String answer = state.assistantText();
         assertContainsOneOf(answer, "信用卡", "credit card", "CREDIT_CARD");
         assertContainsOneOf(answer, "銀行轉帳", "银行转账", "bank transfer", "BANK_TRANSFER");
@@ -67,7 +111,7 @@ class SessionAgentLiveIT {
     }
 
     private ScenarioReport runRuntimeOnlyFee(LiveRuntime runtime) throws Exception {
-        ScenarioState state = runtime.ask("runtime-fee", "信用卡目前的手續費是多少？");
+        ScenarioState state = runtime.ask("live-runtime-fee-" + UUID.randomUUID(), "信用卡目前的手續費是多少？");
         String answer = state.assistantText();
         assertThat(answer).doesNotMatch("(?s).*\\b\\d+(?:\\.\\d+)?\\s*%.*");
         assertContainsOneOf(answer, "runtime", "執行", "設定", "json", "公式");
@@ -75,14 +119,25 @@ class SessionAgentLiveIT {
         return state.toReport("RUNTIME_VALUE_NOT_INVENTED");
     }
 
+    private ScenarioReport runVideoFormats(LiveRuntime runtime) throws Exception {
+        ScenarioState state = runtime.ask("live-video-formats-" + UUID.randomUUID(), "影片上傳支援哪些格式？");
+        String answer = state.assistantText();
+        assertContainsOneOf(answer, "MP4", "mp4");
+        assertContainsOneOf(answer, "WEBM", "webm");
+        assertContainsOneOf(answer, "MOV", "mov");
+        assertThat(state.sourceRepositoryIds()).contains("video-service");
+        assertThat(state.citedRepositoryIds()).contains("video-service");
+        return state.toReport("VIDEO_FORMATS_CONFIRMED");
+    }
+
     private ScenarioReport runAbsentBnpl(LiveRuntime runtime) throws Exception {
-        ScenarioState state = runtime.ask("bnpl-absence", "目前是否支援先買後付？");
+        ScenarioState state = runtime.ask("live-bnpl-absence-" + UUID.randomUUID(), "目前是否支援先買後付？");
         assertContainsOneOf(state.assistantText(), "未發現", "未包含", "沒有", "未支援", "不支援", "not found", "not support", "not implemented");
         return state.toReport("ABSENT_BEHAVIOR_REPORTED");
     }
 
     private ScenarioReport runCancellationAndRefund(LiveRuntime runtime) throws Exception {
-        ScenarioState state = runtime.ask("cancellation-refund", "取消訂單後，付款會自動退款嗎？");
+        ScenarioState state = runtime.ask("live-cancellation-refund-" + UUID.randomUUID(), "取消訂單後，付款會自動退款嗎？");
         String answer = state.assistantText();
         assertContainsOneOf(answer, "取消", "cancel");
         assertContainsOneOf(answer, "無法確認", "未能確認", "不能確認", "無法證明", "未能證明", "not proven", "cannot confirm", "could not confirm");
@@ -109,6 +164,36 @@ class SessionAgentLiveIT {
         return value;
     }
 
+    private LiveRuntime liveRuntime() {
+        Assumptions.assumeTrue("true".equals(System.getenv("SESSION_AGENT_LIVE")), "live opt-in is absent");
+        requiredEnvironment("GOOGLE_API_KEY");
+        return new LiveRuntime(requiredEnvironment("SESSION_AGENT_BASE_URL"));
+    }
+
+    private ToolResult currentCatalog(ScenarioState state) {
+        return state.toolResults().stream()
+                .filter(tool -> tool.toolName().equals("list_repositories"))
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("session did not record a repository catalog"));
+    }
+
+    private String catalogRevision(ToolResult catalog, String repositoryId) {
+        JsonNode repositories = parseStructuredJson(catalog.resultJson()).path("data").path("repositories");
+        for (JsonNode repository : repositories) {
+            if (repositoryId.equals(requiredText(repository, "repositoryId"))) {
+                return requiredText(repository, "revision");
+            }
+        }
+        throw new AssertionError("repository catalog did not include " + repositoryId);
+    }
+
+    private JsonNode revisionOutdatedFeedback(ScenarioState state) {
+        return state.feedbackMessages().stream()
+                .filter(message -> "REVISION_OUTDATED".equals(requiredText(message, "feedbackCode")))
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("session did not record a revision-outdated tool failure"));
+    }
+
     private void writeSafeReport(List<ScenarioReport> reports) throws IOException {
         Files.createDirectories(REPORT_DIRECTORY);
         ObjectNode report = objectMapper.createObjectNode();
@@ -121,17 +206,15 @@ class SessionAgentLiveIT {
     private final class LiveRuntime {
 
         private final String runtimeBaseUrl;
-        private final String semanticBaseUrl;
 
-        private LiveRuntime(String runtimeBaseUrl, String semanticBaseUrl) {
+        private LiveRuntime(String runtimeBaseUrl) {
             this.runtimeBaseUrl = removeTrailingSlash(runtimeBaseUrl);
-            this.semanticBaseUrl = removeTrailingSlash(semanticBaseUrl);
         }
 
-        private ScenarioState ask(String scenario, String question) throws Exception {
+        private ScenarioState ask(String sessionKey, String question) throws Exception {
             String sourceMessageId = UUID.randomUUID().toString();
             ObjectNode request = objectMapper.createObjectNode();
-            request.put("sessionKey", "live-" + scenario + "-" + UUID.randomUUID());
+            request.put("sessionKey", sessionKey);
             request.put("participantId", "live-acceptance");
             request.put("sourceMessageId", sourceMessageId);
             request.put("message", question);
@@ -158,81 +241,90 @@ class SessionAgentLiveIT {
         private ScenarioState inspectScenario(String sessionId, String jobId, JsonNode messages) throws Exception {
             assertThat(messages.isArray()).isTrue();
             List<JsonNode> toolMessages = new ArrayList<>();
+            List<JsonNode> feedbackMessages = new ArrayList<>();
             JsonNode assistant = objectMapper.createObjectNode();
             for (JsonNode message : messages) {
+                if (!jobId.equals(requiredText(message, "messageJobId"))) {
+                    continue;
+                }
                 if ("TOOL".equals(requiredText(message, "role"))) {
                     toolMessages.add(message);
                 }
                 if ("ASSISTANT".equals(requiredText(message, "role"))) {
                     assistant = message;
                 }
+                if ("FEEDBACK".equals(requiredText(message, "role"))) {
+                    feedbackMessages.add(message);
+                }
             }
             assertThat(toolMessages).isNotEmpty();
-            assertThat(requiredText(toolMessages.getFirst(), "toolName")).isEqualTo("list_repositories");
             assertThat(assistant.isObject()).isTrue();
             String assistantText = requiredText(assistant, "message");
-            Set<String> catalogRepositoryIds = catalogRepositoryIds(toolMessages.getFirst());
-            Map<String, JsonNode> resultsById = new HashMap<>();
             List<String> toolOrder = new ArrayList<>();
+            List<ToolResult> toolResults = new ArrayList<>();
+            Map<String, ToolResult> resultsById = new HashMap<>();
             List<RepositoryRevision> repositories = new ArrayList<>();
             Set<String> sourceRepositoryIds = new HashSet<>();
             for (JsonNode tool : toolMessages) {
-                toolOrder.add(requiredText(tool, "toolName"));
-                String resultId = requiredText(tool, "resultId");
-                JsonNode result = request("GET", runtimeBaseUrl + "/internal/results/" + resultId, Optional.empty());
-                assertThat(requiredText(result, "sessionId")).isEqualTo(sessionId);
-                resultsById.put(resultId, result);
-                if (tool.path("repositoryId").isTextual()) {
-                    String repositoryId = tool.path("repositoryId").asText();
-                    JsonNode arguments = parseStructuredJson(requiredText(result, "canonicalArguments"));
-                    assertThat(requiredText(arguments, "repositoryId")).isEqualTo(repositoryId);
-                    assertThat(catalogRepositoryIds).contains(repositoryId);
-                    String revision = requiredText(tool, "revision");
-                    assertThat(requiredText(result, "revision")).isEqualTo(revision);
-                    assertThat(freshRevision(repositoryId)).isEqualTo(revision);
-                    sourceRepositoryIds.add(repositoryId);
-                    repositories.add(new RepositoryRevision(repositoryId, revision));
+                ToolResult toolResult = readToolResult(sessionId, tool);
+                toolOrder.add(toolResult.toolName());
+                toolResults.add(toolResult);
+                resultsById.put(toolResult.resultId(), toolResult);
+                if (toolResult.repositoryId().isPresent()) {
+                    String requiredRepositoryId = toolResult.repositoryId().orElseThrow();
+                    JsonNode arguments = parseStructuredJson(toolResult.canonicalArguments());
+                    assertThat(requiredText(arguments, "repositoryId")).isEqualTo(requiredRepositoryId);
+                    assertThat(toolResult.revision()).isPresent();
+                    String requiredRevision = toolResult.revision().orElseThrow();
+                    sourceRepositoryIds.add(requiredRepositoryId);
+                    repositories.add(new RepositoryRevision(requiredRepositoryId, requiredRevision));
                 }
             }
             List<String> citations = citationIds(assistant);
             assertThat(citations).isNotEmpty();
             Set<String> citedRepositoryIds = new HashSet<>();
             for (String citation : citations) {
-                JsonNode citedResult = resultsById.get(citation);
+                ToolResult citedResult = resultsById.get(citation);
                 assertThat(citedResult).isNotNull();
-                assertThat(citedResult.path("citeable").asBoolean(false)).isTrue();
-                String repositoryId = requiredText(citedResult, "repositoryId");
-                citedRepositoryIds.add(repositoryId);
-                assertThat(freshRevision(repositoryId)).isEqualTo(requiredText(citedResult, "revision"));
+                assertThat(citedResult.citeable()).isTrue();
+                assertThat(citedResult.repositoryId()).isPresent();
+                citedRepositoryIds.add(citedResult.repositoryId().orElseThrow());
             }
-            return new ScenarioState(sessionId, jobId, assistantText, toolOrder, repositories, citations, sourceRepositoryIds,
-                    citedRepositoryIds);
+            return new ScenarioState(sessionId, jobId, assistantText, toolOrder, toolResults, repositories, citations, feedbackMessages,
+                    resultsById, previousCatalog(sessionId, jobId, messages), sourceRepositoryIds, citedRepositoryIds);
         }
 
-        private Set<String> catalogRepositoryIds(JsonNode catalogTool) throws Exception {
-            String catalogResultId = requiredText(catalogTool, "resultId");
-            JsonNode result = request("GET", runtimeBaseUrl + "/internal/results/" + catalogResultId, Optional.empty());
-            JsonNode catalog = parseStructuredJson(requiredText(result, "resultJson"));
-            Set<String> repositoryIds = new HashSet<>();
-            for (JsonNode repository : catalog.path("data").path("repositories")) {
-                repositoryIds.add(requiredText(repository, "repositoryId"));
+        private ToolResult readToolResult(String sessionId, JsonNode toolMessage) throws Exception {
+            String resultId = requiredText(toolMessage, "resultId");
+            JsonNode result = request("GET", runtimeBaseUrl + "/internal/results/" + resultId, Optional.empty());
+            assertThat(requiredText(result, "sessionId")).isEqualTo(sessionId);
+            Optional<String> repositoryId = optionalText(toolMessage, "repositoryId");
+            Optional<String> revision = optionalText(toolMessage, "revision");
+            if (revision.isPresent()) {
+                assertThat(requiredText(result, "revision")).isEqualTo(revision.orElseThrow());
             }
-            assertThat(repositoryIds).isNotEmpty();
-            return repositoryIds;
+            return new ToolResult(resultId, requiredText(toolMessage, "toolName"), repositoryId, revision,
+                    result.path("citeable").asBoolean(false), requiredText(result, "canonicalArguments"), requiredText(result, "resultJson"));
         }
 
-        private String freshRevision(String repositoryId) throws Exception {
-            JsonNode repository = request("GET", semanticBaseUrl + "/v1/repositories/" + repositoryId, Optional.empty());
-            return requiredText(repository, "currentRevision");
+        private Optional<ToolResult> previousCatalog(String sessionId, String jobId, JsonNode messages) throws Exception {
+            List<JsonNode> catalogMessages = new ArrayList<>();
+            for (JsonNode message : messages) {
+                if (!jobId.equals(requiredText(message, "messageJobId"))
+                        && "TOOL".equals(requiredText(message, "role"))
+                        && "list_repositories".equals(requiredText(message, "toolName"))) {
+                    catalogMessages.add(message);
+                }
+            }
+            if (catalogMessages.isEmpty()) {
+                return Optional.empty();
+            }
+            return Optional.of(readToolResult(sessionId, catalogMessages.getLast()));
         }
 
         private JsonNode request(String method, String url, Optional<JsonNode> payload) throws Exception {
             HttpRequest.Builder builder = HttpRequest.newBuilder(URI.create(url)).timeout(HTTP_TIMEOUT)
                     .header("Accept", "application/json");
-            String token = System.getenv("SEMANTIC_API_TOKEN");
-            if (url.startsWith(semanticBaseUrl) && StringUtils.hasText(token)) {
-                builder.header("X-Api-Token", token);
-            }
             if (payload.isPresent()) {
                 JsonNode body = payload.orElseThrow();
                 builder.header("Content-Type", "application/json")
@@ -271,6 +363,14 @@ class SessionAgentLiveIT {
         return value.asText();
     }
 
+    private Optional<String> optionalText(JsonNode node, String field) {
+        JsonNode value = node.path(field);
+        if (value.isTextual() && StringUtils.hasText(value.asText())) {
+            return Optional.of(value.asText());
+        }
+        return Optional.empty();
+    }
+
     private String removeTrailingSlash(String value) {
         return value.endsWith("/") ? value.substring(0, value.length() - 1) : value;
     }
@@ -280,14 +380,33 @@ class SessionAgentLiveIT {
             String jobId,
             String assistantText,
             List<String> toolOrder,
+            List<ToolResult> toolResults,
             List<RepositoryRevision> repositories,
             List<String> citations,
+            List<JsonNode> feedbackMessages,
+            Map<String, ToolResult> resultsById,
+            Optional<ToolResult> previousCatalog,
             Set<String> sourceRepositoryIds,
             Set<String> citedRepositoryIds) {
+
+        private ToolResult resultById(String resultId) {
+            return Optional.ofNullable(resultsById.get(resultId))
+                    .orElseThrow(() -> new AssertionError("citation did not reference a successful result from this message job"));
+        }
 
         private ScenarioReport toReport(String outcome) {
             return new ScenarioReport(sessionId, jobId, toolOrder, repositories, citations, outcome);
         }
+    }
+
+    private record ToolResult(
+            String resultId,
+            String toolName,
+            Optional<String> repositoryId,
+            Optional<String> revision,
+            boolean citeable,
+            String canonicalArguments,
+            String resultJson) {
     }
 
     private record RepositoryRevision(String repositoryId, String revision) {

@@ -132,11 +132,18 @@ class MessageControllerTest {
         String sessionId = "a1d4cefe-d5b5-4f40-b9f6-beb41a6831af";
         when(queries.findJob(jobId)).thenReturn(Optional.of(new MessageJobView(jobId, sessionId,
                 com.java.system.sessionagent.conversation.domain.JobStatus.DONE, 1, 2, OptionalLong.of(4))));
-        when(queries.messages(sessionId)).thenReturn(Optional.of(List.of(new com.java.system.sessionagent.conversation.domain.ToolMessage(
-                new SessionId(sessionId), new com.java.system.sessionagent.conversation.domain.SessionSequence(2), Optional.of(new MessageJobId(jobId)),
-                java.time.Instant.parse("2026-08-16T00:00:00Z"), com.java.system.sessionagent.conversation.domain.MessageRole.TOOL,
-                new com.java.system.sessionagent.conversation.domain.ResultId("4455b5ba-7b93-44cf-bd76-0d756e325eb5"), "call", "dGVzdA==", "source", "v1",
-                "{\"secret\":\"raw-argument\"}", Optional.of("repo-a"), Optional.of("rev-a"), "{\"secret\":\"raw-result\"}", true))));
+        when(queries.messages(sessionId)).thenReturn(Optional.of(List.of(
+                new com.java.system.sessionagent.conversation.domain.ToolMessage(
+                        new SessionId(sessionId), new com.java.system.sessionagent.conversation.domain.SessionSequence(2), Optional.of(new MessageJobId(jobId)),
+                        java.time.Instant.parse("2026-08-16T00:00:00Z"), com.java.system.sessionagent.conversation.domain.MessageRole.TOOL,
+                        new com.java.system.sessionagent.conversation.domain.ResultId("4455b5ba-7b93-44cf-bd76-0d756e325eb5"), "call", "dGVzdA==", "source", "v1",
+                        "{\"secret\":\"raw-argument\"}", Optional.of("repo-a"), Optional.of("rev-a"), "{\"secret\":\"raw-result\"}", true),
+                new com.java.system.sessionagent.conversation.domain.FeedbackMessage(
+                        new SessionId(sessionId), new com.java.system.sessionagent.conversation.domain.SessionSequence(3), Optional.of(new MessageJobId(jobId)),
+                        java.time.Instant.parse("2026-08-16T00:00:01Z"), com.java.system.sessionagent.conversation.domain.MessageRole.FEEDBACK,
+                        "REVISION_OUTDATED", "{\"repositoryId\":\"payment-service\",\"requestedRevision\":\"R1\",\"currentRevision\":\"R2\"}", false,
+                        Optional.of("call"), Optional.of("codebase_search"), Optional.of("{\"repositoryId\":\"payment-service\",\"revision\":\"R1\"}"),
+                        Optional.of("sensitive-model-context")))));
         MockMvc mvc = mvc(intake, queries);
 
         mvc.perform(get("/internal/message-jobs/{messageJobId}", jobId))
@@ -144,7 +151,15 @@ class MessageControllerTest {
         mvc.perform(get("/internal/sessions/{sessionId}/messages", sessionId))
                 .andExpect(status().isOk()).andExpect(jsonPath("$[0].resultId").value("4455b5ba-7b93-44cf-bd76-0d756e325eb5"))
                 .andExpect(jsonPath("$[0].resultJson").doesNotExist())
-                .andExpect(jsonPath("$[0].arguments").doesNotExist());
+                .andExpect(jsonPath("$[0].arguments").doesNotExist())
+                .andExpect(jsonPath("$[0].modelContext").doesNotExist())
+                .andExpect(jsonPath("$[1].toolName").value("codebase_search"))
+                .andExpect(jsonPath("$[1].feedbackCode").value("REVISION_OUTDATED"))
+                .andExpect(jsonPath("$[1].terminal").value(false))
+                .andExpect(jsonPath("$[1].rejectedArguments").value("{\"repositoryId\":\"payment-service\",\"revision\":\"R1\"}"))
+                .andExpect(jsonPath("$[1].message").value("{\"repositoryId\":\"payment-service\",\"requestedRevision\":\"R1\",\"currentRevision\":\"R2\"}"))
+                .andExpect(jsonPath("$[1].modelContext").doesNotExist())
+                .andExpect(jsonPath("$[1].resultJson").doesNotExist());
     }
 
     @Test
