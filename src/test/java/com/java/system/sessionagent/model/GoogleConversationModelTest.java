@@ -24,13 +24,18 @@ import com.java.system.sessionagent.tool.domain.ToolDefinition;
 import com.java.system.sessionagent.tool.domain.ToolKind;
 import com.java.system.sessionagent.tool.domain.ToolName;
 import com.java.system.sessionagent.tool.domain.ToolResult;
+import com.java.system.sessionagent.tool.json.StrictJsonCodec;
 import ch.qos.logback.classic.Logger;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.metadata.ChatResponseMetadata;
 import org.springframework.ai.chat.metadata.DefaultUsage;
+import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.chat.model.ChatResponse;
@@ -60,6 +65,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 class GoogleConversationModelTest {
 
@@ -114,6 +120,50 @@ class GoogleConversationModelTest {
     }
 
     @Test
+    void treats_nonblank_no_tool_planning_text_as_answer_ready() {
+        RecordingChatModel chatModel = new RecordingChatModel(response(new AssistantMessage("I can answer this.")));
+        GoogleConversationModel model = new GoogleConversationModel(chatModel, new PromptResource());
+
+        ModelDecision decision = model.plan(request(snapshot("catalog")), usage -> { });
+
+        assertThat(decision).isEqualTo(new ModelDecision.AnswerReady());
+        assertThat(chatModel.callCount).isEqualTo(1);
+    }
+
+    @Test
+    void creates_one_provider_native_structured_reply_call_without_tools() {
+        RecordingGoogleChatModel chatModel = new RecordingGoogleChatModel(response(
+                new AssistantMessage("{\"citations\":[{\"value\":\"result-1\"}],\"message\":\"Answer\"}"), null));
+        GoogleConversationModel model = new GoogleConversationModel(
+                chatModel, new PromptResource(), new NoOpConversationTelemetry(), "gemini-3.1-flash-lite");
+
+        AssistantReply reply = model.reply(replyRequest(), usage -> { });
+
+        assertThat(reply).isEqualTo(new AssistantReply("Answer", List.of(new ResultId("result-1"))));
+        assertThat(chatModel.callCount).isEqualTo(1);
+        GoogleGenAiChatOptions options = (GoogleGenAiChatOptions) chatModel.prompt.getOptions();
+        assertThat(options.getIncludeThoughts()).isFalse();
+        assertThat(options.getToolCallbacks()).isEmpty();
+        assertThat(options.getResponseMimeType()).isEqualTo("application/json");
+        assertThat(options.getResponseSchema()).contains("\"message\"", "\"citations\"");
+    }
+
+    @Test
+    void delegates_final_reply_conversion_to_spring_ai_instead_of_the_runtime_codec() {
+        StrictJsonCodec jsonCodec = mock(StrictJsonCodec.class);
+        when(jsonCodec.canonicalize(any())).thenReturn("[]");
+        RecordingChatModel chatModel = new RecordingChatModel(response(
+                new AssistantMessage("{\"citations\":[{\"value\":\"result-1\"}],\"message\":\"Answer\"}"), null));
+        GoogleConversationModel model = new GoogleConversationModel(ChatClient.create(chatModel), new PromptResource(),
+                new SpringAiToolCallbackFactory(), new ConversationHistoryProjector(), jsonCodec);
+
+        AssistantReply reply = model.reply(replyRequest(), usage -> { });
+
+        assertThat(reply).isEqualTo(new AssistantReply("Answer", List.of(new ResultId("result-1"))));
+        verify(jsonCodec, never()).decode(any(), org.mockito.ArgumentMatchers.eq(AssistantReply.class));
+    }
+
+    @Test
     void appends_exact_citeable_result_ids_to_the_final_reply_request() {
         RecordingChatModel chatModel = new RecordingChatModel(response(
                 new AssistantMessage("{\"citations\":[{\"value\":\"source-result\"}],\"message\":\"Answer\"}"), null));
@@ -145,7 +195,7 @@ class GoogleConversationModelTest {
     }
 
     @Test
-    void asks_google_to_enforce_the_final_reply_json_schema() {
+    void asks_spring_ai_to_enforce_the_final_reply_json_schema() {
         RecordingGoogleChatModel chatModel = new RecordingGoogleChatModel(response(
                 new AssistantMessage("{\"citations\":[{\"value\":\"result-1\"}],\"message\":\"Answer\"}"), null));
         GoogleConversationModel model = new GoogleConversationModel(
@@ -154,33 +204,15 @@ class GoogleConversationModelTest {
         model.reply(replyRequest(), usage -> { });
 
         GoogleGenAiChatOptions options = (GoogleGenAiChatOptions) chatModel.prompt.getOptions();
+        assertThat(options.getIncludeThoughts()).isFalse();
         assertThat(options.getResponseMimeType()).isEqualTo("application/json");
         assertThat(options.getResponseSchema())
                 .contains("\"message\"")
                 .contains("\"citations\"")
                 .contains("\"value\"")
-                .contains("\"required\":[\"citations\",\"message\"]")
-                .contains("\"minItems\":1")
-                .contains("\"required\":[\"value\"]");
+                .contains("\"required\" : [ \"citations\", \"message\" ]")
+                .contains("\"required\" : [ \"value\" ]");
         assertThat(options.getToolCallbacks()).isEmpty();
-    }
-
-    @Test
-    void ignores_google_thought_summary_and_decodes_the_single_actionable_final_reply() {
-        AssistantMessage thought = AssistantMessage.builder()
-                .properties(Map.of("isThought", true))
-                .content("internal summary")
-                .build();
-        AssistantMessage reply = AssistantMessage.builder()
-                .properties(Map.of("isThought", false))
-                .content("{\"citations\":[{\"value\":\"result-1\"}],\"message\":\"Answer\"}")
-                .build();
-        RecordingChatModel chatModel = new RecordingChatModel(response(thought, reply));
-        GoogleConversationModel model = new GoogleConversationModel(chatModel, new PromptResource());
-
-        AssistantReply decision = model.reply(replyRequest(), usage -> { });
-
-        assertThat(decision).isEqualTo(new AssistantReply("Answer", List.of(new ResultId("result-1"))));
     }
 
     @Test
@@ -218,16 +250,32 @@ class GoogleConversationModelTest {
     }
 
     @Test
-    void recordsExactlyOneTerminalModelOutcomeWhenFinalReplyDecodingFails() {
+    void does_not_repeat_the_provider_call_when_final_json_is_invalid() {
         ConversationTelemetry telemetry = mock(ConversationTelemetry.class);
-        GoogleConversationModel model = new GoogleConversationModel(
-                new RecordingChatModel(response(new AssistantMessage("not-json"))), new PromptResource(), telemetry);
+        RecordingChatModel chatModel = new RecordingChatModel(response(new AssistantMessage("not-json")));
+        GoogleConversationModel model = new GoogleConversationModel(chatModel, new PromptResource(), telemetry);
 
         assertThatThrownBy(() -> model.reply(replyRequest(), usage -> { }))
                 .isInstanceOf(ModelCallFailure.class);
 
         verify(telemetry).model("FAILURE", Optional.of("CORRECTABLE"), new ModelUsage(0, 0, 0, false));
         verify(telemetry, never()).model(org.mockito.ArgumentMatchers.eq("SUCCESS"), any(), any());
+        assertThat(chatModel.callCount).isEqualTo(1);
+    }
+
+    @ParameterizedTest
+    @MethodSource("replyProviderFailures")
+    void classifies_reply_provider_failures_without_relabeling_them_as_decode_failures(
+            RuntimeException providerFailure, ModelCallFailure.Kind expectedKind) {
+        FailingChatModel chatModel = new FailingChatModel(providerFailure);
+        GoogleConversationModel model = new GoogleConversationModel(chatModel, new PromptResource());
+
+        assertThatThrownBy(() -> model.reply(replyRequest(), usage -> { }))
+                .isInstanceOf(ModelCallFailure.class)
+                .extracting(exception -> ((ModelCallFailure) exception).kind())
+                .isEqualTo(expectedKind);
+
+        assertThat(chatModel.callCount).isEqualTo(1);
     }
 
     @Test
@@ -284,6 +332,12 @@ class GoogleConversationModelTest {
                 .isInstanceOf(ModelCallFailure.class)
                 .extracting(exception -> ((ModelCallFailure) exception).kind())
                 .isEqualTo(expectedKind);
+    }
+
+    private static Stream<Arguments> replyProviderFailures() {
+        return Stream.of(
+                Arguments.of(new TransientAiException("provider unavailable"), ModelCallFailure.Kind.TRANSIENT),
+                Arguments.of(new RuntimeException("provider rejected request"), ModelCallFailure.Kind.TERMINAL));
     }
 
     private static ListAppender<ILoggingEvent> attachAppender(Class<?> type) {
@@ -358,6 +412,7 @@ class GoogleConversationModelTest {
 
         private final ChatResponse response;
         private Prompt prompt;
+        private int callCount;
 
         private RecordingChatModel(ChatResponse response) {
             this.response = response;
@@ -366,6 +421,7 @@ class GoogleConversationModelTest {
         @Override
         public ChatResponse call(Prompt prompt) {
             this.prompt = prompt;
+            this.callCount++;
             return response;
         }
 
@@ -379,6 +435,7 @@ class GoogleConversationModelTest {
 
         private final ChatResponse response;
         private Prompt prompt;
+        private int callCount;
 
         private RecordingGoogleChatModel(ChatResponse response) {
             this.response = response;
@@ -387,6 +444,7 @@ class GoogleConversationModelTest {
         @Override
         public ChatResponse call(Prompt prompt) {
             this.prompt = prompt;
+            this.callCount++;
             return response;
         }
 
@@ -401,6 +459,7 @@ class GoogleConversationModelTest {
     private static final class FailingChatModel implements ChatModel {
 
         private final RuntimeException failure;
+        private int callCount;
 
         private FailingChatModel(RuntimeException failure) {
             this.failure = failure;
@@ -408,6 +467,7 @@ class GoogleConversationModelTest {
 
         @Override
         public ChatResponse call(Prompt prompt) {
+            this.callCount++;
             throw failure;
         }
 

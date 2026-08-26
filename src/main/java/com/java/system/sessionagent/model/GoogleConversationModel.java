@@ -10,11 +10,11 @@ import com.java.system.sessionagent.conversation.port.out.ModelCallFailure;
 import com.java.system.sessionagent.conversation.port.out.ConversationTelemetry;
 import com.java.system.sessionagent.conversation.port.out.NoOpConversationTelemetry;
 import com.java.system.sessionagent.tool.domain.ToolName;
-import com.java.system.sessionagent.tool.json.JsonContractException;
 import com.java.system.sessionagent.tool.json.StrictJsonCodec;
-import com.java.system.sessionagent.tool.json.ToolSchemaFactory;
 import org.springframework.ai.chat.client.AdvisorParams;
 import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.ai.chat.client.ResponseEntity;
+import org.springframework.ai.chat.client.advisor.StructuredOutputValidationAdvisor;
 import org.springframework.ai.chat.metadata.ChatResponseMetadata;
 import org.springframework.ai.chat.metadata.ChatGenerationMetadata;
 import org.springframework.ai.chat.metadata.EmptyUsage;
@@ -40,6 +40,7 @@ import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
 import java.util.Locale;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.function.Consumer;
@@ -49,7 +50,6 @@ public final class GoogleConversationModel implements com.java.system.sessionage
     private static final Logger LOGGER = LoggerFactory.getLogger(GoogleConversationModel.class);
     private static final String IS_THOUGHT = "isThought";
     private static final String THOUGHT_SIGNATURES = "thoughtSignatures";
-    private static final String ASSISTANT_REPLY_SCHEMA = new ToolSchemaFactory().schemaFor(AssistantReply.class);
     private final ChatClient chatClient;
     private final PromptResource promptResource;
     private final SpringAiToolCallbackFactory callbackFactory;
@@ -131,7 +131,7 @@ public final class GoogleConversationModel implements com.java.system.sessionage
         List<Message> messages = planMessagesFor(request);
         LOGGER.info("google_model_request phase=PLAN messageCount={} callbackCount={}", messages.size(), callbacks.size());
         try {
-            ChatResponse response = call(messages, callbacks, false);
+            ChatResponse response = call(messages, callbacks);
             logResponseShape(response);
             ModelUsage modelUsage = usage(response);
             ModelDecision modelDecision = planDecision(response);
@@ -153,21 +153,28 @@ public final class GoogleConversationModel implements com.java.system.sessionage
         Assert.notNull(usageObserver, "Model usage observer must not be null");
         List<Message> messages = replyMessagesFor(request);
         LOGGER.info("google_model_request phase=FINAL_REPLY messageCount={} callbackCount={}", messages.size(), 0);
+        SpringAiCallCapture callCapture = new SpringAiCallCapture();
+        ResponseEntity<ChatResponse, AssistantReply> responseEntity;
+        AssistantReply reply;
         try {
-            ChatResponse response = call(messages, List.of(), true);
-            logResponseShape(response);
-            ModelUsage modelUsage = usage(response);
-            AssistantReply reply = replyDecision(response);
-            LOGGER.info("google_model_response phase=FINAL_REPLY resultCategory={} resultCount={} usageAvailable={}", resultCategory(response),
-                    resultCount(response), modelUsage.available());
-            usageObserver.accept(modelUsage);
-            telemetry.model("SUCCESS", Optional.of(finishReason(response)), modelUsage);
-            return reply;
-        } catch (ModelCallFailure failure) {
+            responseEntity = replyCall(messages, callCapture);
+            reply = Objects.requireNonNull(responseEntity.entity(), "Spring AI final reply entity must not be null");
+        } catch (RuntimeException exception) {
+            ModelCallFailure failure = callCapture.providerFailure()
+                    .map(GoogleConversationModel::classifyProviderFailure)
+                    .orElseGet(ModelCallFailure::correctable);
             LOGGER.info("google_model_failed phase=FINAL_REPLY closedFailureKind={}", failure.kind());
             telemetry.model("FAILURE", Optional.of(failure.kind().name()), new ModelUsage(0, 0, 0, false));
             throw failure;
         }
+        ChatResponse response = Objects.requireNonNull(responseEntity.response(), "Spring AI final reply response must not be null");
+        logResponseShape(response);
+        ModelUsage modelUsage = usage(response);
+        LOGGER.info("google_model_response phase=FINAL_REPLY resultCategory={} resultCount={} usageAvailable={}", resultCategory(response),
+                resultCount(response), modelUsage.available());
+        usageObserver.accept(modelUsage);
+        telemetry.model("SUCCESS", Optional.of(finishReason(response)), modelUsage);
+        return reply;
     }
 
     private List<Message> planMessagesFor(ModelRequest request) {
@@ -197,17 +204,15 @@ public final class GoogleConversationModel implements com.java.system.sessionage
         return List.copyOf(messages);
     }
 
-    private ChatResponse call(List<Message> messages, List<ToolCallback> callbacks, boolean replyOnly) {
+    private ChatResponse call(List<Message> messages, List<ToolCallback> callbacks) {
         try {
             ChatClient.ChatClientRequestSpec request = chatClient.prompt()
                     .advisors(AdvisorParams.toolCallingAdvisorAutoRegister(false))
                     .messages(messages);
             if (googleOptions.isPresent()) {
-                GoogleGenAiChatOptions.Builder options = googleOptions.get().mutate().toolCallbacks(callbacks);
-                if (replyOnly) {
-                    options.responseMimeType("application/json")
-                            .responseSchema(ASSISTANT_REPLY_SCHEMA);
-                }
+                GoogleGenAiChatOptions.Builder options = googleOptions.get().mutate()
+                        .includeThoughts(true)
+                        .toolCallbacks(callbacks);
                 return request.options(options)
                         .call().chatResponse();
             }
@@ -215,6 +220,25 @@ public final class GoogleConversationModel implements com.java.system.sessionage
         } catch (RuntimeException exception) {
             throw classifyProviderFailure(exception);
         }
+    }
+
+    private ResponseEntity<ChatResponse, AssistantReply> replyCall(List<Message> messages, SpringAiCallCapture callCapture) {
+        StructuredOutputValidationAdvisor replyValidator = StructuredOutputValidationAdvisor.builder()
+                .outputType(AssistantReply.class)
+                .maxRepeatAttempts(0)
+                .build();
+        ChatClient.ChatClientRequestSpec request = chatClient.prompt()
+                .advisors(AdvisorParams.toolCallingAdvisorAutoRegister(false))
+                .advisors(replyValidator, callCapture)
+                .messages(messages)
+                .toolCallbacks(List.of());
+        if (googleOptions.isPresent()) {
+            GoogleGenAiChatOptions.Builder options = googleOptions.get().mutate()
+                    .includeThoughts(false)
+                    .toolCallbacks(List.of());
+            request = request.options(options);
+        }
+        return request.call().responseEntity(AssistantReply.class, spec -> spec.useProviderStructuredOutput());
     }
 
     private static GoogleGenAiChatOptions configureGoogleOptions(ChatModel chatModel, String modelName) {
@@ -279,25 +303,6 @@ public final class GoogleConversationModel implements com.java.system.sessionage
             throw ModelCallFailure.correctable();
         }
         return Base64.getEncoder().encodeToString(signature);
-    }
-
-    private AssistantReply replyDecision(ChatResponse response) {
-        List<Generation> results = response.getResults().stream()
-                .filter(result -> !isThought(result))
-                .toList();
-        if (CollectionUtils.isEmpty(results) || results.size() != 1) {
-            throw ModelCallFailure.correctable();
-        }
-        AssistantMessage message = Optional.ofNullable(results.getFirst().getOutput())
-                .orElseThrow(ModelCallFailure::correctable);
-        if (message.hasToolCalls() || !StringUtils.hasText(message.getText())) {
-            throw ModelCallFailure.correctable();
-        }
-        try {
-            return jsonCodec.decode(message.getText(), AssistantReply.class);
-        } catch (JsonContractException | IllegalArgumentException exception) {
-            throw ModelCallFailure.correctable();
-        }
     }
 
     private static ModelUsage usage(ChatResponse response) {
