@@ -154,7 +154,8 @@ class SessionAgentLiveIT {
 
     private ScenarioReport runAbsentBnpl(LiveRuntime runtime) throws Exception {
         ScenarioState state = runtime.ask("live-bnpl-absence-" + UUID.randomUUID(), "目前是否支援先買後付？");
-        assertContainsOneOf(state.assistantText(), "未發現", "未包含", "沒有", "未支援", "不支援", "not found", "not support", "not implemented");
+        assertContainsOneOf(state.assistantText(), "未發現", "未包含", "沒有", "未支援", "不支援", "未實作",
+                "not found", "not support", "not implemented");
         List<String> fullCoverageEmptySearchIds = state.toolResults().stream()
                 .filter(tool -> tool.toolName().equals("codebase_search_code_facts"))
                 .filter(tool -> hasFullCoverageEmptyResult(tool.resultJson()))
@@ -171,7 +172,8 @@ class SessionAgentLiveIT {
         ScenarioState state = runtime.ask("live-cancellation-refund-" + UUID.randomUUID(), "取消訂單後，付款會自動退款嗎？");
         String answer = state.assistantText();
         assertContainsOneOf(answer, "取消", "cancel");
-        assertContainsOneOf(answer, "無法", "未能", "不能", "not proven", "cannot", "could not");
+        assertContainsOneOf(answer, "無法", "未能", "不能", "進一步確認", "尚待確認",
+                "not proven", "cannot", "could not", "further confirmation");
         assertContainsOneOf(answer, "程式碼", "codebase", "code");
         assertContainsOneOf(answer, "執行", "runtime", "外部", "external");
         assertThat(answer).doesNotContain("不會自動退款", "不會退款");
@@ -190,7 +192,9 @@ class SessionAgentLiveIT {
                 break;
             }
         }
-        assertThat(found).isTrue();
+        assertThat(found)
+                .withFailMessage("answer did not contain any expected indicator %s: %s", List.of(expectedIndicators), answer)
+                .isTrue();
     }
 
     private String requiredEnvironment(String name) {

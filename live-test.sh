@@ -32,6 +32,19 @@ if [[ ! "${published_port}" =~ ^127\.0\.0\.1:[0-9]+$ ]]; then
     exit 1
 fi
 
+runtime_ready=false
+for _ in {1..180}; do
+    if curl --fail --silent --max-time 2 "http://${published_port}/actuator/health" >/dev/null; then
+        runtime_ready=true
+        break
+    fi
+    sleep 1
+done
+if [[ "${runtime_ready}" != true ]]; then
+    printf 'runtime did not become healthy before live acceptance\n' >&2
+    exit 1
+fi
+
 export SESSION_AGENT_BASE_URL="http://${published_port}"
 SESSION_AGENT_LIVE=true mvn -f "${runtime_root}/pom.xml" -q -Dtest=SessionAgentLiveIT test
 

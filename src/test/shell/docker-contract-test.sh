@@ -14,7 +14,7 @@ for required_file in "${compose_file}" "${dockerfile}" "${env_example}" "${live_
     fi
 done
 
-for required_command in docker jq; do
+for required_command in curl docker jq; do
     if ! command -v "${required_command}" >/dev/null 2>&1; then
         printf 'missing required command: %s\n' "${required_command}" >&2
         exit 1
@@ -77,6 +77,13 @@ grep -Fq 'SEMANTIC_API_TOKEN must be set for live acceptance' "${live_test}" || 
     printf 'live test must require the Semantic token before Compose work\n' >&2
     exit 1
 }
+
+runtime_health_line="$(grep -nF 'actuator/health' "${live_test}" | head -n 1 | cut -d: -f1 || true)"
+live_maven_line="$(grep -nF 'SESSION_AGENT_LIVE=true mvn' "${live_test}" | head -n 1 | cut -d: -f1 || true)"
+if [[ -z "${runtime_health_line}" || -z "${live_maven_line}" || "${runtime_health_line}" -ge "${live_maven_line}" ]]; then
+    printf 'live test must await runtime health before Maven acceptance\n' >&2
+    exit 1
+fi
 
 for required_input in SEMANTIC_BASE_URL SEMANTIC_API_TOKEN GOOGLE_API_KEY GOOGLE_GENAI_MODEL; do
     grep -Fq "${required_input}" "${compose_file}" || {
