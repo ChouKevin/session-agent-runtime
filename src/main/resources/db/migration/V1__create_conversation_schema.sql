@@ -79,8 +79,8 @@ create table model_call_record (
     phase varchar(16) not null check (phase in ('PLAN','FINAL_REPLY')),
     outcome varchar(32) not null check (outcome in (
         'TOOL_CALL','ANSWER_READY','FINAL_REPLY','INVALID_RESPONSE','PROVIDER_FAILURE')),
-    model_name varchar(256) not null check (length(model_name) > 0),
-    raw_prompt text not null check (length(raw_prompt) > 0),
+    model_name varchar(256) not null check (model_name ~ '[^[:space:]]'),
+    raw_prompt text not null check (raw_prompt ~ '[^[:space:]]'),
     raw_completion text,
     raw_tool_calls text check (raw_tool_calls is null or raw_tool_calls is json),
     finish_reason varchar(128),

@@ -158,7 +158,20 @@ class PostgresModelCallRecorderPostgresIT {
         ModelCallRecord validRecord = completeRecord(receipt);
 
         assertThatThrownBy(() -> insertRaw(
-                validRecord, phase, outcome, rawCompletion, rawToolCalls, decodeError, Optional.empty()))
+                validRecord, validRecord.modelName(), validRecord.rawPrompt(), phase, outcome,
+                rawCompletion, rawToolCalls, decodeError, Optional.empty()))
+                .isInstanceOf(DataIntegrityViolationException.class);
+    }
+
+    @ParameterizedTest
+    @MethodSource("blankDiagnosticText")
+    void rejectsWhitespaceOnlyDiagnosticModelNameAndPrompt(String modelName, String rawPrompt) {
+        MessageReceipt receipt = receive();
+        ModelCallRecord validRecord = completeRecord(receipt);
+
+        assertThatThrownBy(() -> insertRaw(
+                validRecord, modelName, rawPrompt, ModelCallPhase.PLAN, ModelCallOutcome.ANSWER_READY,
+                Optional.of("Ready to answer."), Optional.empty(), Optional.empty(), Optional.empty()))
                 .isInstanceOf(DataIntegrityViolationException.class);
     }
 
@@ -182,6 +195,12 @@ class PostgresModelCallRecorderPostgresIT {
                         Optional.of("   "), Optional.empty(), Optional.empty()));
     }
 
+    private static Stream<Arguments> blankDiagnosticText() {
+        return Stream.of(
+                Arguments.of("   ", "Prompt snapshot"),
+                Arguments.of("gemini-3.1-flash-lite", "   "));
+    }
+
     private MessageReceipt receive() {
         ConversationStore conversationStore = new PostgresConversationStore(dataSource(), Clock.systemUTC());
         return conversationStore.receive(new IncomingMessage("thread-1", "Alice", "source-1", "Question"));
@@ -200,6 +219,8 @@ class PostgresModelCallRecorderPostgresIT {
 
     private void insertRaw(
             ModelCallRecord record,
+            String modelName,
+            String rawPrompt,
             ModelCallPhase phase,
             ModelCallOutcome outcome,
             Optional<String> rawCompletion,
@@ -221,8 +242,8 @@ class PostgresModelCallRecorderPostgresIT {
             statement.setInt(5, record.providerAttempt());
             statement.setString(6, phase.name());
             statement.setString(7, outcome.name());
-            statement.setString(8, record.modelName());
-            statement.setString(9, record.rawPrompt());
+            statement.setString(8, modelName);
+            statement.setString(9, rawPrompt);
             setOptionalString(statement, 10, rawCompletion);
             setOptionalString(statement, 11, rawToolCalls);
             setOptionalString(statement, 12, record.finishReason());
