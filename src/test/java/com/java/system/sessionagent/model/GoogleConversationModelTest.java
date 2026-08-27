@@ -459,6 +459,19 @@ class GoogleConversationModelTest {
     }
 
     @Test
+    void diagnostic_provider_error_rendering_does_not_replace_a_classified_provider_failure() {
+        FailingChatModel chatModel = new FailingChatModel(new ToStringFailingProviderException());
+        GoogleConversationModel model = diagnosticModel(chatModel, new RecordingModelCallRecorder());
+
+        assertThatThrownBy(() -> model.plan(modelRequest(snapshot("catalog"), 3), usage -> { }))
+                .isInstanceOf(ModelCallFailure.class)
+                .extracting(exception -> ((ModelCallFailure) exception).kind())
+                .isEqualTo(ModelCallFailure.Kind.TERMINAL);
+
+        assertThat(chatModel.callCount).isEqualTo(1);
+    }
+
+    @Test
     void returns_a_valid_single_unissued_tool_request_for_registry_authorization() {
         RecordingChatModel chatModel = new RecordingChatModel(response(toolResponse("unissued-call", "not-issued", "{\"value\":1}")));
         GoogleConversationModel model = new GoogleConversationModel(chatModel, new PromptResource());
@@ -688,6 +701,14 @@ class GoogleConversationModelTest {
         @Override
         public ToolCallingChatOptions getOptions() {
             return ToolCallingChatOptions.builder().build();
+        }
+    }
+
+    private static final class ToStringFailingProviderException extends RuntimeException {
+
+        @Override
+        public String toString() {
+            throw new IllegalStateException("diagnostic error rendering failed");
         }
     }
 

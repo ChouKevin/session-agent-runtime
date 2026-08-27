@@ -191,17 +191,18 @@ public final class GoogleConversationModel implements com.java.system.sessionage
                     resultCount(response), modelUsage.available());
             usageObserver.accept(modelUsage);
             telemetry.model("SUCCESS", Optional.of(finishReason(response)), modelUsage);
-            record(request.callContext(), ModelCallPhase.PLAN, planOutcome(modelDecision), callCapture, Optional.empty(), Optional.empty());
+            record(request.callContext(), ModelCallPhase.PLAN, planOutcome(modelDecision), callCapture,
+                    Optional.empty(), Optional.empty());
             return modelDecision;
         } catch (ModelCallFailure failure) {
             LOGGER.info("google_model_failed phase=PLAN closedFailureKind={}", failure.kind());
             telemetry.model("FAILURE", Optional.of(failure.kind().name()), new ModelUsage(0, 0, 0, false));
             if (callCapture.providerFailure().isPresent()) {
                 record(request.callContext(), ModelCallPhase.PLAN, ModelCallOutcome.PROVIDER_FAILURE, callCapture,
-                        Optional.empty(), callCapture.providerFailure().map(RuntimeException::toString));
+                        Optional.empty(), callCapture.providerFailure());
             } else {
                 record(request.callContext(), ModelCallPhase.PLAN, ModelCallOutcome.INVALID_RESPONSE, callCapture,
-                        Optional.of(failure.toString()), Optional.empty());
+                        Optional.of(failure), Optional.empty());
             }
             throw failure;
         }
@@ -229,10 +230,10 @@ public final class GoogleConversationModel implements com.java.system.sessionage
             telemetry.model("FAILURE", Optional.of(failure.kind().name()), new ModelUsage(0, 0, 0, false));
             if (callCapture.providerFailure().isPresent()) {
                 record(request.callContext(), ModelCallPhase.FINAL_REPLY, ModelCallOutcome.PROVIDER_FAILURE, callCapture,
-                        Optional.empty(), callCapture.providerFailure().map(RuntimeException::toString));
+                        Optional.empty(), callCapture.providerFailure());
             } else {
                 record(request.callContext(), ModelCallPhase.FINAL_REPLY, ModelCallOutcome.INVALID_RESPONSE, callCapture,
-                        Optional.of(exception.toString()), Optional.empty());
+                        Optional.of(exception), Optional.empty());
             }
             throw failure;
         }
@@ -347,8 +348,8 @@ public final class GoogleConversationModel implements com.java.system.sessionage
             ModelCallPhase phase,
             ModelCallOutcome outcome,
             SpringAiCallCapture callCapture,
-            Optional<String> decodeError,
-            Optional<String> providerError) {
+            Optional<RuntimeException> decodeFailure,
+            Optional<RuntimeException> providerFailure) {
         UUID diagnosticId = UUID.randomUUID();
         try {
             Optional<ChatResponse> capturedResponse = callCapture.chatResponse();
@@ -367,8 +368,8 @@ public final class GoogleConversationModel implements com.java.system.sessionage
                     rawCompletion(capturedResponse),
                     rawToolCalls(capturedResponse),
                     capturedResponse.map(GoogleConversationModel::finishReason),
-                    decodeError,
-                    providerError,
+                    decodeFailure.map(RuntimeException::toString),
+                    providerFailure.map(RuntimeException::toString),
                     capturedResponse.map(GoogleConversationModel::usage).orElseGet(() -> new ModelUsage(0, 0, 0, false)),
                     startedAt,
                     completedAt);
