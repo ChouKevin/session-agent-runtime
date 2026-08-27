@@ -254,6 +254,34 @@ class GoogleConversationModelTest {
     }
 
     @Test
+    void diagnostic_payload_failure_does_not_replace_a_valid_tool_decision() {
+        StrictJsonCodec jsonCodec = mock(StrictJsonCodec.class);
+        when(jsonCodec.canonicalize(any())).thenThrow(new IllegalStateException("diagnostic payload unavailable"));
+        RecordingChatModel chatModel = new RecordingChatModel(response(toolResponse("call-1", "catalog", "{}")));
+        GoogleConversationModel model = diagnosticModel(chatModel, new RecordingModelCallRecorder(), jsonCodec);
+
+        ModelDecision decision = model.plan(modelRequest(snapshot("catalog"), 3), usage -> { });
+
+        assertThat(decision).isEqualTo(new ModelDecision.UseTool("call-1", new ToolName("catalog"), "{}", MODEL_CONTEXT));
+        assertThat(chatModel.callCount).isEqualTo(1);
+    }
+
+    @Test
+    void diagnostic_payload_failure_does_not_replace_a_correctable_invalid_response() {
+        StrictJsonCodec jsonCodec = mock(StrictJsonCodec.class);
+        when(jsonCodec.canonicalize(any())).thenThrow(new IllegalStateException("diagnostic payload unavailable"));
+        RecordingChatModel chatModel = new RecordingChatModel(response(unsignedToolResponse("call-1", "catalog", "{}")));
+        GoogleConversationModel model = diagnosticModel(chatModel, new RecordingModelCallRecorder(), jsonCodec);
+
+        assertThatThrownBy(() -> model.plan(modelRequest(snapshot("catalog"), 3), usage -> { }))
+                .isInstanceOf(ModelCallFailure.class)
+                .extracting(exception -> ((ModelCallFailure) exception).kind())
+                .isEqualTo(ModelCallFailure.Kind.CORRECTABLE);
+
+        assertThat(chatModel.callCount).isEqualTo(1);
+    }
+
+    @Test
     void creates_one_provider_native_structured_reply_call_without_tools() {
         RecordingGoogleChatModel chatModel = new RecordingGoogleChatModel(response(
                 new AssistantMessage("{\"citations\":[{\"value\":\"result-1\"}],\"message\":\"Answer\"}"), null));
@@ -545,6 +573,15 @@ class GoogleConversationModelTest {
 
     private static GoogleConversationModel diagnosticModel(ChatModel chatModel, ModelCallRecorder recorder) {
         return new GoogleConversationModel(chatModel, new PromptResource(), new NoOpConversationTelemetry(), recorder,
+                Clock.fixed(Instant.parse("2026-08-16T00:00:00Z"), ZoneOffset.UTC), "diagnostic-model");
+    }
+
+    private static GoogleConversationModel diagnosticModel(
+            ChatModel chatModel,
+            ModelCallRecorder recorder,
+            StrictJsonCodec jsonCodec) {
+        return new GoogleConversationModel(ChatClient.create(chatModel), new PromptResource(), new SpringAiToolCallbackFactory(),
+                new ConversationHistoryProjector(), jsonCodec, new NoOpConversationTelemetry(), recorder,
                 Clock.fixed(Instant.parse("2026-08-16T00:00:00Z"), ZoneOffset.UTC), "diagnostic-model");
     }
 

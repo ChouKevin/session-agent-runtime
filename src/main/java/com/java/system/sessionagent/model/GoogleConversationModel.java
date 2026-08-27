@@ -128,6 +128,19 @@ public final class GoogleConversationModel implements com.java.system.sessionage
                 Clock.systemUTC(), "unspecified");
     }
 
+    GoogleConversationModel(
+            ChatClient chatClient,
+            PromptResource promptResource,
+            SpringAiToolCallbackFactory callbackFactory,
+            ConversationHistoryProjector historyProjector,
+            StrictJsonCodec jsonCodec,
+            ConversationTelemetry telemetry,
+            ModelCallRecorder recorder,
+            Clock clock,
+            String modelName) {
+        this(chatClient, promptResource, callbackFactory, historyProjector, jsonCodec, telemetry, Optional.empty(), recorder, clock, modelName);
+    }
+
     private GoogleConversationModel(
             ChatClient chatClient,
             PromptResource promptResource,
@@ -336,32 +349,33 @@ public final class GoogleConversationModel implements com.java.system.sessionage
             SpringAiCallCapture callCapture,
             Optional<String> decodeError,
             Optional<String> providerError) {
-        Optional<ChatResponse> capturedResponse = callCapture.chatResponse();
-        Instant startedAt = callCapture.startedAt().orElseGet(clock::instant);
-        Instant completedAt = callCapture.completedAt().orElse(startedAt);
-        ModelCallRecord record = new ModelCallRecord(
-                UUID.randomUUID(),
-                callContext.sessionId(),
-                callContext.messageJobId(),
-                callContext.ordinal(),
-                1,
-                phase,
-                outcome,
-                modelName,
-                callCapture.request().map(Object::toString).filter(StringUtils::hasText).orElse("unavailable"),
-                rawCompletion(capturedResponse),
-                rawToolCalls(capturedResponse),
-                capturedResponse.map(GoogleConversationModel::finishReason),
-                decodeError,
-                providerError,
-                capturedResponse.map(GoogleConversationModel::usage).orElseGet(() -> new ModelUsage(0, 0, 0, false)),
-                startedAt,
-                completedAt);
+        UUID diagnosticId = UUID.randomUUID();
         try {
+            Optional<ChatResponse> capturedResponse = callCapture.chatResponse();
+            Instant startedAt = callCapture.startedAt().orElseGet(clock::instant);
+            Instant completedAt = callCapture.completedAt().orElse(startedAt);
+            ModelCallRecord record = new ModelCallRecord(
+                    diagnosticId,
+                    callContext.sessionId(),
+                    callContext.messageJobId(),
+                    callContext.ordinal(),
+                    1,
+                    phase,
+                    outcome,
+                    modelName,
+                    callCapture.request().map(Object::toString).filter(StringUtils::hasText).orElse("unavailable"),
+                    rawCompletion(capturedResponse),
+                    rawToolCalls(capturedResponse),
+                    capturedResponse.map(GoogleConversationModel::finishReason),
+                    decodeError,
+                    providerError,
+                    capturedResponse.map(GoogleConversationModel::usage).orElseGet(() -> new ModelUsage(0, 0, 0, false)),
+                    startedAt,
+                    completedAt);
             recorder.record(record);
         } catch (RuntimeException exception) {
             LOGGER.warn("google_model_diagnostic_record_failed id={} sessionId={} messageJobId={} ordinal={}",
-                    record.id(), record.sessionId().value(), record.messageJobId().value(), record.runtimeCallOrdinal());
+                    diagnosticId, callContext.sessionId().value(), callContext.messageJobId().value(), callContext.ordinal());
         }
     }
 
