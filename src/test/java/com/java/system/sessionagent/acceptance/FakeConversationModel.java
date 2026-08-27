@@ -22,15 +22,24 @@ final class FakeConversationModel implements ConversationModel {
     private static final ToolName LIST_REPOSITORIES = new ToolName("list_repositories");
     private static final ToolName LIST_ENTRY_POINTS = new ToolName("codebase_list_entry_points");
     private static final ToolName LOOKUP_API_ROUTE = new ToolName("codebase_lookup_api_route");
-    private final List<ModelRequest> requests = new ArrayList<>();
+    private final List<ModelRequest> planRequests = new ArrayList<>();
+    private final List<ReplyRequest> replyRequests = new ArrayList<>();
 
     List<ModelRequest> requests() {
-        return List.copyOf(requests);
+        return planRequests();
+    }
+
+    List<ModelRequest> planRequests() {
+        return List.copyOf(planRequests);
+    }
+
+    List<ReplyRequest> replyRequests() {
+        return List.copyOf(replyRequests);
     }
 
     @Override
     public ModelDecision plan(ModelRequest request, Consumer<com.java.system.sessionagent.conversation.domain.ModelUsage> usageObserver) {
-        requests.add(request);
+        planRequests.add(request);
         UserMessage question = request.history().stream().filter(UserMessage.class::isInstance).map(UserMessage.class::cast)
                 .max(Comparator.comparingLong(message -> message.sequence().value())).orElseThrow();
         List<SessionMessage> jobHistory = request.history().stream()
@@ -74,6 +83,7 @@ final class FakeConversationModel implements ConversationModel {
 
     @Override
     public AssistantReply reply(ReplyRequest request, Consumer<com.java.system.sessionagent.conversation.domain.ModelUsage> usageObserver) {
+        replyRequests.add(request);
         UserMessage question = request.history().stream().filter(UserMessage.class::isInstance).map(UserMessage.class::cast)
                 .max(Comparator.comparingLong(message -> message.sequence().value())).orElseThrow();
         List<SessionMessage> jobHistory = request.history().stream()

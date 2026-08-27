@@ -292,17 +292,27 @@ class SessionAgentLiveIT {
             List<JsonNode> feedbackMessages = new ArrayList<>();
             JsonNode assistant = objectMapper.createObjectNode();
             for (JsonNode message : messages) {
+                String role = requiredText(message, "role");
+                assertThat(message.has("runtimeCallOrdinal")).isFalse();
+                assertThat(message.has("providerAttempt")).isFalse();
+                assertThat(message.has("rawPrompt")).isFalse();
+                assertThat(message.has("rawCompletion")).isFalse();
+                assertThat(message.has("providerError")).isFalse();
+                assertThat(message.has("decodeError")).isFalse();
+                switch (role) {
+                    case "USER", "TOOL", "FEEDBACK", "ASSISTANT" -> {
+                    }
+                    default -> throw new AssertionError("unexpected session history role: " + role);
+                }
                 if (!belongsToJob(message, jobId)) {
                     continue;
                 }
-                if ("TOOL".equals(requiredText(message, "role"))) {
-                    toolMessages.add(message);
-                }
-                if ("ASSISTANT".equals(requiredText(message, "role"))) {
-                    assistant = message;
-                }
-                if ("FEEDBACK".equals(requiredText(message, "role"))) {
-                    feedbackMessages.add(message);
+                switch (role) {
+                    case "TOOL" -> toolMessages.add(message);
+                    case "FEEDBACK" -> feedbackMessages.add(message);
+                    case "ASSISTANT" -> assistant = message;
+                    case "USER" -> throw new AssertionError("current-job history must not contain USER role");
+                    default -> throw new AssertionError("unexpected current-job session history role: " + role);
                 }
             }
             assertThat(toolMessages).isNotEmpty();

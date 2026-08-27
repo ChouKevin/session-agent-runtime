@@ -18,6 +18,25 @@ A final assistant message must cite nonempty, unique `resultId` values that belo
 
 Runtime keeps code and runtime knowledge separate. When a value can only come from a database, configuration, secret, user input, or external API, the model must report that the current value is unavailable instead of inventing it. An empty code search supports only a codebase-limited conclusion.
 
+## Model calls
+
+`PLAN` sees the available tools and returns either a tool call or `AnswerReady`. `FINAL_REPLY` hides tools and uses Spring AI structured output with one explicitly reserved call. The twelfth call is the final fallback.
+
+## Diagnostics
+
+`model_call_record` is diagnostic data, not session history. It currently retains raw Spring AI-level prompt and completion data without redaction or TTL.
+
+```bash
+docker compose exec -T postgres psql -U session_agent -d session_agent \
+  -c "select message_job_id, runtime_call_ordinal, provider_attempt, phase, outcome, raw_completion from model_call_record order by started_at;"
+```
+
+Recreate disposable databases after the `V1` schema change.
+
+## Dependencies
+
+Runtime calls the external Semantic Service over HTTP. The internal Semantic Tool Adapter depends on Tool contracts; Tool has no Semantic dependency.
+
 ## Conversation HTTP API
 
 Submit a message, poll its job, then read history with the returned UUID values:

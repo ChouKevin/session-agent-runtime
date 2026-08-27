@@ -12,6 +12,7 @@ import com.java.system.sessionagent.conversation.domain.MessageReceipt;
 import com.java.system.sessionagent.conversation.domain.MessageRole;
 import com.java.system.sessionagent.conversation.domain.MessageWorkClaim;
 import com.java.system.sessionagent.conversation.domain.ModelRequest;
+import com.java.system.sessionagent.conversation.domain.ReplyRequest;
 import com.java.system.sessionagent.conversation.domain.ResultId;
 import com.java.system.sessionagent.conversation.domain.SessionId;
 import com.java.system.sessionagent.conversation.domain.SessionMessage;
@@ -56,6 +57,12 @@ class ConversationAcceptanceTest {
                 assertThat(message.resultJson()).contains("credit card", "bank transfer", "wallet");
             });
             assertThat(runtime.semantic.calls()).anySatisfy(call -> assertThat(call.path()).isEqualTo("/v1/repositories/payment-service/entry-points"));
+            List<ModelRequest> planRequests = runtime.planRequests();
+            List<ReplyRequest> replyRequests = runtime.replyRequests();
+            assertThat(planRequests).isNotEmpty();
+            assertThat(replyRequests).hasSize(1);
+            assertThat(replyRequests.getFirst().callContext().ordinal())
+                    .isEqualTo(planRequests.getLast().callContext().ordinal() + 1);
         }
     }
 
@@ -175,6 +182,14 @@ class ConversationAcceptanceTest {
 
         List<ModelRequest> modelRequests() {
             return model.requests();
+        }
+
+        List<ModelRequest> planRequests() {
+            return model.planRequests();
+        }
+
+        List<ReplyRequest> replyRequests() {
+            return model.replyRequests();
         }
 
         List<SessionMessage> history(SessionId sessionId) {
