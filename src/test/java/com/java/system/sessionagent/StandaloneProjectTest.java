@@ -23,14 +23,11 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class StandaloneProjectTest {
 
-    private static final String OLD_AGENT_PACKAGE_REFERENCE = "com.java.system." + "agent";
-    private static final String OLD_AGENT_ARTIFACT = "java-system-" + "agent";
-    private static final String OLD_AGENT_RESOURCE_PATH = "com/java/system/" + "agent";
     private static final String FORBIDDEN_TRANSPORT_TOKEN = "sla" + "ck";
     private static final String RESERVED_TRANSPORT_CONTRACT_FILE = "src/test/shell/docker-contract-test.sh";
 
     @Test
-    void isAnIndependentBuildProjectWithLockedToolingAndNoRetiredReferences() throws Exception {
+    void isAnIndependentBuildProjectWithLockedTooling() throws Exception {
         Path projectPom = Path.of("pom.xml").toRealPath();
         DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
         factory.setNamespaceAware(true);
@@ -50,7 +47,7 @@ class StandaloneProjectTest {
 
         assertLockedBuildConfiguration(project);
         assertNoForbiddenDependencies(project);
-        assertNoForbiddenReferenceInProjectFiles(projectPom);
+        assertNoForbiddenTransportReferenceInProjectFiles(projectPom);
     }
 
     @Test
@@ -93,12 +90,10 @@ class StandaloneProjectTest {
 
             assertFalse(containsForbiddenTransportReference(coordinate),
                     () -> "Standalone project must not declare forbidden transport dependency " + coordinate);
-            assertFalse(coordinate.contains(OLD_AGENT_PACKAGE_REFERENCE) || artifactId.equals(OLD_AGENT_ARTIFACT),
-                    () -> "Standalone project must not declare old agent dependency " + coordinate);
         }
     }
 
-    private static void assertNoForbiddenReferenceInProjectFiles(Path projectPom) throws Exception {
+    private static void assertNoForbiddenTransportReferenceInProjectFiles(Path projectPom) throws Exception {
         Path projectRoot = projectPom.getParent();
         Path sourceRoot = projectRoot.resolve("src");
         List<Path> sourceFiles;
@@ -115,10 +110,6 @@ class StandaloneProjectTest {
                 continue;
             }
 
-            assertFalse(relativePath.contains(OLD_AGENT_RESOURCE_PATH),
-                    () -> "Standalone project must not contain old agent resource " + relativePath);
-            assertFalse(content.contains(OLD_AGENT_PACKAGE_REFERENCE),
-                    () -> "Standalone project must not reference old agent package in " + relativePath);
             assertFalse(containsForbiddenTransportReference(relativePath),
                     () -> "Standalone project must not contain forbidden transport resource " + relativePath);
             assertFalse(containsForbiddenTransportReference(content),

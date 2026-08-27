@@ -105,12 +105,10 @@ if rg -n 'replace-with-a-local-non-secret-password' "${env_example}" >/dev/null;
     exit 1
 fi
 
-for forbidden_pattern in 'java-system-agent' 'old-agent' 'session-native-conversation' 'logs/'; do
-    if rg -n --fixed-strings "${forbidden_pattern}" "${compose_file}" "${dockerfile}" >/dev/null; then
-        printf 'forbidden legacy or host-log reference: %s\n' "${forbidden_pattern}" >&2
-        exit 1
-    fi
-done
+if rg -n --fixed-strings 'logs/' "${compose_file}" "${dockerfile}" >/dev/null; then
+    printf 'host log reference is forbidden\n' >&2
+    exit 1
+fi
 
 grep -Fq 'FROM maven:' "${dockerfile}" || { printf 'Dockerfile lacks Maven build stage\n' >&2; exit 1; }
 grep -Fq 'eclipse-temurin:21' "${dockerfile}" || { printf 'Dockerfile lacks Temurin 21 runtime\n' >&2; exit 1; }

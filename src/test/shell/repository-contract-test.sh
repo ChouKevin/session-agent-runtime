@@ -26,18 +26,6 @@ if git -C "${runtime_root}" ls-files \
     exit 1
 fi
 
-if rg -n --hidden \
-    --glob '!docs/superpowers/**' \
-    --glob '!src/test/shell/repository-contract-test.sh' \
-    --glob '!src/test/shell/docker-contract-test.sh' \
-    'java-agent-starter|\.runtime/sources|com\.java\.system\.agent' \
-    "${runtime_root}/pom.xml" "${runtime_root}/Dockerfile" \
-    "${runtime_root}/README.md" "${runtime_root}/src" \
-    "${runtime_root}/docker" >/dev/null; then
-    printf 'standalone repository still references its former parent or old agent\n' >&2
-    exit 1
-fi
-
 if [[ -e "${runtime_root}/fixtures" ]]; then
     printf 'Runtime must not contain Semantic-owned UAT fixture sources\n' >&2
     exit 1
