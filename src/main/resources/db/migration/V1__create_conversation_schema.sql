@@ -70,6 +70,61 @@ create table message_job (
         (completed_at is not null and reply_sequence is not null))
 );
 
+create table model_call_record (
+    diagnostic_id uuid primary key,
+    session_id uuid not null,
+    message_job_id uuid not null,
+    runtime_call_ordinal integer not null check (runtime_call_ordinal between 1 and 12),
+    provider_attempt integer not null check (provider_attempt >= 1),
+    phase varchar(16) not null check (phase in ('PLAN','FINAL_REPLY')),
+    outcome varchar(32) not null check (outcome in (
+        'TOOL_CALL','ANSWER_READY','FINAL_REPLY','INVALID_RESPONSE','PROVIDER_FAILURE')),
+    model_name varchar(256) not null check (length(model_name) > 0),
+    raw_prompt text not null check (length(raw_prompt) > 0),
+    raw_completion text,
+    raw_tool_calls text check (raw_tool_calls is null or raw_tool_calls is json),
+    finish_reason varchar(128),
+    decode_error text,
+    provider_error text,
+    prompt_tokens bigint check (prompt_tokens >= 0),
+    completion_tokens bigint check (completion_tokens >= 0),
+    total_tokens bigint check (total_tokens >= 0),
+    started_at timestamptz not null,
+    completed_at timestamptz not null check (completed_at >= started_at),
+    unique (message_job_id, runtime_call_ordinal, provider_attempt),
+    foreign key (message_job_id, session_id)
+        references message_job(message_job_id, session_id),
+    check (
+        (prompt_tokens is null and completion_tokens is null and total_tokens is null)
+        or
+        (prompt_tokens is not null and completion_tokens is not null and total_tokens is not null)
+    ),
+    check (
+        (phase = 'PLAN' and outcome in (
+            'TOOL_CALL','ANSWER_READY','INVALID_RESPONSE','PROVIDER_FAILURE'))
+        or
+        (phase = 'FINAL_REPLY' and outcome in (
+            'FINAL_REPLY','INVALID_RESPONSE','PROVIDER_FAILURE'))
+    ),
+    check ((outcome = 'PROVIDER_FAILURE') = (provider_error is not null)),
+    check ((outcome = 'INVALID_RESPONSE') = (decode_error is not null)),
+    check (
+        outcome <> 'TOOL_CALL'
+        or (raw_tool_calls is not null and raw_completion is null)
+    ),
+    check (
+        outcome not in ('ANSWER_READY','FINAL_REPLY','PROVIDER_FAILURE')
+        or raw_tool_calls is null
+    ),
+    check (
+        outcome not in ('ANSWER_READY','FINAL_REPLY')
+        or (raw_completion is not null and raw_completion ~ '[^[:space:]]')
+    )
+);
+
+create index ix_model_call_record_session_job
+    on model_call_record(session_id, message_job_id, runtime_call_ordinal, provider_attempt);
+
 alter table session_message add constraint fk_session_message_job
     foreign key (message_job_id, session_id) references message_job(message_job_id, session_id);
 
@@ -161,6 +216,9 @@ $$;
 
 create trigger source_message_append_only
     before update or delete on source_message
+    for each row execute function reject_committed_row_change();
+create trigger model_call_record_append_only
+    before update or delete on model_call_record
     for each row execute function reject_committed_row_change();
 
 create function restrict_conversation_session_change() returns trigger language plpgsql as $$
