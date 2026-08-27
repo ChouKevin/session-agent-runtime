@@ -9,12 +9,14 @@ import com.java.system.sessionagent.conversation.port.in.MessageIntakePort;
 import com.java.system.sessionagent.conversation.port.out.ConversationModel;
 import com.java.system.sessionagent.conversation.port.out.ConversationStore;
 import com.java.system.sessionagent.conversation.port.out.ConversationTelemetry;
+import com.java.system.sessionagent.conversation.port.out.ModelCallRecorder;
 import com.java.system.sessionagent.model.GoogleConversationModel;
 import com.java.system.sessionagent.model.PromptResource;
 import com.java.system.sessionagent.semantic.http.SemanticRepositoryClient;
 import com.java.system.sessionagent.semantic.http.SemanticSourceClient;
 import com.java.system.sessionagent.semantic.tool.SemanticToolProvider;
 import com.java.system.sessionagent.storage.PostgresConversationStore;
+import com.java.system.sessionagent.storage.PostgresModelCallRecorder;
 import com.java.system.sessionagent.tool.application.DirectToolRegistry;
 import com.java.system.sessionagent.worker.MessageJobWorker;
 import com.java.system.sessionagent.worker.WorkerProperties;
@@ -97,14 +99,25 @@ public class RuntimeConfiguration {
     }
 
     @Bean
-    GoogleConversationModel conversationModel(ChatModel chatModel, PromptResource promptResource, ConversationTelemetry conversationTelemetry,
-                                              RuntimeProperties properties) {
-        return new GoogleConversationModel(chatModel, promptResource, conversationTelemetry, properties.model().name());
+    GoogleConversationModel conversationModel(
+            ChatModel chatModel,
+            PromptResource promptResource,
+            ConversationTelemetry conversationTelemetry,
+            ModelCallRecorder modelCallRecorder,
+            Clock runtimeClock,
+            RuntimeProperties properties) {
+        return new GoogleConversationModel(chatModel, promptResource, conversationTelemetry, modelCallRecorder,
+                runtimeClock, properties.model().name());
     }
 
     @Bean
     ConversationStore conversationStore(DataSource dataSource, Clock runtimeClock) {
         return new PostgresConversationStore(dataSource, runtimeClock);
+    }
+
+    @Bean
+    ModelCallRecorder modelCallRecorder(DataSource dataSource) {
+        return new PostgresModelCallRecorder(dataSource);
     }
 
     @Bean

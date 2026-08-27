@@ -1,6 +1,7 @@
 package com.java.system.sessionagent.bootstrap;
 
 import com.java.system.sessionagent.conversation.port.out.ConversationStore;
+import com.java.system.sessionagent.conversation.port.out.ModelCallRecorder;
 import com.java.system.sessionagent.conversation.domain.MessageRole;
 import com.java.system.sessionagent.conversation.domain.ModelDecision;
 import com.java.system.sessionagent.conversation.domain.ModelRequest;
@@ -9,6 +10,7 @@ import com.java.system.sessionagent.conversation.domain.SessionSequence;
 import com.java.system.sessionagent.conversation.domain.UserMessage;
 import com.java.system.sessionagent.model.GoogleConversationModel;
 import com.java.system.sessionagent.model.PromptResource;
+import com.java.system.sessionagent.storage.PostgresModelCallRecorder;
 import com.java.system.sessionagent.tool.application.DirectToolRegistry;
 import com.java.system.sessionagent.tool.application.ToolRegistration;
 import com.java.system.sessionagent.tool.domain.ToolDefinition;
@@ -69,6 +71,8 @@ class ApplicationStartupTest {
             assertThat(context.getBeansOfType(DirectToolRegistry.class)).hasSize(1);
             assertThat(context.getBean(DirectToolRegistry.class).snapshot().definitions()).hasSize(16);
             assertThat(context.getBeansOfType(ConversationStore.class)).hasSize(1);
+            assertThat(context).hasSingleBean(ModelCallRecorder.class);
+            assertThat(context.getBean(ModelCallRecorder.class)).isInstanceOf(PostgresModelCallRecorder.class);
             assertThat(context.getBeansOfType(com.java.system.sessionagent.model.GoogleConversationModel.class)).hasSize(1);
             assertThat(context.getBeansOfType(com.java.system.sessionagent.conversation.application.MessageJobService.class)).hasSize(1);
             assertThat(context.getBeansOfType(com.java.system.sessionagent.worker.MessageJobWorker.class)).hasSize(1);
