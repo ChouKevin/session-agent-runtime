@@ -1,12 +1,17 @@
 package com.java.system.sessionagent.model;
 
 import com.java.system.sessionagent.conversation.domain.AssistantReply;
+import com.java.system.sessionagent.conversation.domain.ModelCallContext;
+import com.java.system.sessionagent.conversation.domain.ModelCallOutcome;
+import com.java.system.sessionagent.conversation.domain.ModelCallPhase;
+import com.java.system.sessionagent.conversation.domain.ModelCallRecord;
 import com.java.system.sessionagent.conversation.domain.ModelDecision;
 import com.java.system.sessionagent.conversation.domain.ModelRequest;
 import com.java.system.sessionagent.conversation.domain.ModelUsage;
 import com.java.system.sessionagent.conversation.domain.ReplyRequest;
 import com.java.system.sessionagent.conversation.domain.ToolMessage;
 import com.java.system.sessionagent.conversation.port.out.ModelCallFailure;
+import com.java.system.sessionagent.conversation.port.out.ModelCallRecorder;
 import com.java.system.sessionagent.conversation.port.out.ConversationTelemetry;
 import com.java.system.sessionagent.conversation.port.out.NoOpConversationTelemetry;
 import com.java.system.sessionagent.tool.domain.ToolName;
@@ -36,10 +41,14 @@ import org.springframework.util.CollectionUtils;
 import org.springframework.util.StringUtils;
 
 import java.net.SocketTimeoutException;
+import java.time.Clock;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
+import java.util.LinkedHashMap;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
@@ -57,21 +66,38 @@ public final class GoogleConversationModel implements com.java.system.sessionage
     private final StrictJsonCodec jsonCodec;
     private final ConversationTelemetry telemetry;
     private final Optional<GoogleGenAiChatOptions> googleOptions;
+    private final ModelCallRecorder recorder;
+    private final Clock clock;
+    private final String modelName;
 
     public GoogleConversationModel(ChatModel chatModel, PromptResource promptResource) {
         this(chatClientFor(chatModel), promptResource, new SpringAiToolCallbackFactory(),
-                new ConversationHistoryProjector(), new StrictJsonCodec(), new NoOpConversationTelemetry(), Optional.empty());
+                new ConversationHistoryProjector(), new StrictJsonCodec(), new NoOpConversationTelemetry(), Optional.empty(),
+                ModelCallRecorder.noop(), Clock.systemUTC(), inferredModelName(chatModel));
     }
 
     public GoogleConversationModel(ChatModel chatModel, PromptResource promptResource, ConversationTelemetry telemetry) {
         this(chatClientFor(chatModel), promptResource, new SpringAiToolCallbackFactory(),
-                new ConversationHistoryProjector(), new StrictJsonCodec(), telemetry, Optional.empty());
+                new ConversationHistoryProjector(), new StrictJsonCodec(), telemetry, Optional.empty(), ModelCallRecorder.noop(),
+                Clock.systemUTC(), inferredModelName(chatModel));
     }
 
     public GoogleConversationModel(ChatModel chatModel, PromptResource promptResource, ConversationTelemetry telemetry,
                                    String modelName) {
         this(chatClientFor(chatModel), promptResource, new SpringAiToolCallbackFactory(),
-                new ConversationHistoryProjector(), new StrictJsonCodec(), telemetry, Optional.of(configureGoogleOptions(chatModel, modelName)));
+                new ConversationHistoryProjector(), new StrictJsonCodec(), telemetry, Optional.of(configureGoogleOptions(chatModel, modelName)),
+                ModelCallRecorder.noop(), Clock.systemUTC(), modelName);
+    }
+
+    public GoogleConversationModel(
+            ChatModel chatModel,
+            PromptResource promptResource,
+            ConversationTelemetry telemetry,
+            ModelCallRecorder recorder,
+            Clock clock,
+            String modelName) {
+        this(chatClientFor(chatModel), promptResource, new SpringAiToolCallbackFactory(), new ConversationHistoryProjector(),
+                new StrictJsonCodec(), telemetry, configuredGoogleOptions(chatModel, modelName), recorder, clock, modelName);
     }
 
     private static ChatClient chatClientFor(ChatModel chatModel) {
@@ -87,7 +113,8 @@ public final class GoogleConversationModel implements com.java.system.sessionage
             SpringAiToolCallbackFactory callbackFactory,
             ConversationHistoryProjector historyProjector,
             StrictJsonCodec jsonCodec) {
-        this(chatClient, promptResource, callbackFactory, historyProjector, jsonCodec, new NoOpConversationTelemetry(), Optional.empty());
+        this(chatClient, promptResource, callbackFactory, historyProjector, jsonCodec, new NoOpConversationTelemetry(), Optional.empty(),
+                ModelCallRecorder.noop(), Clock.systemUTC(), "unspecified");
     }
 
     GoogleConversationModel(
@@ -97,7 +124,8 @@ public final class GoogleConversationModel implements com.java.system.sessionage
             ConversationHistoryProjector historyProjector,
             StrictJsonCodec jsonCodec,
             ConversationTelemetry telemetry) {
-        this(chatClient, promptResource, callbackFactory, historyProjector, jsonCodec, telemetry, Optional.empty());
+        this(chatClient, promptResource, callbackFactory, historyProjector, jsonCodec, telemetry, Optional.empty(), ModelCallRecorder.noop(),
+                Clock.systemUTC(), "unspecified");
     }
 
     private GoogleConversationModel(
@@ -107,13 +135,20 @@ public final class GoogleConversationModel implements com.java.system.sessionage
             ConversationHistoryProjector historyProjector,
             StrictJsonCodec jsonCodec,
             ConversationTelemetry telemetry,
-            Optional<GoogleGenAiChatOptions> googleOptions) {
+            Optional<GoogleGenAiChatOptions> googleOptions,
+            ModelCallRecorder recorder,
+            Clock clock,
+            String modelName) {
         Assert.notNull(chatClient, "Chat client must not be null");
         Assert.notNull(promptResource, "Prompt resource must not be null");
         Assert.notNull(callbackFactory, "Tool callback factory must not be null");
         Assert.notNull(historyProjector, "Conversation history projector must not be null");
         Assert.notNull(jsonCodec, "JSON codec must not be null");
         Assert.notNull(telemetry, "Conversation telemetry must not be null");
+        Assert.notNull(googleOptions, "Google options must not be null");
+        Assert.notNull(recorder, "Model call recorder must not be null");
+        Assert.notNull(clock, "Clock must not be null");
+        Assert.hasText(modelName, "Model name must not be blank");
         this.chatClient = chatClient;
         this.promptResource = promptResource;
         this.callbackFactory = callbackFactory;
@@ -121,6 +156,9 @@ public final class GoogleConversationModel implements com.java.system.sessionage
         this.jsonCodec = jsonCodec;
         this.telemetry = telemetry;
         this.googleOptions = googleOptions;
+        this.recorder = recorder;
+        this.clock = clock;
+        this.modelName = modelName;
     }
 
     @Override
@@ -130,8 +168,9 @@ public final class GoogleConversationModel implements com.java.system.sessionage
         List<ToolCallback> callbacks = callbackFactory.create(request.toolSnapshot());
         List<Message> messages = planMessagesFor(request);
         LOGGER.info("google_model_request phase=PLAN messageCount={} callbackCount={}", messages.size(), callbacks.size());
+        SpringAiCallCapture callCapture = new SpringAiCallCapture(clock);
         try {
-            ChatResponse response = call(messages, callbacks);
+            ChatResponse response = call(messages, callbacks, callCapture);
             logResponseShape(response);
             ModelUsage modelUsage = usage(response);
             ModelDecision modelDecision = planDecision(response);
@@ -139,10 +178,18 @@ public final class GoogleConversationModel implements com.java.system.sessionage
                     resultCount(response), modelUsage.available());
             usageObserver.accept(modelUsage);
             telemetry.model("SUCCESS", Optional.of(finishReason(response)), modelUsage);
+            record(request.callContext(), ModelCallPhase.PLAN, planOutcome(modelDecision), callCapture, Optional.empty(), Optional.empty());
             return modelDecision;
         } catch (ModelCallFailure failure) {
             LOGGER.info("google_model_failed phase=PLAN closedFailureKind={}", failure.kind());
             telemetry.model("FAILURE", Optional.of(failure.kind().name()), new ModelUsage(0, 0, 0, false));
+            if (callCapture.providerFailure().isPresent()) {
+                record(request.callContext(), ModelCallPhase.PLAN, ModelCallOutcome.PROVIDER_FAILURE, callCapture,
+                        Optional.empty(), callCapture.providerFailure().map(RuntimeException::toString));
+            } else {
+                record(request.callContext(), ModelCallPhase.PLAN, ModelCallOutcome.INVALID_RESPONSE, callCapture,
+                        Optional.of(failure.toString()), Optional.empty());
+            }
             throw failure;
         }
     }
@@ -153,7 +200,7 @@ public final class GoogleConversationModel implements com.java.system.sessionage
         Assert.notNull(usageObserver, "Model usage observer must not be null");
         List<Message> messages = replyMessagesFor(request);
         LOGGER.info("google_model_request phase=FINAL_REPLY messageCount={} callbackCount={}", messages.size(), 0);
-        SpringAiCallCapture callCapture = new SpringAiCallCapture();
+        SpringAiCallCapture callCapture = new SpringAiCallCapture(clock);
         ChatResponse response;
         AssistantReply reply;
         try {
@@ -167,6 +214,13 @@ public final class GoogleConversationModel implements com.java.system.sessionage
                     .orElseGet(ModelCallFailure::correctable);
             LOGGER.info("google_model_failed phase=FINAL_REPLY closedFailureKind={}", failure.kind());
             telemetry.model("FAILURE", Optional.of(failure.kind().name()), new ModelUsage(0, 0, 0, false));
+            if (callCapture.providerFailure().isPresent()) {
+                record(request.callContext(), ModelCallPhase.FINAL_REPLY, ModelCallOutcome.PROVIDER_FAILURE, callCapture,
+                        Optional.empty(), callCapture.providerFailure().map(RuntimeException::toString));
+            } else {
+                record(request.callContext(), ModelCallPhase.FINAL_REPLY, ModelCallOutcome.INVALID_RESPONSE, callCapture,
+                        Optional.of(exception.toString()), Optional.empty());
+            }
             throw failure;
         }
         logResponseShape(response);
@@ -175,6 +229,8 @@ public final class GoogleConversationModel implements com.java.system.sessionage
                 resultCount(response), modelUsage.available());
         usageObserver.accept(modelUsage);
         telemetry.model("SUCCESS", Optional.of(finishReason(response)), modelUsage);
+        record(request.callContext(), ModelCallPhase.FINAL_REPLY, ModelCallOutcome.FINAL_REPLY, callCapture,
+                Optional.empty(), Optional.empty());
         return reply;
     }
 
@@ -205,10 +261,11 @@ public final class GoogleConversationModel implements com.java.system.sessionage
         return List.copyOf(messages);
     }
 
-    private ChatResponse call(List<Message> messages, List<ToolCallback> callbacks) {
+    private ChatResponse call(List<Message> messages, List<ToolCallback> callbacks, SpringAiCallCapture callCapture) {
         try {
             ChatClient.ChatClientRequestSpec request = chatClient.prompt()
                     .advisors(AdvisorParams.toolCallingAdvisorAutoRegister(false))
+                    .advisors(callCapture)
                     .messages(messages);
             if (googleOptions.isPresent()) {
                 GoogleGenAiChatOptions.Builder options = googleOptions.get().mutate()
@@ -252,6 +309,92 @@ public final class GoogleConversationModel implements com.java.system.sessionage
                 .includeServerSideToolInvocations(false)
                 .toolCallbacks(List.of())
                 .build();
+    }
+
+    private static Optional<GoogleGenAiChatOptions> configuredGoogleOptions(ChatModel chatModel, String modelName) {
+        if (chatModel.getOptions() instanceof GoogleGenAiChatOptions) {
+            return Optional.of(configureGoogleOptions(chatModel, modelName));
+        }
+        return Optional.empty();
+    }
+
+    private static String inferredModelName(ChatModel chatModel) {
+        String configuredModel = chatModel.getOptions().getModel();
+        return StringUtils.hasText(configuredModel) ? configuredModel : "unspecified";
+    }
+
+    private static ModelCallOutcome planOutcome(ModelDecision modelDecision) {
+        return modelDecision instanceof ModelDecision.UseTool
+                ? ModelCallOutcome.TOOL_CALL
+                : ModelCallOutcome.ANSWER_READY;
+    }
+
+    private void record(
+            ModelCallContext callContext,
+            ModelCallPhase phase,
+            ModelCallOutcome outcome,
+            SpringAiCallCapture callCapture,
+            Optional<String> decodeError,
+            Optional<String> providerError) {
+        Optional<ChatResponse> capturedResponse = callCapture.chatResponse();
+        Instant startedAt = callCapture.startedAt().orElseGet(clock::instant);
+        Instant completedAt = callCapture.completedAt().orElse(startedAt);
+        ModelCallRecord record = new ModelCallRecord(
+                UUID.randomUUID(),
+                callContext.sessionId(),
+                callContext.messageJobId(),
+                callContext.ordinal(),
+                1,
+                phase,
+                outcome,
+                modelName,
+                callCapture.request().map(Object::toString).filter(StringUtils::hasText).orElse("unavailable"),
+                rawCompletion(capturedResponse),
+                rawToolCalls(capturedResponse),
+                capturedResponse.map(GoogleConversationModel::finishReason),
+                decodeError,
+                providerError,
+                capturedResponse.map(GoogleConversationModel::usage).orElseGet(() -> new ModelUsage(0, 0, 0, false)),
+                startedAt,
+                completedAt);
+        try {
+            recorder.record(record);
+        } catch (RuntimeException exception) {
+            LOGGER.warn("google_model_diagnostic_record_failed id={} sessionId={} messageJobId={} ordinal={}",
+                    record.id(), record.sessionId().value(), record.messageJobId().value(), record.runtimeCallOrdinal());
+        }
+    }
+
+    private static Optional<String> rawCompletion(Optional<ChatResponse> response) {
+        return response.flatMap(GoogleConversationModel::actionableMessage)
+                .map(AssistantMessage::getText)
+                .filter(StringUtils::hasText);
+    }
+
+    private Optional<String> rawToolCalls(Optional<ChatResponse> response) {
+        List<Map<String, String>> toolCalls = response.stream()
+                .flatMap(chatResponse -> chatResponse.getResults().stream())
+                .filter(result -> !isThought(result))
+                .flatMap(result -> Optional.ofNullable(result.getOutput()).stream())
+                .flatMap(message -> message.getToolCalls().stream())
+                .map(toolCall -> normalizedToolCall(toolCall))
+                .toList();
+        return toolCalls.isEmpty() ? Optional.empty() : Optional.of(jsonCodec.canonicalize(toolCalls));
+    }
+
+    private static Map<String, String> normalizedToolCall(AssistantMessage.ToolCall toolCall) {
+        Map<String, String> normalized = new LinkedHashMap<>();
+        normalized.put("id", toolCall.id());
+        normalized.put("name", toolCall.name());
+        normalized.put("arguments", toolCall.arguments());
+        return normalized;
+    }
+
+    private static Optional<AssistantMessage> actionableMessage(ChatResponse response) {
+        return response.getResults().stream()
+                .filter(result -> !isThought(result))
+                .flatMap(result -> Optional.ofNullable(result.getOutput()).stream())
+                .findFirst();
     }
 
     private ModelDecision planDecision(ChatResponse response) {

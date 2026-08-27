@@ -9,6 +9,9 @@ import com.java.system.sessionagent.conversation.domain.MessageRole;
 import com.java.system.sessionagent.conversation.domain.MessageWorkClaim;
 import com.java.system.sessionagent.conversation.domain.ModelRequest;
 import com.java.system.sessionagent.conversation.domain.ModelCallContext;
+import com.java.system.sessionagent.conversation.domain.ModelCallOutcome;
+import com.java.system.sessionagent.conversation.domain.ModelCallPhase;
+import com.java.system.sessionagent.conversation.domain.ModelCallRecord;
 import com.java.system.sessionagent.conversation.domain.ReplyRequest;
 import com.java.system.sessionagent.conversation.domain.ResultId;
 import com.java.system.sessionagent.conversation.domain.SessionId;
@@ -20,12 +23,16 @@ import com.java.system.sessionagent.tool.application.DirectToolRegistry;
 import com.java.system.sessionagent.tool.application.ToolSnapshot;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.UUID;
+import java.util.stream.Stream;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException;
@@ -240,6 +247,33 @@ class ConversationDomainTest {
                 Optional.empty(),
                 Optional.empty(),
                 Optional.empty()).rejectedArguments()).isEmpty();
+    }
+
+    @ParameterizedTest
+    @MethodSource("invalidModelCallRecords")
+    void rejectsInvalidModelCallDiagnosticCombinations(
+            ModelCallPhase phase,
+            ModelCallOutcome outcome,
+            Optional<String> rawCompletion,
+            Optional<String> rawToolCalls,
+            Optional<String> decodeError,
+            Optional<String> providerError) {
+        assertThatIllegalArgumentException().isThrownBy(() -> new ModelCallRecord(
+                UUID.randomUUID(), SESSION_ID, JOB_ID, 1, 1, phase, outcome, "model", "prompt",
+                rawCompletion, rawToolCalls, Optional.empty(), decodeError, providerError,
+                new com.java.system.sessionagent.conversation.domain.ModelUsage(1, 1, 2, true), CREATED_AT, CREATED_AT));
+    }
+
+    private static Stream<Arguments> invalidModelCallRecords() {
+        return Stream.of(
+                Arguments.of(ModelCallPhase.PLAN, ModelCallOutcome.FINAL_REPLY,
+                        Optional.of("completion"), Optional.empty(), Optional.empty(), Optional.empty()),
+                Arguments.of(ModelCallPhase.PLAN, ModelCallOutcome.PROVIDER_FAILURE,
+                        Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty()),
+                Arguments.of(ModelCallPhase.PLAN, ModelCallOutcome.INVALID_RESPONSE,
+                        Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty()),
+                Arguments.of(ModelCallPhase.PLAN, ModelCallOutcome.TOOL_CALL,
+                        Optional.of("completion"), Optional.of("[]"), Optional.empty(), Optional.empty()));
     }
 
     private static ToolMessage toolMessage(

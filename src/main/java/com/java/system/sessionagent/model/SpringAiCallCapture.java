@@ -9,42 +9,44 @@ import org.springframework.core.Ordered;
 import org.springframework.util.Assert;
 
 import java.time.Instant;
+import java.time.Clock;
 import java.util.Optional;
-import java.util.concurrent.atomic.AtomicBoolean;
 
 final class SpringAiCallCapture implements CallAdvisor {
 
-    private final AtomicBoolean used = new AtomicBoolean();
-    private ChatClientRequest request;
-    private ChatResponse response;
-    private RuntimeException providerFailure;
-    private Instant startedAt;
-    private Instant endedAt;
+    private final Clock clock;
+    private Optional<ChatClientRequest> request = Optional.empty();
+    private Optional<ChatResponse> chatResponse = Optional.empty();
+    private Optional<RuntimeException> providerFailure = Optional.empty();
+    private Optional<Instant> startedAt = Optional.empty();
+    private Optional<Instant> completedAt = Optional.empty();
+
+    SpringAiCallCapture(Clock clock) {
+        Assert.notNull(clock, "Clock must not be null");
+        this.clock = clock;
+    }
 
     @Override
     public ChatClientResponse adviseCall(ChatClientRequest request, CallAdvisorChain callAdvisorChain) {
         Assert.notNull(request, "Chat client request must not be null");
         Assert.notNull(callAdvisorChain, "Call advisor chain must not be null");
-        if (!used.compareAndSet(false, true)) {
-            throw new IllegalStateException("Spring AI call capture can only be used once");
-        }
-        this.request = request;
-        this.startedAt = Instant.now();
+        startedAt = Optional.of(clock.instant());
+        this.request = Optional.of(request);
         try {
             ChatClientResponse chatClientResponse = callAdvisorChain.nextCall(request);
-            this.response = chatClientResponse.chatResponse();
+            chatResponse = Optional.ofNullable(chatClientResponse.chatResponse());
             return chatClientResponse;
         } catch (RuntimeException exception) {
-            this.providerFailure = exception;
+            providerFailure = Optional.of(exception);
             throw exception;
         } finally {
-            this.endedAt = Instant.now();
+            completedAt = Optional.of(clock.instant());
         }
     }
 
     @Override
     public String getName() {
-        return "Spring AI call capture";
+        return "Session Agent model-call capture";
     }
 
     @Override
@@ -53,22 +55,22 @@ final class SpringAiCallCapture implements CallAdvisor {
     }
 
     Optional<ChatClientRequest> request() {
-        return Optional.ofNullable(request);
+        return request;
     }
 
-    Optional<ChatResponse> response() {
-        return Optional.ofNullable(response);
+    Optional<ChatResponse> chatResponse() {
+        return chatResponse;
     }
 
     Optional<RuntimeException> providerFailure() {
-        return Optional.ofNullable(providerFailure);
+        return providerFailure;
     }
 
     Optional<Instant> startedAt() {
-        return Optional.ofNullable(startedAt);
+        return startedAt;
     }
 
-    Optional<Instant> endedAt() {
-        return Optional.ofNullable(endedAt);
+    Optional<Instant> completedAt() {
+        return completedAt;
     }
 }

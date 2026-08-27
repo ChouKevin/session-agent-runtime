@@ -4,6 +4,9 @@ import com.java.system.sessionagent.conversation.domain.AssistantReply;
 import com.java.system.sessionagent.conversation.domain.MessageJobId;
 import com.java.system.sessionagent.conversation.domain.ModelDecision;
 import com.java.system.sessionagent.conversation.domain.ModelCallContext;
+import com.java.system.sessionagent.conversation.domain.ModelCallOutcome;
+import com.java.system.sessionagent.conversation.domain.ModelCallPhase;
+import com.java.system.sessionagent.conversation.domain.ModelCallRecord;
 import com.java.system.sessionagent.conversation.domain.ModelRequest;
 import com.java.system.sessionagent.conversation.domain.ModelUsage;
 import com.java.system.sessionagent.conversation.domain.ReplyRequest;
@@ -15,6 +18,7 @@ import com.java.system.sessionagent.conversation.domain.ToolMessage;
 import com.java.system.sessionagent.conversation.domain.UserMessage;
 import com.java.system.sessionagent.conversation.domain.MessageRole;
 import com.java.system.sessionagent.conversation.port.out.ModelCallFailure;
+import com.java.system.sessionagent.conversation.port.out.ModelCallRecorder;
 import com.java.system.sessionagent.conversation.port.out.ConversationTelemetry;
 import com.java.system.sessionagent.conversation.port.out.NoOpConversationTelemetry;
 import com.java.system.sessionagent.tool.application.DirectToolRegistry;
@@ -48,7 +52,9 @@ import org.springframework.ai.retry.NonTransientAiException;
 import org.springframework.ai.retry.TransientAiException;
 import org.springframework.util.CollectionUtils;
 
+import java.time.Clock;
 import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
@@ -128,6 +134,123 @@ class GoogleConversationModelTest {
 
         assertThat(decision).isEqualTo(new ModelDecision.AnswerReady());
         assertThat(chatModel.callCount).isEqualTo(1);
+    }
+
+    @Test
+    void records_answer_ready_text_before_runtime_decoding() {
+        RecordingModelCallRecorder recorder = new RecordingModelCallRecorder();
+        GoogleConversationModel model = diagnosticModel(response(new AssistantMessage("Ready to answer.")), recorder);
+
+        ModelDecision decision = model.plan(modelRequest(snapshot("catalog"), 3), usage -> { });
+
+        assertThat(decision).isEqualTo(new ModelDecision.AnswerReady());
+        assertThat(recorder.records()).singleElement().satisfies(record -> {
+            assertThat(record.runtimeCallOrdinal()).isEqualTo(3);
+            assertThat(record.providerAttempt()).isEqualTo(1);
+            assertThat(record.phase()).isEqualTo(ModelCallPhase.PLAN);
+            assertThat(record.outcome()).isEqualTo(ModelCallOutcome.ANSWER_READY);
+            assertThat(record.modelName()).isEqualTo("diagnostic-model");
+            assertThat(record.rawPrompt()).isNotBlank();
+            assertThat(record.rawCompletion()).contains("Ready to answer.");
+        });
+    }
+
+    @Test
+    void records_invalid_final_completion_before_throwing_correctable_failure() {
+        RecordingModelCallRecorder recorder = new RecordingModelCallRecorder();
+        GoogleConversationModel model = diagnosticModel(response(new AssistantMessage("not-json")), recorder);
+
+        assertThatThrownBy(() -> model.reply(replyRequestWithOrdinal(4), usage -> { }))
+                .isInstanceOf(ModelCallFailure.class)
+                .extracting(exception -> ((ModelCallFailure) exception).kind())
+                .isEqualTo(ModelCallFailure.Kind.CORRECTABLE);
+
+        assertThat(recorder.records()).singleElement().satisfies(record -> {
+            assertThat(record.phase()).isEqualTo(ModelCallPhase.FINAL_REPLY);
+            assertThat(record.outcome()).isEqualTo(ModelCallOutcome.INVALID_RESPONSE);
+            assertThat(record.rawCompletion()).contains("not-json");
+            assertThat(record.decodeError()).isPresent();
+        });
+    }
+
+    @Test
+    void records_tool_call_payload_and_usage() {
+        RecordingModelCallRecorder recorder = new RecordingModelCallRecorder();
+        GoogleConversationModel model = diagnosticModel(
+                response(toolResponse("call-1", "catalog", "{\"query\":\"repositories\"}"), new DefaultUsage(7, 3, 10)), recorder);
+
+        model.plan(modelRequest(snapshot("catalog"), 2), usage -> { });
+
+        assertThat(recorder.records()).singleElement().satisfies(record -> {
+            assertThat(record.phase()).isEqualTo(ModelCallPhase.PLAN);
+            assertThat(record.outcome()).isEqualTo(ModelCallOutcome.TOOL_CALL);
+            assertThat(record.rawToolCalls()).hasValueSatisfying(value ->
+                    assertThat(value).contains("call-1", "catalog", "arguments"));
+            assertThat(record.usage()).isEqualTo(new ModelUsage(7, 3, 10, true));
+        });
+    }
+
+    @Test
+    void records_successful_final_reply() {
+        RecordingModelCallRecorder recorder = new RecordingModelCallRecorder();
+        GoogleConversationModel model = diagnosticModel(response(new AssistantMessage(
+                "{\"citations\":[{\"value\":\"result-1\"}],\"message\":\"Answer\"}")), recorder);
+
+        model.reply(replyRequestWithOrdinal(4), usage -> { });
+
+        assertThat(recorder.records()).singleElement().satisfies(record -> {
+            assertThat(record.runtimeCallOrdinal()).isEqualTo(4);
+            assertThat(record.phase()).isEqualTo(ModelCallPhase.FINAL_REPLY);
+            assertThat(record.outcome()).isEqualTo(ModelCallOutcome.FINAL_REPLY);
+            assertThat(record.rawCompletion()).hasValueSatisfying(value ->
+                    assertThat(value).contains("\"message\":\"Answer\""));
+            assertThat(record.rawToolCalls()).isEmpty();
+        });
+    }
+
+    @ParameterizedTest
+    @MethodSource("diagnosticReplyProviderFailures")
+    void records_provider_failure_without_changing_its_classification(
+            RuntimeException providerFailure, ModelCallFailure.Kind expectedKind) {
+        RecordingModelCallRecorder recorder = new RecordingModelCallRecorder();
+        FailingChatModel chatModel = new FailingChatModel(providerFailure);
+        GoogleConversationModel model = diagnosticModel(chatModel, recorder);
+
+        assertThatThrownBy(() -> model.reply(replyRequest(), usage -> { }))
+                .isInstanceOf(ModelCallFailure.class)
+                .extracting(exception -> ((ModelCallFailure) exception).kind())
+                .isEqualTo(expectedKind);
+
+        assertThat(chatModel.callCount).isEqualTo(1);
+        assertThat(recorder.records()).singleElement().satisfies(record -> {
+            assertThat(record.outcome()).isEqualTo(ModelCallOutcome.PROVIDER_FAILURE);
+            assertThat(record.providerError()).isPresent();
+            assertThat(record.decodeError()).isEmpty();
+        });
+    }
+
+    @Test
+    void records_unavailable_usage_as_unavailable() {
+        RecordingModelCallRecorder recorder = new RecordingModelCallRecorder();
+        GoogleConversationModel model = diagnosticModel(response(new AssistantMessage("Ready to answer.")), recorder);
+
+        model.plan(modelRequest(snapshot("catalog"), 5), usage -> { });
+
+        assertThat(recorder.records()).singleElement()
+                .extracting(ModelCallRecord::usage)
+                .isEqualTo(new ModelUsage(0, 0, 0, false));
+    }
+
+    @Test
+    void diagnostic_storage_failure_does_not_replace_a_valid_model_result() {
+        ModelCallRecorder recorder = record -> {
+            throw new IllegalStateException("diagnostic database unavailable");
+        };
+        GoogleConversationModel model = diagnosticModel(response(new AssistantMessage("Ready to answer.")), recorder);
+
+        ModelDecision decision = model.plan(modelRequest(snapshot("catalog"), 5), usage -> { });
+
+        assertThat(decision).isEqualTo(new ModelDecision.AnswerReady());
     }
 
     @Test
@@ -369,6 +492,12 @@ class GoogleConversationModelTest {
                 Arguments.of(new RuntimeException("provider rejected request"), ModelCallFailure.Kind.TERMINAL));
     }
 
+    private static Stream<Arguments> diagnosticReplyProviderFailures() {
+        return Stream.of(
+                Arguments.of(new TransientAiException("provider unavailable"), ModelCallFailure.Kind.TRANSIENT),
+                Arguments.of(new RuntimeException("provider rejected request"), ModelCallFailure.Kind.TERMINAL));
+    }
+
     private static ListAppender<ILoggingEvent> attachAppender(Class<?> type) {
         Logger logger = (Logger) LoggerFactory.getLogger(type);
         ListAppender<ILoggingEvent> appender = new ListAppender<>();
@@ -395,9 +524,28 @@ class GoogleConversationModelTest {
                 new ModelCallContext(new SessionId("session-1"), new MessageJobId("job-1"), 1));
     }
 
+    private static ModelRequest modelRequest(ToolSnapshot snapshot, int ordinal) {
+        return new ModelRequest(request(snapshot).history(), snapshot,
+                new ModelCallContext(new SessionId("session-1"), new MessageJobId("job-1"), ordinal));
+    }
+
     private static ReplyRequest replyRequest() {
         return new ReplyRequest(request(snapshot("catalog")).history(),
                 new ModelCallContext(new SessionId("session-1"), new MessageJobId("job-1"), 2));
+    }
+
+    private static ReplyRequest replyRequestWithOrdinal(int ordinal) {
+        return new ReplyRequest(request(snapshot("catalog")).history(),
+                new ModelCallContext(new SessionId("session-1"), new MessageJobId("job-1"), ordinal));
+    }
+
+    private static GoogleConversationModel diagnosticModel(ChatResponse response, ModelCallRecorder recorder) {
+        return diagnosticModel(new RecordingChatModel(response), recorder);
+    }
+
+    private static GoogleConversationModel diagnosticModel(ChatModel chatModel, ModelCallRecorder recorder) {
+        return new GoogleConversationModel(chatModel, new PromptResource(), new NoOpConversationTelemetry(), recorder,
+                Clock.fixed(Instant.parse("2026-08-16T00:00:00Z"), ZoneOffset.UTC), "diagnostic-model");
     }
 
     private static ToolSnapshot snapshot(String toolName) {
@@ -503,6 +651,20 @@ class GoogleConversationModelTest {
         @Override
         public ToolCallingChatOptions getOptions() {
             return ToolCallingChatOptions.builder().build();
+        }
+    }
+
+    private static final class RecordingModelCallRecorder implements ModelCallRecorder {
+
+        private final List<ModelCallRecord> records = new ArrayList<>();
+
+        @Override
+        public void record(ModelCallRecord record) {
+            records.add(record);
+        }
+
+        private List<ModelCallRecord> records() {
+            return List.copyOf(records);
         }
     }
 }
