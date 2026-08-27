@@ -44,7 +44,8 @@ class PostgresModelCallRecorderPostgresIT {
 
     private static final Instant NOW = Instant.parse("2026-08-26T02:00:00Z");
 
-    private static final PostgreSQLContainer<?> POSTGRES = new PostgreSQLContainer<>("postgres:17-alpine");
+    private static final PostgreSQLContainer<?> POSTGRES = new PostgreSQLContainer<>("postgres:17-alpine")
+            .withEnv("POSTGRES_INITDB_ARGS", "--encoding=UTF8 --locale=C");
 
     private JdbcTemplate jdbcTemplate;
 
@@ -192,13 +193,17 @@ class PostgresModelCallRecorderPostgresIT {
                 Arguments.of(ModelCallPhase.PLAN, ModelCallOutcome.ANSWER_READY,
                         Optional.empty(), Optional.empty(), Optional.empty()),
                 Arguments.of(ModelCallPhase.PLAN, ModelCallOutcome.ANSWER_READY,
-                        Optional.of("   "), Optional.empty(), Optional.empty()));
+                        Optional.of("   "), Optional.empty(), Optional.empty()),
+                Arguments.of(ModelCallPhase.PLAN, ModelCallOutcome.ANSWER_READY,
+                        Optional.of("\u2003"), Optional.empty(), Optional.empty()));
     }
 
     private static Stream<Arguments> blankDiagnosticText() {
         return Stream.of(
                 Arguments.of("   ", "Prompt snapshot"),
-                Arguments.of("gemini-3.1-flash-lite", "   "));
+                Arguments.of("gemini-3.1-flash-lite", "   "),
+                Arguments.of("\u2003", "Prompt snapshot"),
+                Arguments.of("gemini-3.1-flash-lite", "\u2003"));
     }
 
     private MessageReceipt receive() {

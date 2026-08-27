@@ -79,8 +79,10 @@ create table model_call_record (
     phase varchar(16) not null check (phase in ('PLAN','FINAL_REPLY')),
     outcome varchar(32) not null check (outcome in (
         'TOOL_CALL','ANSWER_READY','FINAL_REPLY','INVALID_RESPONSE','PROVIDER_FAILURE')),
-    model_name varchar(256) not null check (model_name ~ '[^[:space:]]'),
-    raw_prompt text not null check (raw_prompt ~ '[^[:space:]]'),
+    model_name varchar(256) not null check (
+        length(translate(model_name, U&'\0009\000A\000B\000C\000D\001C\001D\001E\001F\0020\1680\2000\2001\2002\2003\2004\2005\2006\2008\2009\200A\2028\2029\205F\3000', '')) > 0),
+    raw_prompt text not null check (
+        length(translate(raw_prompt, U&'\0009\000A\000B\000C\000D\001C\001D\001E\001F\0020\1680\2000\2001\2002\2003\2004\2005\2006\2008\2009\200A\2028\2029\205F\3000', '')) > 0),
     raw_completion text,
     raw_tool_calls text check (raw_tool_calls is null or raw_tool_calls is json),
     finish_reason varchar(128),
@@ -118,7 +120,9 @@ create table model_call_record (
     ),
     check (
         outcome not in ('ANSWER_READY','FINAL_REPLY')
-        or (raw_completion is not null and raw_completion ~ '[^[:space:]]')
+        or (
+            raw_completion is not null
+            and length(translate(raw_completion, U&'\0009\000A\000B\000C\000D\001C\001D\001E\001F\0020\1680\2000\2001\2002\2003\2004\2005\2006\2008\2009\200A\2028\2029\205F\3000', '')) > 0)
     )
 );
 
