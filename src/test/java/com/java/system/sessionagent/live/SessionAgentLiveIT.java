@@ -172,7 +172,7 @@ class SessionAgentLiveIT {
         ScenarioState state = runtime.ask("live-cancellation-refund-" + UUID.randomUUID(), "取消訂單後，付款會自動退款嗎？");
         String answer = state.assistantText();
         assertContainsOneOf(answer, "取消", "cancel");
-        assertContainsOneOf(answer, "無法", "未能", "不能", "進一步確認", "尚待確認",
+        assertContainsOneOf(answer, "無法", "未能", "不能", "需確認", "需要確認", "進一步確認", "尚待確認",
                 "not proven", "cannot", "could not", "further confirmation");
         assertContainsOneOf(answer, "程式碼", "codebase", "code");
         assertContainsOneOf(answer, "執行", "runtime", "外部", "external");

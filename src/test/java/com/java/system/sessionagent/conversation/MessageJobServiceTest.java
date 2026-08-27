@@ -98,11 +98,20 @@ class MessageJobServiceTest {
     }
 
     @Test
-    void continues_direct_reply_correction_until_the_call_limit() {
+    void continues_planning_after_reply_correction_until_the_call_limit() {
         RecordingStore store = new RecordingStore();
         store.seedSource();
-        ScriptedModel model = new ScriptedModel(store,
-                new AssistantReply("bad", List.of(new ResultId("not-a-result"))), new ModelDecision.AnswerReady());
+        List<Integer> planOrdinals = new java.util.ArrayList<>();
+        List<Integer> replyOrdinals = new java.util.ArrayList<>();
+        ConversationModel model = model(
+                (request, usageObserver) -> {
+                    planOrdinals.add(request.callContext().ordinal());
+                    return new ModelDecision.AnswerReady();
+                },
+                (request, usageObserver) -> {
+                    replyOrdinals.add(request.callContext().ordinal());
+                    return new AssistantReply("bad", List.of(new ResultId("not-a-result")));
+                });
         DirectToolRegistry registry = new DirectToolRegistry(List.of(
                 registration("list_repositories", ToolKind.CATALOG, Optional.empty(), Optional.empty(), "{\"repositories\":[]}")));
         MessageJobService service = new MessageJobService(store, model, registry,
@@ -112,8 +121,9 @@ class MessageJobServiceTest {
 
         assertThat(store.feedbackCodes).containsExactly(
                 "INVALID_CITATION", "INVALID_CITATION", "INVALID_CITATION", "INVALID_CITATION", "INVALID_CITATION",
-                "INVALID_CITATION", "INVALID_CITATION", "INVALID_CITATION", "INVALID_CITATION", "INVALID_CITATION",
                 "CALL_LIMIT_REACHED");
+        assertThat(planOrdinals).containsExactly(1, 3, 5, 7, 9, 11);
+        assertThat(replyOrdinals).containsExactly(2, 4, 6, 8, 10, 12);
         assertThat(store.calls).isEqualTo(12);
         assertThat(store.assistantReply).isNull(); // cs-allow terminal feedback means no assistant message
     }
@@ -136,18 +146,26 @@ class MessageJobServiceTest {
                 });
         MessageJobService service = new MessageJobService(store, model, new DirectToolRegistry(List.of()),
                 Clock.fixed(Instant.parse("2026-08-16T00:00:00Z"), ZoneOffset.UTC));
+        ListAppender<ILoggingEvent> appender = attachAppender(MessageJobService.class);
 
-        service.process(store.claim, () -> true);
+        try {
+            service.process(store.claim, () -> true);
 
-        assertThat(planOrdinals).containsExactly(1);
-        assertThat(replyOrdinals).containsExactly(2);
-        assertThat(store.calls).isEqualTo(2);
-        assertThat(store.scheduledAt).contains(store.claim.claimedAt().plusSeconds(1));
-        assertThat(store.feedbackMessages).isEmpty();
+            assertThat(planOrdinals).containsExactly(1);
+            assertThat(replyOrdinals).containsExactly(2);
+            assertThat(store.calls).isEqualTo(2);
+            assertThat(store.scheduledAt).contains(store.claim.claimedAt().plusSeconds(1));
+            assertThat(store.feedbackMessages).isEmpty();
+            assertThat(appender.list).extracting(ILoggingEvent::getFormattedMessage)
+                    .contains("model_call_failed sessionId=session-1 messageJobId=job-1 ordinal=2 "
+                            + "phase=FINAL_REPLY closedFailureKind=TRANSIENT");
+        } finally {
+            detachAppender(MessageJobService.class, appender);
+        }
     }
 
     @Test
-    void corrects_an_early_invalid_citation_with_another_direct_reply() {
+    void returns_to_planning_after_an_early_invalid_citation() {
         RecordingStore store = new RecordingStore();
         store.seedSource();
         List<Integer> planOrdinals = new java.util.ArrayList<>();
@@ -171,15 +189,19 @@ class MessageJobServiceTest {
         try {
             service.process(store.claim, () -> true);
 
-            assertThat(planOrdinals).containsExactly(1);
-            assertThat(replyOrdinals).containsExactly(2, 3);
-            assertThat(store.calls).isEqualTo(3);
+            assertThat(planOrdinals).containsExactly(1, 3);
+            assertThat(replyOrdinals).containsExactly(2, 4);
+            assertThat(store.calls).isEqualTo(4);
             assertThat(store.feedbackMessages).singleElement().satisfies(feedback -> {
                 assertThat(feedback.code()).isEqualTo("INVALID_CITATION");
                 assertThat(feedback.terminal()).isFalse();
             });
             assertThat(store.assistantReply).isEqualTo(new AssistantReply("answer", List.of(new ResultId("source-result"))));
             assertThat(appender.list).extracting(ILoggingEvent::getFormattedMessage)
+                    .contains("model_call_decision sessionId=session-1 messageJobId=job-1 ordinal=2 "
+                                    + "phase=FINAL_REPLY decisionCategory=ASSISTANT_REPLY",
+                            "model_call_decision sessionId=session-1 messageJobId=job-1 ordinal=4 "
+                                    + "phase=FINAL_REPLY decisionCategory=ASSISTANT_REPLY")
                     .contains("assistant_citation_rejected sessionId=session-1 messageJobId=job-1 phase=FINAL_REPLY "
                             + "reason=RESULT_NOT_FOUND citationCount=1");
         } finally {
@@ -599,7 +621,7 @@ class MessageJobServiceTest {
             assertThat(appender.list).extracting(ILoggingEvent::getMessage)
                     .contains("model_call_started sessionId={} messageJobId={} ordinal={} phase={} historyCount={} visibleToolCount={}",
                             "model_call_usage sessionId={} messageJobId={} ordinal={} usageAvailable={} promptTokens={} completionTokens={} totalTokens={}",
-                            "model_call_decision sessionId={} messageJobId={} ordinal={} decisionCategory={}");
+                            "model_call_decision sessionId={} messageJobId={} ordinal={} phase={} decisionCategory={}");
             assertThat(logTemplatesAndArguments(appender)).doesNotContain("runtime-secret", "apiKey", "{\"apiKey\"");
         } finally {
             detachAppender(MessageJobService.class, appender);

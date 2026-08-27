@@ -98,9 +98,11 @@ public final class MessageJobService implements MessageJobPort {
             ModelCallContext callContext = new ModelCallContext(claim.sessionId(), claim.messageJobId(), reservation.ordinal());
             boolean finalCall = reservation.ordinal() == MAX_MODEL_CALLS;
             if (finalReplyRequested || finalCall) {
-                if (!processFinalReply(claim, workGuard, history, callContext, finalCall)) {
+                boolean keepRunning = processFinalReply(claim, workGuard, history, callContext, finalCall);
+                if (!keepRunning) {
                     return;
                 }
+                finalReplyRequested = false;
                 continue;
             }
             ToolSnapshot snapshot = toolRegistry.snapshot();
@@ -110,11 +112,11 @@ public final class MessageJobService implements MessageJobPort {
                 decision = conversationModel.plan(new ModelRequest(history, snapshot, callContext),
                         usage -> logModelCallUsage(claim, reservation.ordinal(), usage));
             } catch (ModelCallFailure failure) {
-                logModelCallFailed(claim, reservation.ordinal(), failure.kind());
+                logModelCallFailed(claim, reservation.ordinal(), "PLAN", failure.kind());
                 if (!handleFailure(claim, workGuard, ConversationFailurePolicy.model(failure), ToolFeedbackDetails.empty(), "MODEL")) { return; }
                 continue;
             }
-            logModelCallDecision(claim, reservation.ordinal(), decision);
+            logModelCallDecision(claim, reservation.ordinal(), "PLAN", decision);
             if (!workGuard.stillOwned()) { return; }
             if (decision instanceof ModelDecision.UseTool useTool) {
                 if (!executeTool(claim, workGuard, snapshot, useTool)) { return; }
@@ -132,7 +134,7 @@ public final class MessageJobService implements MessageJobPort {
             reply = conversationModel.reply(new ReplyRequest(history, callContext),
                     usage -> logModelCallUsage(claim, callContext.ordinal(), usage));
         } catch (ModelCallFailure failure) {
-            logModelCallFailed(claim, callContext.ordinal(), failure.kind());
+            logModelCallFailed(claim, callContext.ordinal(), "FINAL_REPLY", failure.kind());
             if (finalCall && failure.kind() == ModelCallFailure.Kind.TRANSIENT) {
                 appendFeedback(claim, workGuard, FeedbackCode.DEPENDENCY_UNAVAILABLE, true, ToolFeedbackDetails.empty());
                 return false;
@@ -143,7 +145,7 @@ public final class MessageJobService implements MessageJobPort {
             }
             return handleFailure(claim, workGuard, ConversationFailurePolicy.model(failure), ToolFeedbackDetails.empty(), "MODEL");
         }
-        logModelCallDecision(claim, callContext.ordinal(), "ASSISTANT_REPLY");
+        logModelCallDecision(claim, callContext.ordinal(), "FINAL_REPLY", "ASSISTANT_REPLY");
         if (!workGuard.stillOwned()) {
             return false;
         }
@@ -356,19 +358,19 @@ public final class MessageJobService implements MessageJobPort {
                 usage.completionTokens(), usage.totalTokens());
     }
 
-    private static void logModelCallDecision(MessageWorkClaim claim, int ordinal, ModelDecision decision) {
+    private static void logModelCallDecision(MessageWorkClaim claim, int ordinal, String phase, ModelDecision decision) {
         String category = decision instanceof ModelDecision.UseTool ? "USE_TOOL" : "ANSWER_READY";
-        logModelCallDecision(claim, ordinal, category);
+        logModelCallDecision(claim, ordinal, phase, category);
     }
 
-    private static void logModelCallDecision(MessageWorkClaim claim, int ordinal, String category) {
-        LOGGER.info("model_call_decision sessionId={} messageJobId={} ordinal={} decisionCategory={}",
-                claim.sessionId().value(), claim.messageJobId().value(), ordinal, category);
+    private static void logModelCallDecision(MessageWorkClaim claim, int ordinal, String phase, String category) {
+        LOGGER.info("model_call_decision sessionId={} messageJobId={} ordinal={} phase={} decisionCategory={}",
+                claim.sessionId().value(), claim.messageJobId().value(), ordinal, phase, category);
     }
 
-    private static void logModelCallFailed(MessageWorkClaim claim, int ordinal, ModelCallFailure.Kind kind) {
-        LOGGER.info("model_call_failed sessionId={} messageJobId={} ordinal={} closedFailureKind={}",
-                claim.sessionId().value(), claim.messageJobId().value(), ordinal, kind);
+    private static void logModelCallFailed(MessageWorkClaim claim, int ordinal, String phase, ModelCallFailure.Kind kind) {
+        LOGGER.info("model_call_failed sessionId={} messageJobId={} ordinal={} phase={} closedFailureKind={}",
+                claim.sessionId().value(), claim.messageJobId().value(), ordinal, phase, kind);
     }
 
     private static void logCitationRejected(MessageWorkClaim claim, CitationValidator.CorrectionReason reason,
