@@ -230,6 +230,35 @@ class GoogleConversationModelTest {
     }
 
     @Test
+    void rejects_a_json_final_reply_with_a_tool_call_without_repeating_the_provider_call() {
+        AssistantMessage finalReplyWithToolCall = AssistantMessage.builder()
+                .content("{\"citations\":[{\"value\":\"result-1\"}],\"message\":\"Answer\"}")
+                .toolCalls(List.of(new AssistantMessage.ToolCall("call-1", "function", "catalog", "{}")))
+                .build();
+        RecordingChatModel chatModel = new RecordingChatModel(response(finalReplyWithToolCall));
+        GoogleConversationModel model = new GoogleConversationModel(chatModel, new PromptResource());
+
+        assertThatThrownBy(() -> model.reply(replyRequest(), usage -> { }))
+                .isInstanceOf(ModelCallFailure.class)
+                .extracting(exception -> ((ModelCallFailure) exception).kind())
+                .isEqualTo(ModelCallFailure.Kind.CORRECTABLE);
+
+        assertThat(chatModel.callCount).isEqualTo(1);
+    }
+
+    @Test
+    void ignores_an_unknown_top_level_field_when_converting_the_final_reply() {
+        RecordingChatModel chatModel = new RecordingChatModel(response(new AssistantMessage(
+                "{\"citations\":[{\"value\":\"result-1\"}],\"message\":\"Answer\",\"unexpected\":true}")));
+        GoogleConversationModel model = new GoogleConversationModel(chatModel, new PromptResource());
+
+        AssistantReply reply = model.reply(replyRequest(), usage -> { });
+
+        assertThat(reply).isEqualTo(new AssistantReply("Answer", List.of(new ResultId("result-1"))));
+        assertThat(chatModel.callCount).isEqualTo(1);
+    }
+
+    @Test
     void rejects_invalid_model_output_as_correctable() {
         List<ChatResponse> invalidResponses = List.of(
                 response(toolResponse("call-1", "catalog", "{}"), toolResponse("call-2", "catalog", "{}")),

@@ -154,10 +154,12 @@ public final class GoogleConversationModel implements com.java.system.sessionage
         List<Message> messages = replyMessagesFor(request);
         LOGGER.info("google_model_request phase=FINAL_REPLY messageCount={} callbackCount={}", messages.size(), 0);
         SpringAiCallCapture callCapture = new SpringAiCallCapture();
-        ResponseEntity<ChatResponse, AssistantReply> responseEntity;
+        ChatResponse response;
         AssistantReply reply;
         try {
-            responseEntity = replyCall(messages, callCapture);
+            ResponseEntity<ChatResponse, AssistantReply> responseEntity = replyCall(messages, callCapture);
+            response = Objects.requireNonNull(responseEntity.response(), "Spring AI final reply response must not be null");
+            validateFinalReplyShape(response);
             reply = Objects.requireNonNull(responseEntity.entity(), "Spring AI final reply entity must not be null");
         } catch (RuntimeException exception) {
             ModelCallFailure failure = callCapture.providerFailure()
@@ -167,7 +169,6 @@ public final class GoogleConversationModel implements com.java.system.sessionage
             telemetry.model("FAILURE", Optional.of(failure.kind().name()), new ModelUsage(0, 0, 0, false));
             throw failure;
         }
-        ChatResponse response = Objects.requireNonNull(responseEntity.response(), "Spring AI final reply response must not be null");
         logResponseShape(response);
         ModelUsage modelUsage = usage(response);
         LOGGER.info("google_model_response phase=FINAL_REPLY resultCategory={} resultCount={} usageAvailable={}", resultCategory(response),
@@ -269,6 +270,20 @@ public final class GoogleConversationModel implements com.java.system.sessionage
             throw ModelCallFailure.correctable();
         }
         return new ModelDecision.AnswerReady();
+    }
+
+    private static void validateFinalReplyShape(ChatResponse response) {
+        List<Generation> actionableResults = response.getResults().stream()
+                .filter(result -> !isThought(result))
+                .toList();
+        if (actionableResults.size() != 1) {
+            throw ModelCallFailure.correctable();
+        }
+        AssistantMessage message = Optional.ofNullable(actionableResults.getFirst().getOutput())
+                .orElseThrow(ModelCallFailure::correctable);
+        if (message.hasToolCalls() || !StringUtils.hasText(message.getText())) {
+            throw ModelCallFailure.correctable();
+        }
     }
 
     private static boolean isThought(Generation generation) {
