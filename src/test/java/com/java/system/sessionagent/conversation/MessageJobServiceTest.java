@@ -68,7 +68,7 @@ class MessageJobServiceTest {
         assertThat(model.snapshots).containsExactly(List.of("list_repositories", "source"), List.of("list_repositories", "source"), List.of("list_repositories", "source"));
         assertThat(store.toolMessages).hasSize(2);
         assertThat(store.toolMessages.get(1).arguments()).isEqualTo("{\"repositoryId\":\"payment-service\"}");
-        assertThat(store.assistantReply).isEqualTo("Answer");
+        assertThat(store.storedReplyText).isEqualTo("Answer");
     }
 
     @Test
@@ -91,7 +91,7 @@ class MessageJobServiceTest {
 
         assertThat(store.feedbackCodes).containsExactly("INVALID_TOOL_INPUT");
         assertThat(store.toolMessages).hasSize(2);
-        assertThat(store.assistantReply).isEqualTo("Answer");
+        assertThat(store.storedReplyText).isEqualTo("Answer");
         verify(telemetry).tool("not-issued", "INVALID_INPUT", Optional.empty(), Optional.empty());
         verify(telemetry).feedback("INVALID_TOOL_INPUT");
     }
@@ -122,7 +122,7 @@ class MessageJobServiceTest {
         assertThat(planOrdinals).containsExactly(1);
         assertThat(replyOrdinals).containsExactly(2);
         assertThat(store.calls).isEqualTo(2);
-        assertThat(store.assistantReply).isEqualTo("bad");
+        assertThat(store.storedReplyText).isEqualTo("bad");
     }
 
     @Test
@@ -187,7 +187,7 @@ class MessageJobServiceTest {
             assertThat(replyOrdinals).containsExactly(2);
             assertThat(store.calls).isEqualTo(2);
             assertThat(store.feedbackMessages).isEmpty();
-            assertThat(store.assistantReply).isEqualTo("bad");
+            assertThat(store.storedReplyText).isEqualTo("bad");
             assertThat(appender.list).extracting(ILoggingEvent::getFormattedMessage)
                     .contains("model_call_decision sessionId=session-1 messageJobId=job-1 ordinal=2 "
                                     + "phase=FINAL_REPLY decisionCategory=ASSISTANT_TEXT");
@@ -297,7 +297,7 @@ class MessageJobServiceTest {
 
             assertThat(store.feedbackCodes).isEmpty();
             assertThat(store.feedbackMessages).isEmpty();
-            assertThat(store.assistantReply).isEqualTo("bad");
+            assertThat(store.storedReplyText).isEqualTo("bad");
             assertThat(appender.list).extracting(ILoggingEvent::getFormattedMessage)
                     .contains("model_call_decision sessionId=session-1 messageJobId=job-1 ordinal=12 "
                             + "phase=FINAL_REPLY decisionCategory=ASSISTANT_TEXT");
@@ -322,7 +322,7 @@ class MessageJobServiceTest {
         service.process(store.claim, () -> true);
 
         assertThat(store.feedbackCodes).isEmpty();
-        assertThat(store.assistantReply).isEqualTo("answer");
+        assertThat(store.storedReplyText).isEqualTo("answer");
         assertThat(store.scheduledAt).isEmpty();
         assertThat(store.calls).isEqualTo(12);
     }
@@ -733,7 +733,7 @@ class MessageJobServiceTest {
         private final List<com.java.system.sessionagent.conversation.domain.ToolMessage> toolMessages = new java.util.ArrayList<>();
         private final List<String> feedbackCodes = new java.util.ArrayList<>();
         private final List<FeedbackMessage> feedbackMessages = new java.util.ArrayList<>();
-        private String assistantReply;
+        private String storedReplyText;
         private int calls;
         private Optional<MessageJobProjection> job = Optional.empty();
         private Optional<Instant> scheduledAt = Optional.empty();
@@ -756,7 +756,7 @@ class MessageJobServiceTest {
             toolMessages.add(new com.java.system.sessionagent.conversation.domain.ToolMessage(claim.sessionId(), new SessionSequence(1), Optional.of(claim.messageJobId()), claim.claimedAt(), MessageRole.TOOL,
                     new ResultId("source-result"), "source-call", MODEL_CONTEXT, "source", "v1", "{\"repositoryId\":\"payment-service\"}", Optional.of("payment-service"), Optional.of("rev-a"), "{\"resultId\":\"source-result\",\"toolName\":\"source\",\"repositoryId\":\"payment-service\",\"revision\":\"rev-a\",\"data\":{}}"));
         }
-        @Override public com.java.system.sessionagent.conversation.domain.AssistantMessage appendAssistant(MessageWorkClaim ignored, String reply, Instant now) { assistantReply = reply; return new com.java.system.sessionagent.conversation.domain.AssistantMessage(claim.sessionId(), new SessionSequence(3), Optional.of(claim.messageJobId()), now, MessageRole.ASSISTANT, reply); }
+        @Override public com.java.system.sessionagent.conversation.domain.AssistantMessage appendAssistant(MessageWorkClaim ignored, String reply, Instant now) { storedReplyText = reply; return new com.java.system.sessionagent.conversation.domain.AssistantMessage(claim.sessionId(), new SessionSequence(3), Optional.of(claim.messageJobId()), now, MessageRole.ASSISTANT, reply); }
         @Override public Optional<ResultProjection> readResult(ResultId resultId) { return toolMessages.stream().filter(message -> message.resultId().equals(resultId)).findFirst().map(message -> new ResultProjection(message.resultId(), message.sessionId(), message.toolName(), message.toolVersion(), message.arguments(), message.repositoryId(), message.revision(), message.resultJson())); }
         @Override public com.java.system.sessionagent.conversation.domain.MessageReceipt receive(com.java.system.sessionagent.conversation.domain.IncomingMessage message) { throw new UnsupportedOperationException(); }
         @Override public Optional<MessageWorkClaim> claimNext(String workerId, java.time.Duration leaseDuration) { throw new UnsupportedOperationException(); }
