@@ -79,12 +79,14 @@ class ConversationAcceptanceTest {
             AssistantMessage reply = runtime.reply(receipt);
             List<ToolMessage> toolHistory = runtime.store.toolMessages(receipt.messageJobId());
             assertThat(reply.message()).contains("No BNPL behavior was found", "codebase");
-            assertThat(toolHistory).anySatisfy(message -> {
-                assertThat(message.toolName()).isEqualTo("codebase_lookup_api_route");
-                assertThat(message.repositoryId()).contains("payment-service");
-                assertThat(message.revision()).contains("payment-revision-1");
-                assertThat(message.resultJson()).contains("\"candidates\":[]", "NOT_FOUND");
-            });
+            ToolMessage completeEmptySearch = toolHistory.stream()
+                    .filter(message -> message.toolName().equals("codebase_search_code_facts"))
+                    .findFirst()
+                    .orElseThrow();
+            assertThat(completeEmptySearch.repositoryId()).contains("payment-service");
+            assertThat(completeEmptySearch.revision()).contains("payment-revision-1");
+            assertThat(completeEmptySearch.resultJson()).contains(
+                    "\"totalCount\":0", "\"hasMore\":false", "\"coverage\":{\"issues\":[]}");
         }
     }
 

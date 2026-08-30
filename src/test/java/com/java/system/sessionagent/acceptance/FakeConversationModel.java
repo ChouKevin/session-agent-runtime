@@ -20,6 +20,7 @@ final class FakeConversationModel implements ConversationModel {
     private static final ToolName LIST_REPOSITORIES = new ToolName("list_repositories");
     private static final ToolName LIST_ENTRY_POINTS = new ToolName("codebase_list_entry_points");
     private static final ToolName LOOKUP_API_ROUTE = new ToolName("codebase_lookup_api_route");
+    private static final ToolName SEARCH_CODE_FACTS = new ToolName("codebase_search_code_facts");
     private final List<ModelRequest> planRequests = new ArrayList<>();
     private final List<ReplyRequest> replyRequests = new ArrayList<>();
 
@@ -63,6 +64,11 @@ final class FakeConversationModel implements ConversationModel {
                 .noneMatch(message -> message.toolName().equals(LOOKUP_API_ROUTE.value()))) {
             return tool("bnpl-route-" + question.sequence().value(), LOOKUP_API_ROUTE,
                     "{\"repositoryId\":\"payment-service\",\"revision\":\"payment-revision-1\",\"path\":\"/bnpl\",\"httpMethod\":\"GET\"}");
+        }
+        if (text.contains("bnpl") && jobHistory.stream().filter(ToolMessage.class::isInstance).map(ToolMessage.class::cast)
+                .noneMatch(message -> message.toolName().equals(SEARCH_CODE_FACTS.value()))) {
+            return tool("bnpl-search-" + question.sequence().value(), SEARCH_CODE_FACTS,
+                    "{\"repositoryId\":\"payment-service\",\"revision\":\"payment-revision-1\",\"query\":\"BNPL\"}");
         }
         if (text.contains("cancellation") && jobHistory.stream().filter(ToolMessage.class::isInstance).map(ToolMessage.class::cast)
                 .noneMatch(message -> message.repositoryId().filter("order-service"::equals).isPresent())) {

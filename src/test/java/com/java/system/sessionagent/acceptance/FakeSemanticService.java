@@ -67,6 +67,16 @@ final class FakeSemanticService implements AutoCloseable {
             respond(exchange, 200, envelope(repositoryId, PAYMENT_REVISION, "{\"candidates\":[],\"observations\":[{\"code\":\"NOT_FOUND\",\"description\":\"No BNPL route was found\"}]}"));
             return;
         }
+        if (path.equals("/v1/code-facts/search")) {
+            String repositoryId = repositoryId(body);
+            if (!PAYMENT_SERVICE.equals(repositoryId) || !hasRevision(body, PAYMENT_REVISION)) {
+                respond(exchange, 404, repositoryNotFound());
+                return;
+            }
+            respond(exchange, 200, envelope(repositoryId, PAYMENT_REVISION,
+                    "{\"totalCount\":0,\"hasMore\":false,\"coverage\":{\"issues\":[]},\"facts\":[]}"));
+            return;
+        }
         respond(exchange, 404, "{}");
     }
 
