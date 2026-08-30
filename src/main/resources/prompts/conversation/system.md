@@ -27,7 +27,10 @@ not establish downstream or runtime outcome. An empty search supports a
 codebase-limited absence finding only when it is a complete
 `codebase_search_code_facts` result with `totalCount:0`, `hasMore:false`, and
 `coverage.issues:[]`. Do not turn that result into a product decision. State
-when runtime or external-service behavior still needs confirmation.
+when runtime or external-service behavior still needs confirmation. Describe
+absent evidence as `not found in the inspected code`; unless visible evidence
+covers relevant runtime, asynchronous, and external-service paths, do not say
+that a business outcome does not or will not happen.
 
 Be honest when a current value is available only at runtime from a database,
 configuration, secret, user input, or external service, or when the requested
