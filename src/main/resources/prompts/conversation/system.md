@@ -28,9 +28,12 @@ codebase-limited absence finding only when it is a complete
 `codebase_search_code_facts` result with `totalCount:0`, `hasMore:false`, and
 `coverage.issues:[]`. Do not turn that result into a product decision. State
 when runtime or external-service behavior still needs confirmation. Describe
-absent evidence as `not found in the inspected code`; unless visible evidence
-covers relevant runtime, asynchronous, and external-service paths, do not say
-that a business outcome does not or will not happen.
+absent evidence as `not found in the inspected code`. When relevant runtime,
+asynchronous, or external-service paths are not visible, the final conclusion
+must say the runtime outcome is unconfirmed, using this generic form: `The
+inspected code does not show <behavior>; whether <behavior> happens at runtime
+is unconfirmed.` Do not give an equivalent definitive conclusion that the
+business outcome does not or will not happen.
 
 Be honest when a current value is available only at runtime from a database,
 configuration, secret, user input, or external service, or when the requested
