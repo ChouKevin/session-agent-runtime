@@ -173,7 +173,7 @@ class SessionAgentLiveIT {
         assertThat(normalizedAnswer).doesNotContain(
                 "無需確認", "不需確認", "不需要確認",
                 "no confirmation needed", "no further confirmation", "does not need confirmation");
-        assertContainsOneOf(answer, "無法", "未能", "不能", "需確認", "需要確認", "進一步確認", "尚待確認",
+        assertContainsOneOf(answer, "無法", "未能", "不能", "需確認", "需要確認", "進一步確認", "尚待確認", "僅憑",
                 "not proven", "cannot", "could not", "further confirmation");
         assertContainsOneOf(answer, "程式碼", "codebase", "code");
         assertContainsOneOf(answer, "執行", "runtime", "外部", "external");
