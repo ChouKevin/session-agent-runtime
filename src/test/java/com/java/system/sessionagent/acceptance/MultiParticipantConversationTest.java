@@ -2,6 +2,7 @@ package com.java.system.sessionagent.acceptance;
 
 import com.java.system.sessionagent.conversation.domain.MessageReceipt;
 import com.java.system.sessionagent.conversation.domain.ModelRequest;
+import com.java.system.sessionagent.conversation.domain.ToolMessage;
 import com.java.system.sessionagent.conversation.domain.UserMessage;
 import org.junit.jupiter.api.Test;
 
@@ -24,6 +25,9 @@ class MultiParticipantConversationTest {
             assertThat(users).extracting(UserMessage::message).containsExactly("Which payment methods are supported?");
             assertThat(runtime.history(bob.sessionId())).noneMatch(message -> message instanceof com.java.system.sessionagent.conversation.domain.FeedbackMessage feedback
                     && feedback.code().equals("WAITING_FOR_USER"));
+            ToolMessage source = runtime.latestSourceTool(bob);
+            assertThat(source.repositoryId()).contains("payment-service");
+            assertThat(source.resultId()).isNotNull();
             assertThat(runtime.reply(bob).message()).isNotBlank();
         }
     }

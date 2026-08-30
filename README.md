@@ -1,26 +1,26 @@
 # Standalone Session Agent Runtime
 
-Session Agent Runtime owns the conversation, model/tool loop, feedback, citations, and PostgreSQL history. It is built and deployed independently from Semantic.
+Session Agent Runtime owns the conversation, model/tool loop, feedback, and PostgreSQL history. It is built and deployed independently from Semantic.
 
 Semantic owns repository discovery, exact Git revisions, code analysis, and Mongo index data. Session Runtime does not clone or mount Git repositories, start JDT/JDT LS, contain business fixture source, or read Semantic MongoDB directly. It calls only the Semantic Query API.
 
 ## Repository and revision selection
 
-All Semantic tools are visible to the model from its first response. When history does not already contain a reliable repository pair, the model can call `list_repositories`. The catalog is reference data and is not citeable. The model copies an exact `repositoryId` and its paired `revision` into later source tools; Runtime receives and forwards both values without selecting a repository or replacing identifiers.
+All Semantic tools are visible to the model from its first response. When history does not already contain a reliable repository pair, the model can call `list_repositories`. The catalog is reference data and does not include a repository/revision pair. The model copies an exact `repositoryId` and its paired `revision` into later source tools; Runtime receives and forwards both values without selecting a repository or replacing identifiers.
 
 Semantic validates the pair. If a source tool returns `REVISION_OUTDATED`, Runtime appends non-terminal feedback containing the rejected arguments, requested revision, current revision, and retry guidance. Runtime does not retry the call. The model reads that feedback and decides whether to call the useful tool again with `currentRevision`. The same persisted session history remains intact; earlier messages and results are not rewritten.
 
-## Results and citations
+## Results and replies
 
-Successful source results store their exact `resultId`, tool name/version, canonical arguments, `repositoryId`, revision, result JSON, and citeable flag. Repository catalogs and failed tool calls are not citeable.
+Every successful tool execution stores a `resultId`, tool identity, canonical arguments, result JSON, and repository/revision when the tool is source-backed. Catalog results omit repository/revision. Tool results remain visible in session history and can be fetched from `/internal/results/{resultId}`.
 
-A final assistant message must cite nonempty, unique `resultId` values that belong to successful citeable results in that session. Runtime validates citation authority but does not infer, add, or replace a citation for the model. A codebase-absence answer must cite the complete empty code search that supports that limited claim; another source result does not replace it.
+`PLAN` calls may use zero or more sequential tools. `FINAL_REPLY` exposes no tools and stores the model's primary assistant content as an opaque string. Runtime does not parse or constrain prose, Markdown, JSON, code, or another textual format requested by the user. Tool history is inspectable execution history; Runtime does not validate whether a stored result supports a later claim.
 
 Runtime keeps code and runtime knowledge separate. When a value can only come from a database, configuration, secret, user input, or external API, the model must report that the current value is unavailable instead of inventing it. An empty code search supports only a codebase-limited conclusion.
 
 ## Model calls
 
-`PLAN` sees the available tools and returns either a tool call or `AnswerReady`. `FINAL_REPLY` hides tools and uses Spring AI structured output with one explicitly reserved call. The twelfth call is the final fallback.
+`PLAN` sees the available tools and returns either a tool call or `AnswerReady`. `FINAL_REPLY` hides tools and makes one explicitly reserved call. The twelfth call is the final fallback.
 
 ## Diagnostics
 
@@ -31,7 +31,7 @@ docker compose exec -T postgres psql -U session_agent -d session_agent \
   -c "select message_job_id, runtime_call_ordinal, provider_attempt, phase, outcome, raw_completion from model_call_record order by started_at;"
 ```
 
-Recreate disposable databases after the `V1` schema change.
+Recreate disposable databases after the current `V1` schema change.
 
 ## Dependencies
 
@@ -50,7 +50,7 @@ GET  /internal/results/{resultId}
 
 `POST /internal/messages` accepts `sessionKey`, `participantId`, `sourceMessageId`, and `message`. Reusing a nonblank `sessionKey` continues the same conversation.
 
-The session-history response exposes sequence/time, role, job/participant IDs, user or assistant text, assistant citation IDs, tool result ID/name/version, repository/revision, citeable flag, and feedback code/terminal/rejected arguments. It does not inline tool result JSON or model-only context. Fetching `/internal/results/{resultId}` is a separate trusted internal operation and returns canonical arguments plus stored result JSON; do not expose these internal endpoints to an untrusted network without a security design.
+The session-history response exposes sequence/time, role, job/participant IDs, user or assistant text, tool result ID/name/version, repository/revision, and feedback code/terminal/rejected arguments. It does not inline tool result JSON or model-only context. Fetching `/internal/results/{resultId}` is a separate trusted internal operation and returns canonical arguments plus stored result JSON; do not expose these internal endpoints to an untrusted network without a security design.
 
 ## Offline checks
 
@@ -78,6 +78,6 @@ SESSION_AGENT_LIVE=true bash live-test.sh
 
 `live-test.sh` creates a unique Compose project, requests an ephemeral loopback port, runs the opt-in HTTP acceptance test, and removes only that project and its disposable PostgreSQL volume. It never starts, stops, resets, or cleans Semantic.
 
-The live report under `target/live-reports/` contains safe metadata only: session/job IDs, configured model, tool order, repository/revision pairs, citation IDs, outcome, and available Spring AI usage. It excludes questions, prompts, raw tool results, HTTP bodies, model context, and credentials.
+The live report under `target/live-reports/` contains safe metadata only: session/job IDs, configured model, tool order, repository/revision pairs, outcome, and available Spring AI usage. It excludes questions, prompts, raw tool results, HTTP bodies, model context, and credentials.
 
 The deployment contract preserves blank `SLACK_APP_TOKEN`, `SLACK_BOT_TOKEN`, and `SLACK_BOT_USER_ID` inputs for a future transport. No Slack integration is implemented.

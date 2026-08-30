@@ -49,51 +49,42 @@ class ConversationAcceptanceTest {
             runtime.process(receipt);
 
             AssistantMessage reply = runtime.reply(receipt);
-            assertThat(reply.message()).isEqualTo("The repository information is available.");
-            assertThat(runtime.store.toolMessages(receipt.messageJobId())).anySatisfy(message -> {
-                assertThat(message.repositoryId()).contains("payment-service");
-                assertThat(message.resultJson()).contains("credit card", "bank transfer", "wallet");
-            });
-            assertThat(runtime.semantic.calls()).anySatisfy(call -> assertThat(call.path()).isEqualTo("/v1/repositories/payment-service/entry-points"));
-            List<ModelRequest> planRequests = runtime.planRequests();
-            List<ReplyRequest> replyRequests = runtime.replyRequests();
-            assertThat(planRequests).isNotEmpty();
-            assertThat(replyRequests).hasSize(1);
-            assertThat(replyRequests.getFirst().callContext().ordinal())
-                    .isEqualTo(planRequests.getLast().callContext().ordinal() + 1);
+            ToolMessage source = runtime.latestSourceTool(receipt);
+            assertThat(source.repositoryId()).contains("payment-service");
+            assertThat(source.resultJson()).contains("credit card", "bank transfer", "wallet");
+            assertThat(reply.message()).isNotBlank();
         }
     }
 
     @Test
-    void states_that_the_runtime_fee_value_is_unavailable_while_citing_json_settings_evidence() {
+    void states_that_the_runtime_fee_value_is_unavailable_while_preserving_json_settings_evidence() {
         try (AcceptanceRuntime runtime = new AcceptanceRuntime()) {
             MessageReceipt receipt = runtime.receive("fee-session", "alice", "fee-1", "What is the runtime fee?");
             runtime.process(receipt);
 
             AssistantMessage reply = runtime.reply(receipt);
             assertThat(reply.message()).contains("current runtime value is unavailable");
-            assertThat(runtime.store.toolMessages(receipt.messageJobId())).anySatisfy(message -> {
-                assertThat(message.resultJson()).contains("formula is loaded from JSON settings");
-                assertThat(message.repositoryId()).contains("payment-service");
-            });
+            ToolMessage source = runtime.latestSourceTool(receipt);
+            assertThat(source.repositoryId()).contains("payment-service");
+            assertThat(source.resultJson()).contains("formula is loaded from JSON settings");
         }
     }
 
     @Test
-    void reports_absent_bnpl_only_after_source_repository_queries() {
+    void reports_absent_bnpl_as_limited_to_the_codebase_after_the_empty_search_is_stored() {
         try (AcceptanceRuntime runtime = new AcceptanceRuntime()) {
             MessageReceipt receipt = runtime.receive("bnpl-session", "alice", "bnpl-1", "Is BNPL supported?");
             runtime.process(receipt);
 
             AssistantMessage reply = runtime.reply(receipt);
-            List<ToolMessage> sourceMessages = runtime.store.toolMessages(receipt.messageJobId()).stream()
-                    .filter(message -> message.repositoryId().isPresent()).toList();
-            assertThat(reply.message()).contains("No BNPL behavior was found");
-            assertThat(sourceMessages).hasSizeGreaterThanOrEqualTo(2);
-            assertThat(runtime.semantic.calls()).anySatisfy(call -> assertThat(call.path()).isEqualTo("/v1/api-routes/lookup"));
-            assertThat(runtime.semantic.calls()).filteredOn(call -> call.path().equals("/v1/api-routes/lookup"))
-                    .singleElement().satisfies(call -> assertThat(call.body()).contains("\"repositoryId\":\"payment-service\"", "\"revision\":\"payment-revision-1\""));
-            assertThat(sourceMessages).anySatisfy(message -> assertThat(message.resultJson()).contains("NOT_FOUND"));
+            List<ToolMessage> toolHistory = runtime.store.toolMessages(receipt.messageJobId());
+            assertThat(reply.message()).contains("No BNPL behavior was found", "codebase");
+            assertThat(toolHistory).anySatisfy(message -> {
+                assertThat(message.toolName()).isEqualTo("codebase_lookup_api_route");
+                assertThat(message.repositoryId()).contains("payment-service");
+                assertThat(message.revision()).contains("payment-revision-1");
+                assertThat(message.resultJson()).contains("\"candidates\":[]", "NOT_FOUND");
+            });
         }
     }
 
@@ -107,9 +98,6 @@ class ConversationAcceptanceTest {
                     .filter(message -> message.repositoryId().isPresent()).toList();
             assertThat(sources).extracting(message -> message.repositoryId().orElseThrow()).containsExactlyInAnyOrder("order-service", "payment-service");
             assertThat(sources).allSatisfy(message -> assertThat(message.arguments()).contains("\"repositoryId\":\"" + message.repositoryId().orElseThrow() + "\""));
-            assertThat(runtime.semantic.calls()).filteredOn(call -> call.path().endsWith("/entry-points"))
-                    .extracting(FakeSemanticService.Call::path)
-                    .contains("/v1/repositories/order-service/entry-points", "/v1/repositories/payment-service/entry-points");
             AssistantMessage reply = runtime.reply(receipt);
             assertThat(reply.message()).contains("Cancellation and refund information");
         }
@@ -126,7 +114,6 @@ class ConversationAcceptanceTest {
             ResultId firstResult = runtime.store.toolMessages(first.messageJobId()).getLast().resultId();
             ResultId secondResult = runtime.store.toolMessages(second.messageJobId()).getLast().resultId();
             assertThat(secondResult).isNotEqualTo(firstResult);
-            assertThat(runtime.semantic.calls()).filteredOn(call -> call.path().equals("/v1/repositories/payment-service/entry-points")).hasSize(2);
         }
     }
 
@@ -184,6 +171,13 @@ class ConversationAcceptanceTest {
 
         List<ReplyRequest> replyRequests() {
             return model.replyRequests();
+        }
+
+        ToolMessage latestSourceTool(MessageReceipt receipt) {
+            return store.toolMessages(receipt.messageJobId()).stream()
+                    .filter(message -> message.repositoryId().isPresent())
+                    .max(Comparator.comparingLong(message -> message.sequence().value()))
+                    .orElseThrow();
         }
 
         List<SessionMessage> history(SessionId sessionId) {

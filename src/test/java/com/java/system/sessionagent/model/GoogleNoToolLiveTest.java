@@ -58,7 +58,7 @@ class GoogleNoToolLiveTest {
     }
 
     @Test
-    void returns_a_cited_reply_from_the_real_two_phase_adapter_flow() {
+    void returns_an_opaque_reply_from_the_real_two_phase_adapter_flow() {
         CountingChatModel countingModel = new CountingChatModel(provider);
         RecordingModelCallRecorder recorder = new RecordingModelCallRecorder();
         GoogleGenAiChatOptions options = (GoogleGenAiChatOptions) provider.getOptions();
@@ -70,7 +70,7 @@ class GoogleNoToolLiveTest {
         Instant createdAt = Instant.parse("2026-08-20T00:00:00Z");
         UserMessage question = new UserMessage(
                 sessionId, new SessionSequence(1), Optional.of(jobId), createdAt, MessageRole.USER, "Alice",
-                "Based only on source-result, what payment methods are supported? Answer directly and cite source-result.");
+                "Based only on the stored source result, what payment methods are supported? Answer directly.");
         ToolMessage source = new ToolMessage(
                 sessionId, new SessionSequence(2), Optional.of(jobId), createdAt.plusSeconds(1), MessageRole.TOOL,
                 new ResultId("source-result"), "source-call", "dGVzdA==", "codebase_list_entry_points", "1",
@@ -102,6 +102,7 @@ class GoogleNoToolLiveTest {
                     assertThat(replyRecord.providerAttempt()).isEqualTo(1);
                     assertThat(replyRecord.phase()).isEqualTo(ModelCallPhase.FINAL_REPLY);
                     assertThat(replyRecord.outcome()).isEqualTo(ModelCallOutcome.FINAL_REPLY);
+                    assertThat(replyRecord.rawCompletion()).contains(reply);
                 });
 
         System.out.printf("GOOGLE_NO_TOOL_LIVE_RESULT=ANSWER_READY_AND_FINAL_REPLY%n");

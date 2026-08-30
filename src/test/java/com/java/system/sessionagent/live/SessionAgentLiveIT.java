@@ -90,10 +90,11 @@ class SessionAgentLiveIT {
         String requestedRevision = catalogRevision(state.previousCatalog().orElseThrow(
                 () -> new AssertionError("session did not retain the earlier repository catalog")), "payment-service");
         ToolResult retry = state.toolResults().stream()
+                .filter(ToolResult::sourceBacked)
                 .filter(tool -> tool.toolName().equals(failedToolName))
                 .filter(tool -> tool.repositoryId().filter(rejectedRepositoryId::equals).isPresent())
                 .filter(tool -> tool.revision().isPresent())
-                .filter(tool -> tool.messageSequence() > feedbackSequence)
+                .filter(tool -> tool.sequence() > feedbackSequence)
                 .findFirst()
                 .orElseThrow(() -> new AssertionError("session did not retry the useful tool"));
         String currentRevision = retry.revision().orElseThrow();
@@ -108,7 +109,8 @@ class SessionAgentLiveIT {
         assertThat(requiredText(rejectedArguments, "revision")).isEqualTo(requestedRevision);
         assertThat(requiredText(retriedArguments, "revision")).isEqualTo(currentRevision);
         assertThat(state.assistantText()).contains("MOBILE_PAYMENT");
-        assertThat(state.toolResults()).anySatisfy(tool -> assertThat(tool.revision()).contains(currentRevision));
+        assertThat(state.toolResults()).filteredOn(ToolResult::sourceBacked)
+                .anySatisfy(tool -> assertThat(tool.revision()).contains(currentRevision));
     }
 
     @Test
@@ -328,11 +330,10 @@ class SessionAgentLiveIT {
                 ToolResult toolResult = readToolResult(sessionId, tool);
                 toolOrder.add(toolResult.toolName());
                 toolResults.add(toolResult);
-                if (toolResult.repositoryId().isPresent()) {
+                if (toolResult.sourceBacked()) {
                     String requiredRepositoryId = toolResult.repositoryId().orElseThrow();
                     JsonNode arguments = parseStructuredJson(toolResult.canonicalArguments());
                     assertThat(requiredText(arguments, "repositoryId")).isEqualTo(requiredRepositoryId);
-                    assertThat(toolResult.revision()).isPresent();
                     String requiredRevision = toolResult.revision().orElseThrow();
                     sourceRepositoryIds.add(requiredRepositoryId);
                     repositories.add(new RepositoryRevision(requiredRepositoryId, requiredRevision));
@@ -450,13 +451,17 @@ class SessionAgentLiveIT {
     }
 
     private record ToolResult(
-            long messageSequence,
+            long sequence,
             String resultId,
             String toolName,
             Optional<String> repositoryId,
             Optional<String> revision,
             String canonicalArguments,
             String resultJson) {
+
+        boolean sourceBacked() {
+            return repositoryId.isPresent() && revision.isPresent();
+        }
     }
 
     private record RepositoryRevision(String repositoryId, String revision) {

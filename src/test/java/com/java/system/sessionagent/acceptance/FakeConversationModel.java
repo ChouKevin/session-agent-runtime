@@ -87,7 +87,7 @@ final class FakeConversationModel implements ConversationModel {
         String text = question.message().toLowerCase(java.util.Locale.ROOT);
         return text.contains("fee")
                 ? "The source shows a JSON-configured formula, but the current runtime value is unavailable."
-                : text.contains("bnpl") ? "No BNPL behavior was found in the typed repository queries."
+                : text.contains("bnpl") ? "No BNPL behavior was found in the inspected codebase."
                 : text.contains("cancellation") ? "Cancellation and refund information was inspected across both repositories."
                 : "The repository information is available.";
     }
