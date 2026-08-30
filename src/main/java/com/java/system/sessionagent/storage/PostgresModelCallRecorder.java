@@ -23,7 +23,7 @@ public final class PostgresModelCallRecorder implements ModelCallRecorder {
             insert into model_call_record(
                 diagnostic_id, session_id, message_job_id, runtime_call_ordinal, provider_attempt,
                 phase, outcome, model_name, raw_prompt, raw_completion, raw_tool_calls,
-                finish_reason, decode_error, provider_error,
+                finish_reason, response_error, provider_error,
                 prompt_tokens, completion_tokens, total_tokens, started_at, completed_at)
             values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """;
@@ -50,7 +50,7 @@ public final class PostgresModelCallRecorder implements ModelCallRecorder {
             setOptionalString(statement, 10, requiredRecord.rawCompletion());
             setOptionalString(statement, 11, requiredRecord.rawToolCalls());
             setOptionalString(statement, 12, requiredRecord.finishReason());
-            setOptionalString(statement, 13, requiredRecord.decodeError());
+            setOptionalString(statement, 13, requiredRecord.responseError());
             setOptionalString(statement, 14, requiredRecord.providerError());
             setUsage(statement, requiredRecord.usage());
             statement.setObject(18, timestamp(requiredRecord.startedAt()));

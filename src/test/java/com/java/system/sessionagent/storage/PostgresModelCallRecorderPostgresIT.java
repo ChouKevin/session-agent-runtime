@@ -87,8 +87,22 @@ class PostgresModelCallRecorderPostgresIT {
         assertThat(row.get("raw_completion")).isEqualTo("Ready to answer.");
         assertThat(row).containsEntry("raw_tool_calls", null);
         assertThat(row.get("finish_reason")).isEqualTo("STOP");
-        assertThat(row).containsEntry("decode_error", null);
+        assertThat(row).containsEntry("response_error", null);
         assertThat(row).containsEntry("provider_error", null);
+        Integer oldColumns = jdbcTemplate.queryForObject("""
+                select count(*) from information_schema.columns
+                where table_schema = 'public'
+                  and table_name = 'model_call_record'
+                  and column_name = 'decode_error'
+                """, Integer.class);
+        Integer newColumns = jdbcTemplate.queryForObject("""
+                select count(*) from information_schema.columns
+                where table_schema = 'public'
+                  and table_name = 'model_call_record'
+                  and column_name = 'response_error'
+                """, Integer.class);
+        assertThat(oldColumns).isZero();
+        assertThat(newColumns).isEqualTo(1);
         assertThat(row.get("prompt_tokens")).isEqualTo(7L);
         assertThat(row.get("completion_tokens")).isEqualTo(3L);
         assertThat(row.get("total_tokens")).isEqualTo(10L);
@@ -154,13 +168,13 @@ class PostgresModelCallRecorderPostgresIT {
             ModelCallOutcome outcome,
             Optional<String> rawCompletion,
             Optional<String> rawToolCalls,
-            Optional<String> decodeError) {
+            Optional<String> responseError) {
         MessageReceipt receipt = receive();
         ModelCallRecord validRecord = completeRecord(receipt);
 
         assertThatThrownBy(() -> insertRaw(
                 validRecord, validRecord.modelName(), validRecord.rawPrompt(), phase, outcome,
-                rawCompletion, rawToolCalls, decodeError, Optional.empty()))
+                rawCompletion, rawToolCalls, responseError, Optional.empty()))
                 .isInstanceOf(DataIntegrityViolationException.class);
     }
 
@@ -230,13 +244,13 @@ class PostgresModelCallRecorderPostgresIT {
             ModelCallOutcome outcome,
             Optional<String> rawCompletion,
             Optional<String> rawToolCalls,
-            Optional<String> decodeError,
+            Optional<String> responseError,
             Optional<String> providerError) {
         jdbcTemplate.execute("""
                 insert into model_call_record(
                     diagnostic_id, session_id, message_job_id, runtime_call_ordinal, provider_attempt,
                     phase, outcome, model_name, raw_prompt, raw_completion, raw_tool_calls,
-                    finish_reason, decode_error, provider_error,
+                    finish_reason, response_error, provider_error,
                     prompt_tokens, completion_tokens, total_tokens, started_at, completed_at)
                 values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (PreparedStatementCallback<Void>) statement -> {
@@ -252,7 +266,7 @@ class PostgresModelCallRecorderPostgresIT {
             setOptionalString(statement, 10, rawCompletion);
             setOptionalString(statement, 11, rawToolCalls);
             setOptionalString(statement, 12, record.finishReason());
-            setOptionalString(statement, 13, decodeError);
+            setOptionalString(statement, 13, responseError);
             setOptionalString(statement, 14, providerError);
             statement.setLong(15, record.usage().promptTokens());
             statement.setLong(16, record.usage().completionTokens());

@@ -230,11 +230,11 @@ class ConversationDomainTest {
             ModelCallOutcome outcome,
             Optional<String> rawCompletion,
             Optional<String> rawToolCalls,
-            Optional<String> decodeError,
+            Optional<String> responseError,
             Optional<String> providerError) {
         assertThatIllegalArgumentException().isThrownBy(() -> new ModelCallRecord(
                 UUID.randomUUID(), SESSION_ID, JOB_ID, 1, 1, phase, outcome, "model", "prompt",
-                rawCompletion, rawToolCalls, Optional.empty(), decodeError, providerError,
+                rawCompletion, rawToolCalls, Optional.empty(), responseError, providerError,
                 new com.java.system.sessionagent.conversation.domain.ModelUsage(1, 1, 2, true), CREATED_AT, CREATED_AT));
     }
 

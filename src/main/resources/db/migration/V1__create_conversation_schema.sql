@@ -86,7 +86,7 @@ create table model_call_record (
     raw_completion text,
     raw_tool_calls text check (raw_tool_calls is null or raw_tool_calls is json),
     finish_reason varchar(128),
-    decode_error text,
+    response_error text,
     provider_error text,
     prompt_tokens bigint check (prompt_tokens >= 0),
     completion_tokens bigint check (completion_tokens >= 0),
@@ -109,7 +109,7 @@ create table model_call_record (
             'FINAL_REPLY','INVALID_RESPONSE','PROVIDER_FAILURE'))
     ),
     check ((outcome = 'PROVIDER_FAILURE') = (provider_error is not null)),
-    check ((outcome = 'INVALID_RESPONSE') = (decode_error is not null)),
+    check ((outcome = 'INVALID_RESPONSE') = (response_error is not null)),
     check (
         outcome <> 'TOOL_CALL'
         or (raw_tool_calls is not null and raw_completion is null)

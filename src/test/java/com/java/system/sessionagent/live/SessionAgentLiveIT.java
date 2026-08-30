@@ -300,7 +300,7 @@ class SessionAgentLiveIT {
                 assertThat(message.has("rawPrompt")).isFalse();
                 assertThat(message.has("rawCompletion")).isFalse();
                 assertThat(message.has("providerError")).isFalse();
-                assertThat(message.has("decodeError")).isFalse();
+                assertThat(message.has("responseError")).isFalse();
                 switch (role) {
                     case "USER", "TOOL", "FEEDBACK", "ASSISTANT" -> {
                     }

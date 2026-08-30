@@ -21,7 +21,7 @@ public record ModelCallRecord(
         Optional<String> rawCompletion,
         Optional<String> rawToolCalls,
         Optional<String> finishReason,
-        Optional<String> decodeError,
+        Optional<String> responseError,
         Optional<String> providerError,
         ModelUsage usage,
         Instant startedAt,
@@ -41,7 +41,7 @@ public record ModelCallRecord(
         Assert.notNull(rawCompletion, "Raw completion must not be null");
         Assert.notNull(rawToolCalls, "Raw tool calls must not be null");
         Assert.notNull(finishReason, "Finish reason must not be null");
-        Assert.notNull(decodeError, "Decode error must not be null");
+        Assert.notNull(responseError, "Response error must not be null");
         Assert.notNull(providerError, "Provider error must not be null");
         Assert.notNull(usage, "Model usage must not be null");
         Assert.notNull(startedAt, "Start time must not be null");
@@ -62,12 +62,12 @@ public record ModelCallRecord(
         Assert.isTrue(allowedOutcomes.contains(outcome), "Outcome is not valid for the model-call phase");
 
         boolean providerFailed = outcome.equals(ModelCallOutcome.PROVIDER_FAILURE);
-        boolean decodingFailed = outcome.equals(ModelCallOutcome.INVALID_RESPONSE);
+        boolean invalidResponse = outcome.equals(ModelCallOutcome.INVALID_RESPONSE);
         boolean calledTool = outcome.equals(ModelCallOutcome.TOOL_CALL);
         Assert.isTrue(providerFailed == providerError.isPresent(),
                 "Provider error must be present only for provider failure");
-        Assert.isTrue(decodingFailed == decodeError.isPresent(),
-                "Decode error must be present only for invalid response");
+        Assert.isTrue(invalidResponse == responseError.isPresent(),
+                "Response error must be present only for invalid response");
         Assert.isTrue(!calledTool || rawToolCalls.isPresent(),
                 "A tool-call outcome must retain raw tool calls");
         Assert.isTrue(!calledTool || rawCompletion.isEmpty(),

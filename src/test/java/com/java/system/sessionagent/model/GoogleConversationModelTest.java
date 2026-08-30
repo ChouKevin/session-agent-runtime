@@ -164,7 +164,7 @@ class GoogleConversationModelTest {
             assertThat(record.phase()).isEqualTo(ModelCallPhase.FINAL_REPLY);
             assertThat(record.outcome()).isEqualTo(ModelCallOutcome.FINAL_REPLY);
             assertThat(record.rawCompletion()).contains("not-json");
-            assertThat(record.decodeError()).isEmpty();
+            assertThat(record.responseError()).isEmpty();
         });
     }
 
@@ -220,7 +220,7 @@ class GoogleConversationModelTest {
         assertThat(recorder.records()).singleElement().satisfies(record -> {
             assertThat(record.outcome()).isEqualTo(ModelCallOutcome.PROVIDER_FAILURE);
             assertThat(record.providerError()).isPresent();
-            assertThat(record.decodeError()).isEmpty();
+            assertThat(record.responseError()).isEmpty();
         });
     }
 

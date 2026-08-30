@@ -329,7 +329,7 @@ public final class GoogleConversationModel implements com.java.system.sessionage
             ModelCallPhase phase,
             ModelCallOutcome outcome,
             SpringAiCallCapture callCapture,
-            Optional<RuntimeException> decodeFailure,
+            Optional<RuntimeException> responseFailure,
             Optional<RuntimeException> providerFailure) {
         UUID diagnosticId = UUID.randomUUID();
         try {
@@ -349,7 +349,7 @@ public final class GoogleConversationModel implements com.java.system.sessionage
                     rawCompletion(capturedResponse),
                     rawToolCalls(capturedResponse),
                     capturedResponse.map(GoogleConversationModel::finishReason),
-                    decodeFailure.map(RuntimeException::toString),
+                    responseFailure.map(RuntimeException::toString),
                     providerFailure.map(RuntimeException::toString),
                     capturedResponse.map(GoogleConversationModel::usage).orElseGet(() -> new ModelUsage(0, 0, 0, false)),
                     startedAt,
