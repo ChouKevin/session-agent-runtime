@@ -146,18 +146,16 @@ create table tool_message (
     repository_id varchar(128),
     revision varchar(128),
     result_json text not null check (result_json is json),
-    citeable boolean not null,
     primary key (session_id, sequence),
     unique (result_id),
     unique (session_id, model_call_id),
     unique (session_id, result_id),
-    unique (session_id, result_id, citeable),
     foreign key (session_id, sequence, role)
         references session_message(session_id, sequence, role),
     check (
-        (tool_kind = 'CATALOG' and repository_id is null and revision is null and not citeable)
+        (tool_kind = 'CATALOG' and repository_id is null and revision is null)
         or
-        (tool_kind = 'SOURCE' and repository_id is not null and revision is not null and citeable)
+        (tool_kind = 'SOURCE' and repository_id is not null and revision is not null)
     )
 );
 
@@ -169,20 +167,6 @@ create table assistant_message (
     primary key (session_id, sequence),
     foreign key (session_id, sequence, role)
         references session_message(session_id, sequence, role)
-);
-
-create table assistant_citation (
-    session_id uuid not null,
-    assistant_sequence bigint not null,
-    position integer not null check (position >= 0),
-    result_id uuid not null,
-    target_citeable boolean not null default true check (target_citeable),
-    primary key (session_id, assistant_sequence, position),
-    unique (session_id, assistant_sequence, result_id),
-    foreign key (session_id, assistant_sequence)
-        references assistant_message(session_id, sequence),
-    foreign key (session_id, result_id, target_citeable)
-        references tool_message(session_id, result_id, citeable)
 );
 
 create table feedback_message (
@@ -255,9 +239,6 @@ create trigger tool_message_append_only
     for each row execute function reject_committed_row_change();
 create trigger assistant_message_append_only
     before update or delete on assistant_message
-    for each row execute function reject_committed_row_change();
-create trigger assistant_citation_append_only
-    before update or delete on assistant_citation
     for each row execute function reject_committed_row_change();
 create trigger feedback_message_append_only
     before update or delete on feedback_message

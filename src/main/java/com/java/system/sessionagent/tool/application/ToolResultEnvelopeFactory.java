@@ -21,12 +21,6 @@ public final class ToolResultEnvelopeFactory {
 
     public ValidatedResult validate(ToolExecution execution) {
         ToolExecution requiredExecution = Objects.requireNonNull(execution, "Tool execution must not be null");
-        if (requiredExecution.citeable() && (requiredExecution.repositoryId().isEmpty() || requiredExecution.revision().isEmpty())) {
-            throw ToolExecutionFailure.invalidResponse();
-        }
-        if (!requiredExecution.citeable() && (requiredExecution.repositoryId().isPresent() || requiredExecution.revision().isPresent())) {
-            throw ToolExecutionFailure.invalidResponse();
-        }
         try {
             return new ValidatedResult(requiredExecution, jsonCodec.decode(requiredExecution.dataJson(), Object.class));
         } catch (JsonContractException exception) {
@@ -38,11 +32,13 @@ public final class ToolResultEnvelopeFactory {
         Assert.hasText(resultId, "Result ID must not be blank");
         ValidatedResult requiredResult = Objects.requireNonNull(validatedResult, "Validated result must not be null");
         ToolExecution execution = requiredResult.execution();
-        if (execution.citeable()) {
-            return jsonCodec.canonicalize(new SourceEnvelope(resultId, execution.name().value(),
-                    execution.repositoryId().orElseThrow(), execution.revision().orElseThrow(), requiredResult.data()));
-        }
-        return jsonCodec.canonicalize(new CatalogEnvelope(resultId, execution.name().value(), requiredResult.data()));
+        return switch (execution.kind()) {
+            case CATALOG -> jsonCodec.canonicalize(new CatalogEnvelope(
+                    resultId, execution.name().value(), requiredResult.data()));
+            case SOURCE -> jsonCodec.canonicalize(new SourceEnvelope(
+                    resultId, execution.name().value(), execution.repositoryId().orElseThrow(),
+                    execution.revision().orElseThrow(), requiredResult.data()));
+        };
     }
 
     public record ValidatedResult(ToolExecution execution, Object data) {

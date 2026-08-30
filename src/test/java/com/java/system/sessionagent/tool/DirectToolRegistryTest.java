@@ -66,11 +66,11 @@ class DirectToolRegistryTest {
     }
 
     @Test
-    void rejects_a_catalog_executor_result_that_claims_source_citation_shape() {
+    void rejects_a_catalog_executor_result_with_source_shape() {
         ToolDefinition definition = new ToolDefinition(CATALOG_TOOL, "1", "catalog", "{\"type\":\"object\"}", ToolKind.CATALOG);
         ToolRegistration<SampleInput> registration = new ToolRegistration<>(definition, SampleInput.class,
                 input -> new ToolResult(Optional.of("private-repository"), Optional.of("private-revision"),
-                        "{\"secret\":\"executor-private\"}", true));
+                        "{\"secret\":\"executor-private\"}"));
         DirectToolRegistry registry = new DirectToolRegistry(List.of(registration));
 
         ToolExecutionFailure failure = assertThrows(ToolExecutionFailure.class,
@@ -81,10 +81,10 @@ class DirectToolRegistryTest {
     }
 
     @Test
-    void rejects_a_source_executor_result_that_claims_catalog_shape() {
+    void rejects_a_source_executor_result_with_catalog_shape() {
         ToolDefinition definition = new ToolDefinition(SOURCE_TOOL, "1", "source", "{\"type\":\"object\"}", ToolKind.SOURCE);
         ToolRegistration<SampleInput> registration = new ToolRegistration<>(definition, SampleInput.class,
-                input -> new ToolResult(Optional.empty(), Optional.empty(), "{\"secret\":\"executor-private\"}", false));
+                input -> new ToolResult(Optional.empty(), Optional.empty(), "{\"secret\":\"executor-private\"}"));
         DirectToolRegistry registry = new DirectToolRegistry(List.of(registration));
 
         ToolExecutionFailure failure = assertThrows(ToolExecutionFailure.class,
@@ -126,7 +126,6 @@ class DirectToolRegistryTest {
         assertEquals(Optional.empty(), execution.repositoryId());
         assertEquals(Optional.empty(), execution.revision());
         assertEquals("{\"items\":[\"repo-a:2\"]}", execution.dataJson());
-        assertFalse(execution.citeable());
     }
 
     @ParameterizedTest
@@ -230,10 +229,10 @@ class DirectToolRegistryTest {
             invocations.incrementAndGet();
             if (kind == ToolKind.CATALOG) {
                 return new ToolResult(Optional.empty(), Optional.empty(),
-                        "{\"items\":[\"%s:%d\"]}".formatted(input.repositoryId(), input.limit()), false);
+                        "{\"items\":[\"%s:%d\"]}".formatted(input.repositoryId(), input.limit()));
             }
             return new ToolResult(Optional.of(input.repositoryId()), Optional.of("main"),
-                    "{\"items\":[\"%s:%d\"]}".formatted(input.repositoryId(), input.limit()), true);
+                    "{\"items\":[\"%s:%d\"]}".formatted(input.repositoryId(), input.limit()));
         });
     }
 

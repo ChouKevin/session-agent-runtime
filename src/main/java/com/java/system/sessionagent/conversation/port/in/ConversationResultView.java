@@ -10,6 +10,5 @@ public record ConversationResultView(
         String canonicalArguments,
         Optional<String> repositoryId,
         Optional<String> revision,
-        String resultJson,
-        boolean citeable) {
+        String resultJson) {
 }

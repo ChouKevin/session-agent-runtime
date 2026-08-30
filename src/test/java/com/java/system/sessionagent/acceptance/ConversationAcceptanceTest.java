@@ -43,7 +43,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 class ConversationAcceptanceTest {
 
     @Test
-    void answers_payment_methods_from_a_citeable_payment_service_result() {
+    void answers_payment_methods_from_a_source_payment_service_result() {
         try (AcceptanceRuntime runtime = new AcceptanceRuntime()) {
             MessageReceipt receipt = runtime.receive("payment-session", "alice", "payment-1", "Which payment methods are supported?");
             runtime.process(receipt);
@@ -80,13 +80,14 @@ class ConversationAcceptanceTest {
     }
 
     @Test
-    void reports_absent_bnpl_only_after_citeable_typed_repository_queries() {
+    void reports_absent_bnpl_only_after_source_repository_queries() {
         try (AcceptanceRuntime runtime = new AcceptanceRuntime()) {
             MessageReceipt receipt = runtime.receive("bnpl-session", "alice", "bnpl-1", "Is BNPL supported?");
             runtime.process(receipt);
 
             AssistantMessage reply = runtime.reply(receipt);
-            List<ToolMessage> sourceMessages = runtime.store.toolMessages(receipt.messageJobId()).stream().filter(ToolMessage::citeable).toList();
+            List<ToolMessage> sourceMessages = runtime.store.toolMessages(receipt.messageJobId()).stream()
+                    .filter(message -> message.repositoryId().isPresent()).toList();
             assertThat(reply.message()).contains("No BNPL behavior was found");
             assertThat(sourceMessages).hasSizeGreaterThanOrEqualTo(2);
             assertThat(runtime.semantic.calls()).anySatisfy(call -> assertThat(call.path()).isEqualTo("/v1/api-routes/lookup"));
@@ -97,12 +98,13 @@ class ConversationAcceptanceTest {
     }
 
     @Test
-    void answers_cancellation_and_refund_after_cross_repository_citeable_queries() {
+    void answers_cancellation_and_refund_after_cross_repository_source_queries() {
         try (AcceptanceRuntime runtime = new AcceptanceRuntime()) {
             MessageReceipt receipt = runtime.receive("refund-session", "alice", "refund-1", "How do cancellation and refund work?");
             runtime.process(receipt);
 
-            List<ToolMessage> sources = runtime.store.toolMessages(receipt.messageJobId()).stream().filter(ToolMessage::citeable).toList();
+            List<ToolMessage> sources = runtime.store.toolMessages(receipt.messageJobId()).stream()
+                    .filter(message -> message.repositoryId().isPresent()).toList();
             assertThat(sources).extracting(message -> message.repositoryId().orElseThrow()).containsExactlyInAnyOrder("order-service", "payment-service");
             assertThat(sources).allSatisfy(message -> assertThat(message.arguments()).contains("\"repositoryId\":\"" + message.repositoryId().orElseThrow() + "\""));
             assertThat(runtime.semantic.calls()).filteredOn(call -> call.path().endsWith("/entry-points"))
@@ -283,10 +285,10 @@ class ConversationAcceptanceTest {
             List<SessionMessage> history = messages.get(claim.sessionId());
             ToolMessage message = new ToolMessage(claim.sessionId(), sequence(history), Optional.of(claim.messageJobId()), createdAt,
                     MessageRole.TOOL, resultId, modelCallId, modelContext, data.toolName(), data.toolVersion(), data.canonicalArguments(), data.repositoryId(),
-                    data.revision(), data.resultJson(), data.citeable());
+                    data.revision(), data.resultJson());
             history.add(message);
             results.put(resultId, new ResultProjection(resultId, claim.sessionId(), data.toolName(), data.toolVersion(), data.canonicalArguments(),
-                    data.repositoryId(), data.revision(), data.resultJson(), data.citeable()));
+                    data.repositoryId(), data.revision(), data.resultJson()));
             return message;
         }
 

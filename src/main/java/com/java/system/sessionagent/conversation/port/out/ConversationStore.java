@@ -79,8 +79,7 @@ public interface ConversationStore {
             String canonicalArguments,
             Optional<String> repositoryId,
             Optional<String> revision,
-            String resultJson,
-            boolean citeable) {
+            String resultJson) {
 
         public ResultProjection {
             Assert.notNull(resultId, "Result ID must not be null");
@@ -92,13 +91,9 @@ public interface ConversationStore {
             Assert.notNull(revision, "Revision must not be null");
             repositoryId.ifPresent(value -> Assert.hasText(value, "Repository ID must not be blank"));
             revision.ifPresent(value -> Assert.hasText(value, "Revision must not be blank"));
+            Assert.isTrue(repositoryId.isPresent() == revision.isPresent(),
+                    "Repository ID and revision must be present together");
             Assert.hasText(resultJson, "Result JSON must not be blank");
-            if (citeable && (repositoryId.isEmpty() || revision.isEmpty())) {
-                throw new IllegalArgumentException("Citeable result requires repository and revision");
-            }
-            if (!citeable && (repositoryId.isPresent() || revision.isPresent())) {
-                throw new IllegalArgumentException("Catalog result must not have repository or revision");
-            }
         }
     }
 
@@ -109,8 +104,7 @@ public interface ConversationStore {
             String canonicalArguments,
             Optional<String> repositoryId,
             Optional<String> revision,
-            String resultJson,
-            boolean citeable) {
+            String resultJson) {
 
         public ToolData {
             Assert.hasText(toolName, "Tool name must not be blank");
@@ -122,11 +116,13 @@ public interface ConversationStore {
             repositoryId.ifPresent(value -> Assert.hasText(value, "Repository ID must not be blank"));
             revision.ifPresent(value -> Assert.hasText(value, "Revision must not be blank"));
             Assert.hasText(resultJson, "Result JSON must not be blank");
-            if (kind == ToolKind.CATALOG && (citeable || repositoryId.isPresent() || revision.isPresent())) {
-                throw new IllegalArgumentException("Catalog tool result must be nonciteable without repository or revision");
+            if (kind == ToolKind.CATALOG) {
+                Assert.isTrue(repositoryId.isEmpty() && revision.isEmpty(),
+                        "Catalog tool result must not have repository or revision");
             }
-            if (kind == ToolKind.SOURCE && (!citeable || repositoryId.isEmpty() || revision.isEmpty())) {
-                throw new IllegalArgumentException("Source tool result requires citation repository and revision");
+            if (kind == ToolKind.SOURCE) {
+                Assert.isTrue(repositoryId.isPresent() && revision.isPresent(),
+                        "Source tool result requires repository and revision");
             }
         }
 

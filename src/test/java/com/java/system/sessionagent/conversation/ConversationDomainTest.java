@@ -93,9 +93,9 @@ class ConversationDomainTest {
 
     @Test
     void enforcesToolResultScopeRulesAndDefensiveCopyingForHistory() {
-        ToolMessage citeable = toolMessage(Optional.of("payment-service"), Optional.of("revision-1"), true);
-        ToolMessage catalog = toolMessage(Optional.empty(), Optional.empty(), false);
-        List<SessionMessage> history = new ArrayList<>(List.of(citeable));
+        ToolMessage source = toolMessage(Optional.of("payment-service"), Optional.of("revision-1"));
+        ToolMessage catalog = toolMessage(Optional.empty(), Optional.empty());
+        List<SessionMessage> history = new ArrayList<>(List.of(source));
         ToolSnapshot toolSnapshot = new DirectToolRegistry(List.of()).snapshot();
 
         ModelCallContext callContext = new ModelCallContext(SESSION_ID, JOB_ID, 1);
@@ -103,22 +103,20 @@ class ConversationDomainTest {
         ReplyRequest replyRequest = new ReplyRequest(history, callContext);
         history.clear();
 
-        assertThat(citeable.repositoryId()).contains("payment-service");
+        assertThat(source.repositoryId()).contains("payment-service");
         assertThat(catalog.repositoryId()).isEmpty();
-        assertThat(modelRequest.history()).containsExactly(citeable);
-        assertThat(replyRequest.history()).containsExactly(citeable);
+        assertThat(modelRequest.history()).containsExactly(source);
+        assertThat(replyRequest.history()).containsExactly(source);
         assertThatThrownBy(() -> modelRequest.history().add(catalog))
                 .isInstanceOf(UnsupportedOperationException.class);
         assertThatIllegalArgumentException().isThrownBy(() -> new ModelCallContext(SESSION_ID, JOB_ID, 0));
         assertThatIllegalArgumentException().isThrownBy(() -> new ModelCallContext(SESSION_ID, JOB_ID, 13));
         assertThatIllegalArgumentException().isThrownBy(
-                () -> toolMessage(Optional.of("payment-service"), Optional.empty(), true));
+                () -> toolMessage(Optional.of("payment-service"), Optional.empty()));
         assertThatIllegalArgumentException().isThrownBy(
-                () -> toolMessage(Optional.empty(), Optional.of("revision-1"), true));
+                () -> toolMessage(Optional.empty(), Optional.of("revision-1")));
         assertThatIllegalArgumentException().isThrownBy(
-                () -> toolMessage(Optional.of("payment-service"), Optional.of("revision-1"), false));
-        assertThatIllegalArgumentException().isThrownBy(
-                () -> toolMessage(" ", Optional.empty(), Optional.empty(), false));
+                () -> toolMessage(" ", Optional.empty(), Optional.empty()));
     }
 
     @Test
@@ -156,8 +154,7 @@ class ConversationDomainTest {
                 "{}",
                 Optional.empty(),
                 Optional.empty(),
-                "{\"repositories\":[]}",
-                false));
+                "{\"repositories\":[]}"));
         assertThatIllegalArgumentException().isThrownBy(() -> new AssistantMessage(
                 SESSION_ID,
                 SEQUENCE,
@@ -255,16 +252,14 @@ class ConversationDomainTest {
 
     private static ToolMessage toolMessage(
             Optional<String> repositoryId,
-            Optional<String> revision,
-            boolean citeable) {
-        return toolMessage("list_repositories", repositoryId, revision, citeable);
+            Optional<String> revision) {
+        return toolMessage("list_repositories", repositoryId, revision);
     }
 
     private static ToolMessage toolMessage(
             String toolName,
             Optional<String> repositoryId,
-            Optional<String> revision,
-            boolean citeable) {
+            Optional<String> revision) {
         return new ToolMessage(
                 SESSION_ID,
                 SEQUENCE,
@@ -279,7 +274,6 @@ class ConversationDomainTest {
                 "{}",
                 repositoryId,
                 revision,
-                "{\"repositories\":[]}",
-                citeable);
+                "{\"repositories\":[]}");
     }
 }

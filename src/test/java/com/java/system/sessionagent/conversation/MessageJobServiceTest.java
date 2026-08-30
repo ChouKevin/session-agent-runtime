@@ -619,14 +619,14 @@ class MessageJobServiceTest {
             String name, ToolKind kind, Optional<String> repositoryId, Optional<String> revision, String data) {
         ToolDefinition definition = new ToolDefinition(new ToolName(name), "v1", name, "{\"type\":\"object\"}", kind);
         return new ToolRegistration<>(definition, Object.class,
-                ignored -> new ToolResult(repositoryId, revision, data, kind == ToolKind.SOURCE));
+                ignored -> new ToolResult(repositoryId, revision, data));
     }
 
     private static ToolRegistration<Object> countedRegistration(String name, ToolKind kind, AtomicInteger executions) {
         ToolDefinition definition = new ToolDefinition(new ToolName(name), "v1", name, "{\"type\":\"object\"}", kind);
         return new ToolRegistration<>(definition, Object.class, ignored -> {
             executions.incrementAndGet();
-            return new ToolResult(Optional.of("payment-service"), Optional.of("rev-a"), "{\"members\":[]}", true);
+            return new ToolResult(Optional.of("payment-service"), Optional.of("rev-a"), "{\"members\":[]}");
         });
     }
 
@@ -745,19 +745,19 @@ class MessageJobServiceTest {
         @Override public List<com.java.system.sessionagent.conversation.domain.SessionMessage> loadHistory(SessionId sessionId, com.java.system.sessionagent.conversation.domain.MessageJobId messageJobId) { return loadHistory(sessionId).stream().filter(message -> message.messageJobId().map(messageJobId::equals).orElse(true)).toList(); }
         @Override public java.util.OptionalInt reserveModelCall(MessageWorkClaim ignored, Instant now) { return java.util.OptionalInt.of(++calls); }
         @Override public com.java.system.sessionagent.conversation.domain.ToolMessage appendTool(MessageWorkClaim ignored, ResultId resultId, String modelCallId, String modelContext, ToolData data, Instant now) {
-            com.java.system.sessionagent.conversation.domain.ToolMessage message = new com.java.system.sessionagent.conversation.domain.ToolMessage(claim.sessionId(), new SessionSequence(toolMessages.size() + 1), Optional.of(claim.messageJobId()), now, MessageRole.TOOL, resultId, modelCallId, modelContext, data.toolName(), data.toolVersion(), data.canonicalArguments(), data.repositoryId(), data.revision(), data.resultJson(), data.citeable());
+            com.java.system.sessionagent.conversation.domain.ToolMessage message = new com.java.system.sessionagent.conversation.domain.ToolMessage(claim.sessionId(), new SessionSequence(toolMessages.size() + 1), Optional.of(claim.messageJobId()), now, MessageRole.TOOL, resultId, modelCallId, modelContext, data.toolName(), data.toolVersion(), data.canonicalArguments(), data.repositoryId(), data.revision(), data.resultJson());
             toolMessages.add(message); return message;
         }
         private void seedCatalog() {
             toolMessages.add(new com.java.system.sessionagent.conversation.domain.ToolMessage(claim.sessionId(), new SessionSequence(1), Optional.of(claim.messageJobId()), claim.claimedAt(), MessageRole.TOOL,
-                    new ResultId("catalog-result"), "catalog-call", MODEL_CONTEXT, "list_repositories", "v1", "{}", Optional.empty(), Optional.empty(), "{\"resultId\":\"catalog-result\",\"toolName\":\"list_repositories\",\"data\":{}}", false));
+                    new ResultId("catalog-result"), "catalog-call", MODEL_CONTEXT, "list_repositories", "v1", "{}", Optional.empty(), Optional.empty(), "{\"resultId\":\"catalog-result\",\"toolName\":\"list_repositories\",\"data\":{}}"));
         }
         private void seedSource() {
             toolMessages.add(new com.java.system.sessionagent.conversation.domain.ToolMessage(claim.sessionId(), new SessionSequence(1), Optional.of(claim.messageJobId()), claim.claimedAt(), MessageRole.TOOL,
-                    new ResultId("source-result"), "source-call", MODEL_CONTEXT, "source", "v1", "{\"repositoryId\":\"payment-service\"}", Optional.of("payment-service"), Optional.of("rev-a"), "{\"resultId\":\"source-result\",\"toolName\":\"source\",\"repositoryId\":\"payment-service\",\"revision\":\"rev-a\",\"data\":{}}", true));
+                    new ResultId("source-result"), "source-call", MODEL_CONTEXT, "source", "v1", "{\"repositoryId\":\"payment-service\"}", Optional.of("payment-service"), Optional.of("rev-a"), "{\"resultId\":\"source-result\",\"toolName\":\"source\",\"repositoryId\":\"payment-service\",\"revision\":\"rev-a\",\"data\":{}}"));
         }
         @Override public com.java.system.sessionagent.conversation.domain.AssistantMessage appendAssistant(MessageWorkClaim ignored, String reply, Instant now) { assistantReply = reply; return new com.java.system.sessionagent.conversation.domain.AssistantMessage(claim.sessionId(), new SessionSequence(3), Optional.of(claim.messageJobId()), now, MessageRole.ASSISTANT, reply); }
-        @Override public Optional<ResultProjection> readResult(ResultId resultId) { return toolMessages.stream().filter(message -> message.resultId().equals(resultId)).findFirst().map(message -> new ResultProjection(message.resultId(), message.sessionId(), message.toolName(), message.toolVersion(), message.arguments(), message.repositoryId(), message.revision(), message.resultJson(), message.citeable())); }
+        @Override public Optional<ResultProjection> readResult(ResultId resultId) { return toolMessages.stream().filter(message -> message.resultId().equals(resultId)).findFirst().map(message -> new ResultProjection(message.resultId(), message.sessionId(), message.toolName(), message.toolVersion(), message.arguments(), message.repositoryId(), message.revision(), message.resultJson())); }
         @Override public com.java.system.sessionagent.conversation.domain.MessageReceipt receive(com.java.system.sessionagent.conversation.domain.IncomingMessage message) { throw new UnsupportedOperationException(); }
         @Override public Optional<MessageWorkClaim> claimNext(String workerId, java.time.Duration leaseDuration) { throw new UnsupportedOperationException(); }
         @Override public boolean extendClaim(MessageWorkClaim claim, java.time.Duration leaseDuration) { throw new UnsupportedOperationException(); }

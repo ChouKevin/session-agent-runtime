@@ -56,7 +56,7 @@ final class FakeConversationModel implements ConversationModel {
             return tool("refresh-catalog-" + question.sequence().value(), LIST_REPOSITORIES, "{}");
         }
         if (text.contains("bnpl") && jobHistory.stream().filter(ToolMessage.class::isInstance).map(ToolMessage.class::cast)
-                .noneMatch(ToolMessage::citeable)) {
+                .noneMatch(message -> message.repositoryId().isPresent())) {
             return tool("bnpl-source-" + question.sequence().value(), LIST_ENTRY_POINTS, "{\"repositoryId\":\"payment-service\",\"revision\":\"payment-revision-1\"}");
         }
         if (text.contains("bnpl") && jobHistory.stream().filter(ToolMessage.class::isInstance).map(ToolMessage.class::cast)
@@ -73,7 +73,7 @@ final class FakeConversationModel implements ConversationModel {
             return tool("payment-refund-" + question.sequence().value(), LIST_ENTRY_POINTS, "{\"repositoryId\":\"payment-service\",\"revision\":\"payment-revision-1\"}");
         }
         if (jobHistory.stream().filter(ToolMessage.class::isInstance).map(ToolMessage.class::cast)
-                .noneMatch(ToolMessage::citeable)) {
+                .noneMatch(message -> message.repositoryId().isPresent())) {
             return tool("payment-source-" + question.sequence().value(), LIST_ENTRY_POINTS, "{\"repositoryId\":\"payment-service\",\"revision\":\"payment-revision-1\"}");
         }
         return new ModelDecision.AnswerReady();

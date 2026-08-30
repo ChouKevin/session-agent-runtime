@@ -45,28 +45,27 @@ public final class MessageResponses {
             Optional<String> toolVersion,
             Optional<String> repositoryId,
             Optional<String> revision,
-            Optional<Boolean> citeable,
             Optional<String> feedbackCode,
             Optional<Boolean> terminal,
             Optional<String> rejectedArguments) {
         static SessionMessageResponse from(SessionMessage message) {
             if (message instanceof UserMessage user) {
                 return base(message, Optional.of(user.participantId()), Optional.of(user.message()), Optional.empty(),
-                        Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(),
+                        Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(),
                         Optional.empty());
             }
             if (message instanceof AssistantMessage assistant) {
                 return base(message, Optional.empty(), Optional.of(assistant.message()), Optional.empty(), Optional.empty(),
-                        Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty());
+                        Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty());
             }
             if (message instanceof ToolMessage tool) {
                 return base(message, Optional.empty(), Optional.empty(), Optional.of(tool.resultId().value()),
-                        Optional.of(tool.toolName()), Optional.of(tool.toolVersion()), tool.repositoryId(), tool.revision(), Optional.of(tool.citeable()),
+                        Optional.of(tool.toolName()), Optional.of(tool.toolVersion()), tool.repositoryId(), tool.revision(),
                         Optional.empty(), Optional.empty(), Optional.empty());
             }
             FeedbackMessage feedback = (FeedbackMessage) message;
             return base(message, Optional.empty(), Optional.of(feedback.message()), Optional.empty(), feedback.toolName(),
-                    Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(), Optional.of(feedback.code()), Optional.of(feedback.terminal()),
+                    Optional.empty(), Optional.empty(), Optional.empty(), Optional.of(feedback.code()), Optional.of(feedback.terminal()),
                     feedback.rejectedArguments());
         }
 
@@ -79,13 +78,12 @@ public final class MessageResponses {
                 Optional<String> toolVersion,
                 Optional<String> repositoryId,
                 Optional<String> revision,
-                Optional<Boolean> citeable,
                 Optional<String> feedbackCode,
                 Optional<Boolean> terminal,
                 Optional<String> rejectedArguments) {
             return new SessionMessageResponse(message.sequence().value(), message.createdAt(), message.role().name(),
                     message.messageJobId().map(jobId -> jobId.value()), participantId, content, resultId, toolName, toolVersion,
-                    repositoryId, revision, citeable, feedbackCode, terminal, rejectedArguments);
+                    repositoryId, revision, feedbackCode, terminal, rejectedArguments);
         }
     }
 
@@ -97,11 +95,10 @@ public final class MessageResponses {
             String canonicalArguments,
             Optional<String> repositoryId,
             Optional<String> revision,
-            String resultJson,
-            boolean citeable) {
+            String resultJson) {
         static ResultResponse from(ConversationResultView view) {
             return new ResultResponse(view.resultId(), view.sessionId(), view.toolName(), view.toolVersion(), view.canonicalArguments(),
-                    view.repositoryId(), view.revision(), view.resultJson(), view.citeable());
+                    view.repositoryId(), view.revision(), view.resultJson());
         }
     }
 

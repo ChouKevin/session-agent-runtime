@@ -140,7 +140,7 @@ class ApplicationStartupTest {
                     ToolDefinition definition = new ToolDefinition(new ToolName("catalog"), "v1", "catalog",
                             "{\"type\":\"object\"}", ToolKind.CATALOG);
                     DirectToolRegistry registry = new DirectToolRegistry(List.of(new ToolRegistration<>(definition, Object.class,
-                            ignored -> new ToolResult(Optional.empty(), Optional.empty(), "{}", false))));
+                            ignored -> new ToolResult(Optional.empty(), Optional.empty(), "{}"))));
 
                     ModelDecision decision = model.plan(new ModelRequest(List.of(new UserMessage(new SessionId("session-1"),
                             new SessionSequence(1), Optional.empty(), Instant.parse("2026-08-16T00:00:00Z"), MessageRole.USER,

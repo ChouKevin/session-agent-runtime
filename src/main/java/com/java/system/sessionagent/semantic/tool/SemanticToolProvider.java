@@ -81,7 +81,7 @@ public final class SemanticToolProvider {
     private ToolResult listRepositories() {
         List<RepositorySummary> repositories = repositoryCatalog.listRepositories();
         String dataJson = jsonCodec.canonicalize(ListRepositoriesResult.from(repositories));
-        return new ToolResult(Optional.empty(), Optional.empty(), dataJson, false);
+        return new ToolResult(Optional.empty(), Optional.empty(), dataJson);
     }
 
     private ToolResult executeCatalog() {
@@ -181,7 +181,7 @@ public final class SemanticToolProvider {
 
     private <T> ToolResult sourceResult(String repositoryId, SemanticSourceClient.SourceResult<T> sourceResult) {
         return new ToolResult(Optional.of(repositoryId), Optional.of(sourceResult.revision().value()),
-                jsonCodec.canonicalize(sourceResult.response()), true);
+                jsonCodec.canonicalize(sourceResult.response()));
     }
 
     private record ListRepositoriesResult(List<RepositorySummaryResult> repositories) {

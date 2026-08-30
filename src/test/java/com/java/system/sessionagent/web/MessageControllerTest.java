@@ -140,7 +140,7 @@ class MessageControllerTest {
                         new SessionId(sessionId), new com.java.system.sessionagent.conversation.domain.SessionSequence(2), Optional.of(new MessageJobId(jobId)),
                         java.time.Instant.parse("2026-08-16T00:00:00Z"), com.java.system.sessionagent.conversation.domain.MessageRole.TOOL,
                         new com.java.system.sessionagent.conversation.domain.ResultId("4455b5ba-7b93-44cf-bd76-0d756e325eb5"), "call", "dGVzdA==", "source", "v1",
-                        "{\"secret\":\"raw-argument\"}", Optional.of("repo-a"), Optional.of("rev-a"), "{\"secret\":\"raw-result\"}", true),
+                        "{\"secret\":\"raw-argument\"}", Optional.of("repo-a"), Optional.of("rev-a"), "{\"secret\":\"raw-result\"}"),
                 new com.java.system.sessionagent.conversation.domain.FeedbackMessage(
                         new SessionId(sessionId), new com.java.system.sessionagent.conversation.domain.SessionSequence(3), Optional.of(new MessageJobId(jobId)),
                         java.time.Instant.parse("2026-08-16T00:00:01Z"), com.java.system.sessionagent.conversation.domain.MessageRole.FEEDBACK,
@@ -156,6 +156,7 @@ class MessageControllerTest {
         mvc.perform(get("/internal/sessions/{sessionId}/messages", sessionId))
                 .andExpect(status().isOk()).andExpect(jsonPath("$[0].resultId").value("4455b5ba-7b93-44cf-bd76-0d756e325eb5"))
                 .andExpect(jsonPath("$[0].resultJson").doesNotExist())
+                .andExpect(jsonPath("$[0].citeable").doesNotExist())
                 .andExpect(jsonPath("$[0].arguments").doesNotExist())
                 .andExpect(jsonPath("$[0].modelContext").doesNotExist())
                 .andExpect(jsonPath("$[1].toolName").value("codebase_search"))
@@ -177,14 +178,15 @@ class MessageControllerTest {
         String resultId = "4455b5ba-7b93-44cf-bd76-0d756e325eb5";
         String sessionId = "a1d4cefe-d5b5-4f40-b9f6-beb41a6831af";
         when(queries.findResult(resultId)).thenReturn(Optional.of(new ConversationResultView(resultId, sessionId, "source", "v1",
-                "{\"safe\":true}", Optional.of("repo-a"), Optional.of("rev-a"), "{\"payload\":true}", true)));
+                "{\"safe\":true}", Optional.of("repo-a"), Optional.of("rev-a"), "{\"payload\":true}")));
         when(queries.findJob("f47bdb7e-75c3-4dbf-bdd4-1f8681705b62")).thenReturn(Optional.empty());
         when(queries.messages(sessionId)).thenReturn(Optional.empty());
         when(queries.findResult("e148e1e1-d085-47fd-b81c-d4d807d7fc67")).thenReturn(Optional.empty());
         MockMvc mvc = mvc(intake, queries);
 
         mvc.perform(get("/internal/results/{resultId}", resultId)).andExpect(status().isOk())
-                .andExpect(jsonPath("$.resultJson").value("{\"payload\":true}"));
+                .andExpect(jsonPath("$.resultJson").value("{\"payload\":true}"))
+                .andExpect(jsonPath("$.citeable").doesNotExist());
         mvc.perform(get("/internal/message-jobs/{messageJobId}", "f47bdb7e-75c3-4dbf-bdd4-1f8681705b62"))
                 .andExpect(status().isNotFound());
         mvc.perform(get("/internal/sessions/{sessionId}/messages", sessionId)).andExpect(status().isNotFound());

@@ -323,11 +323,11 @@ class GoogleConversationModelTest {
                 new ToolMessage(sessionId, new SessionSequence(2), Optional.of(jobId), createdAt,
                         MessageRole.TOOL, new ResultId("catalog-result"), "catalog-call", MODEL_CONTEXT,
                         "list_repositories", "1", "{}", Optional.empty(), Optional.empty(),
-                        "{\"resultId\":\"catalog-result\",\"data\":{\"secret\":\"catalog-payload\"}}", false),
+                        "{\"resultId\":\"catalog-result\",\"data\":{\"secret\":\"catalog-payload\"}}"),
                 new ToolMessage(sessionId, new SessionSequence(3), Optional.of(jobId), createdAt,
                         MessageRole.TOOL, new ResultId("source-result"), "source-call", MODEL_CONTEXT,
                         "codebase_get_method_source", "1", "{}", Optional.of("payment-service"), Optional.of("revision-1"),
-                        "{\"resultId\":\"source-result\",\"data\":{\"source\":\"private-source-payload\"}}", true));
+                        "{\"resultId\":\"source-result\",\"data\":{\"source\":\"private-source-payload\"}}"));
 
         model.reply(new ReplyRequest(history, new ModelCallContext(sessionId, jobId, 2)), usage -> { });
 
@@ -582,7 +582,7 @@ class GoogleConversationModelTest {
     private static ToolSnapshot snapshot(String toolName) {
         ToolDefinition definition = new ToolDefinition(new ToolName(toolName), "1", "Catalog repositories", "{\"type\":\"object\"}", ToolKind.CATALOG);
         ToolRegistration<String> registration = new ToolRegistration<>(definition, String.class,
-                ignored -> new ToolResult(Optional.empty(), Optional.empty(), "{}", false));
+                ignored -> new ToolResult(Optional.empty(), Optional.empty(), "{}"));
         return new DirectToolRegistry(List.of(registration)).snapshot();
     }
 

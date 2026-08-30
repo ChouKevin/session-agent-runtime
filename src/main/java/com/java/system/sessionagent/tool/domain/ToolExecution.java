@@ -11,8 +11,7 @@ public record ToolExecution(
         String canonicalArguments,
         Optional<String> repositoryId,
         Optional<String> revision,
-        String dataJson,
-        boolean citeable) {
+        String dataJson) {
 
     public ToolExecution {
         Assert.notNull(name, "Tool name must not be null");
@@ -23,6 +22,14 @@ public record ToolExecution(
         Assert.notNull(revision, "Revision must not be null");
         repositoryId.ifPresent(value -> Assert.hasText(value, "Repository ID must not be blank"));
         revision.ifPresent(value -> Assert.hasText(value, "Revision must not be blank"));
+        if (kind == ToolKind.CATALOG) {
+            Assert.isTrue(repositoryId.isEmpty() && revision.isEmpty(),
+                    "Catalog tool result must not have repository or revision");
+        }
+        if (kind == ToolKind.SOURCE) {
+            Assert.isTrue(repositoryId.isPresent() && revision.isPresent(),
+                    "Source tool result requires repository and revision");
+        }
         Assert.hasText(dataJson, "Tool data JSON must not be blank");
     }
 }

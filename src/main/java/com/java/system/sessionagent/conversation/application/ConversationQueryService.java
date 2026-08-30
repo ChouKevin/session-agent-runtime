@@ -42,6 +42,6 @@ public final class ConversationQueryService implements ConversationQueryPort {
     public Optional<ConversationResultView> findResult(String resultId) {
         return conversationStore.readResult(new ResultId(resultId)).map(projection -> new ConversationResultView(
                 projection.resultId().value(), projection.sessionId().value(), projection.toolName(), projection.toolVersion(),
-                projection.canonicalArguments(), projection.repositoryId(), projection.revision(), projection.resultJson(), projection.citeable()));
+                projection.canonicalArguments(), projection.repositoryId(), projection.revision(), projection.resultJson()));
     }
 }

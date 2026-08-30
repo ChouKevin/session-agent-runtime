@@ -1,7 +1,6 @@
 package com.java.system.sessionagent.tool.application;
 
 import com.java.system.sessionagent.tool.domain.ToolExecution;
-import com.java.system.sessionagent.tool.domain.ToolKind;
 import com.java.system.sessionagent.tool.domain.ToolName;
 import com.java.system.sessionagent.tool.domain.ToolResult;
 import com.java.system.sessionagent.tool.json.JsonContractException;
@@ -62,9 +61,6 @@ public final class DirectToolRegistry {
         }
         try {
             ToolResult result = Objects.requireNonNull(registration.executor().execute(input), "Tool result must not be null");
-            if (!matchesKind(registration.definition().kind(), result)) {
-                throw ToolExecutionFailure.invalidResponse();
-            }
             return new ToolExecution(
                     registration.definition().name(),
                     registration.definition().version(),
@@ -72,8 +68,7 @@ public final class DirectToolRegistry {
                     canonicalArguments,
                     result.repositoryId(),
                     result.revision(),
-                    result.dataJson(),
-                    result.citeable());
+                    result.dataJson());
         } catch (ToolExecutionFailure exception) {
             throw exception;
         } catch (RuntimeException exception) {
@@ -94,12 +89,5 @@ public final class DirectToolRegistry {
                 throw new IllegalArgumentException("Tool names must be distinct");
             }
         }
-    }
-
-    private static boolean matchesKind(ToolKind kind, ToolResult result) {
-        return switch (kind) {
-            case CATALOG -> !result.citeable() && result.repositoryId().isEmpty() && result.revision().isEmpty();
-            case SOURCE -> result.citeable() && result.repositoryId().isPresent() && result.revision().isPresent();
-        };
     }
 }

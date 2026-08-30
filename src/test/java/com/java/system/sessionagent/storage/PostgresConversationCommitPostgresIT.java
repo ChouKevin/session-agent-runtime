@@ -74,6 +74,16 @@ class PostgresConversationCommitPostgresIT {
 
         assertThat(jdbcTemplate.queryForObject("select count(*) from session_message", Integer.class)).isEqualTo(3);
         assertThat(jdbcTemplate.queryForObject("select count(*) from tool_message", Integer.class)).isEqualTo(1);
+        Integer citationTables = jdbcTemplate.queryForObject("""
+                select count(*) from information_schema.tables
+                where table_schema = 'public' and table_name = 'assistant_citation'
+                """, Integer.class);
+        Integer citeableColumns = jdbcTemplate.queryForObject("""
+                select count(*) from information_schema.columns
+                where table_schema = 'public' and table_name = 'tool_message' and column_name = 'citeable'
+                """, Integer.class);
+        assertThat(citationTables).isZero();
+        assertThat(citeableColumns).isZero();
         assertThat(jdbcTemplate.queryForObject("select status from message_job where message_job_id = ?", String.class, id(receipt)))
                 .isEqualTo("DONE");
         assertThat(store.readJob(receipt.messageJobId())).hasValueSatisfying(job -> assertThat(job.replySequence()).isPresent());
@@ -178,12 +188,12 @@ class PostgresConversationCommitPostgresIT {
         ResultId resultId = new ResultId(UUID.randomUUID().toString());
         String arguments = "{\"limit\":2,\"repositoryId\":\"payment\"}";
         ToolExecution execution = new ToolExecution(new ToolName("source"), "v1", ToolKind.SOURCE, arguments, Optional.of("payment"),
-                Optional.of("rev-1"), "{\"nested\":{\"zeta\":2,\"alpha\":1}}", true);
+                Optional.of("rev-1"), "{\"nested\":{\"zeta\":2,\"alpha\":1}}");
         ToolResultEnvelopeFactory envelopeFactory = new ToolResultEnvelopeFactory();
         String result = envelopeFactory.envelope(resultId.value(), envelopeFactory.validate(execution));
 
         ToolMessage appended = store.appendTool(claim, resultId, "source-call", MODEL_CONTEXT, new ConversationStore.ToolData(
-                "source", "v1", ToolKind.SOURCE, arguments, Optional.of("payment"), Optional.of("rev-1"), result, true), NOW);
+                "source", "v1", ToolKind.SOURCE, arguments, Optional.of("payment"), Optional.of("rev-1"), result), NOW);
         String rejectedArguments = "{not-json}";
         store.appendFeedback(claim, "INVALID_TOOL_INPUT", "safe", false, Optional.of("rejected-call"),
                 Optional.of("source"), Optional.of(rejectedArguments), Optional.of(MODEL_CONTEXT), NOW);
@@ -217,7 +227,7 @@ class PostgresConversationCommitPostgresIT {
         MessageWorkClaim claim = store.claimNext("worker-1", Duration.ofSeconds(30)).orElseThrow();
 
         assertThatThrownBy(() -> store.appendTool(claim, new ResultId(UUID.randomUUID().toString()), "source-call", MODEL_CONTEXT,
-                new ConversationStore.ToolData("source", "v1", ToolKind.SOURCE, "{not-json}", Optional.of("payment"), Optional.of("rev-1"), "{\"data\":{}}", true), NOW))
+                new ConversationStore.ToolData("source", "v1", ToolKind.SOURCE, "{not-json}", Optional.of("payment"), Optional.of("rev-1"), "{\"data\":{}}"), NOW))
                 .isInstanceOf(ConversationStoreFailure.class)
                 .extracting(exception -> ((ConversationStoreFailure) exception).kind())
                 .isEqualTo(ConversationStoreFailure.Kind.CONTRACT);
@@ -291,7 +301,7 @@ class PostgresConversationCommitPostgresIT {
     private ResultId appendSource(ConversationStore store, MessageWorkClaim claim) {
         ResultId resultId = new ResultId(UUID.randomUUID().toString());
         store.appendTool(claim, resultId, "source-call", MODEL_CONTEXT, new ConversationStore.ToolData(
-                "source", "v1", ToolKind.SOURCE, "{\"repositoryId\":\"payment\"}", Optional.of("payment"), Optional.of("rev-1"), "{}", true), NOW);
+                "source", "v1", ToolKind.SOURCE, "{\"repositoryId\":\"payment\"}", Optional.of("payment"), Optional.of("rev-1"), "{}"), NOW);
         return resultId;
     }
 

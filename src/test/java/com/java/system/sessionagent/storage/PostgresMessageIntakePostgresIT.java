@@ -508,8 +508,8 @@ class PostgresMessageIntakePostgresIT {
         try (PreparedStatement statement = connection.prepareStatement("""
                 insert into tool_message(
                     session_id, sequence, result_id, model_call_id, tool_name, tool_version, tool_kind,
-                    arguments_json, result_json, model_context, citeable)
-                values (?, ?, ?, ?, ?, ?, 'CATALOG', cast(? as jsonb), cast(? as jsonb), ?, false)
+                    arguments_json, result_json, model_context)
+                values (?, ?, ?, ?, ?, ?, 'CATALOG', cast(? as jsonb), cast(? as jsonb), ?)
                 """)) {
             statement.setObject(1, sessionId);
             statement.setLong(2, sequence);

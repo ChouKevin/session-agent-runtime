@@ -76,7 +76,7 @@ class GoogleNoToolLiveTest {
                 new ResultId("source-result"), "source-call", "dGVzdA==", "codebase_list_entry_points", "1",
                 "{\"repositoryId\":\"payment-service\",\"revision\":\"payment-revision-1\"}",
                 Optional.of("payment-service"), Optional.of("payment-revision-1"),
-                "{\"data\":{\"paymentMethods\":[\"credit card\",\"bank transfer\",\"wallet\"]}}", true);
+                "{\"data\":{\"paymentMethods\":[\"credit card\",\"bank transfer\",\"wallet\"]}}");
         List<com.java.system.sessionagent.conversation.domain.SessionMessage> history = List.of(question, source);
         ModelRequest modelRequest = new ModelRequest(
                 history, new DirectToolRegistry(List.of()).snapshot(), new ModelCallContext(sessionId, jobId, 1));
@@ -136,7 +136,7 @@ class GoogleNoToolLiveTest {
                 catalogRequest.toolName().value(), "1", catalogRequest.arguments(), Optional.empty(), Optional.empty(),
                 """
                         {"data":{"repositories":[{"displayName":"Payment Service","repositoryId":"payment-service"}]},"resultId":"catalog-result","toolName":"list_repositories"}
-                        """, false);
+                        """);
 
         ModelDecision secondDecision = model.plan(
                 new ModelRequest(List.of(question, catalogResult), registry.snapshot(), new ModelCallContext(sessionId, jobId, 2)), usage -> { });

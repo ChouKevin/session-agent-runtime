@@ -238,7 +238,7 @@ public final class MessageJobService implements MessageJobPort {
             return handleFailure(claim, guard, ConversationFailurePolicy.tool(invalidResponse), toolDetails(toolCall), "TOOL");
         }
         ConversationStore.ToolData data = new ConversationStore.ToolData(execution.name().value(), execution.version(), execution.kind(),
-                execution.canonicalArguments(), execution.repositoryId(), execution.revision(), resultJson, execution.citeable());
+                execution.canonicalArguments(), execution.repositoryId(), execution.revision(), resultJson);
         try {
             conversationStore.appendTool(claim, resultId, toolCall.callId(), toolCall.modelContext(), data, clock.instant());
             telemetry.tool(execution.name().value(), "SUCCESS", execution.repositoryId(), execution.revision());

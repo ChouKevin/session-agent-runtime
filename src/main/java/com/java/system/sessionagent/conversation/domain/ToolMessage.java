@@ -19,8 +19,7 @@ public record ToolMessage(
         String arguments,
         Optional<String> repositoryId,
         Optional<String> revision,
-        String resultJson,
-        boolean citeable) implements SessionMessage {
+        String resultJson) implements SessionMessage {
 
     public ToolMessage {
         Assert.notNull(sessionId, "Session ID must not be null");
@@ -39,12 +38,8 @@ public record ToolMessage(
         Assert.notNull(revision, "Revision must not be null");
         repositoryId.ifPresent(value -> Assert.hasText(value, "Repository ID must not be blank"));
         revision.ifPresent(value -> Assert.hasText(value, "Revision must not be blank"));
+        Assert.isTrue(repositoryId.isPresent() == revision.isPresent(),
+                "Repository ID and revision must be present together");
         Assert.hasText(resultJson, "Tool result JSON must not be blank");
-        if (citeable && (repositoryId.isEmpty() || revision.isEmpty())) {
-            throw new IllegalArgumentException("Citeable tool results require repository and revision");
-        }
-        if (!citeable && (repositoryId.isPresent() || revision.isPresent())) {
-            throw new IllegalArgumentException("Catalog tool results must not have repository or revision");
-        }
     }
 }

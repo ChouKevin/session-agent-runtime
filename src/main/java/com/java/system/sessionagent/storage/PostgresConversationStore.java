@@ -400,14 +400,14 @@ public final class PostgresConversationStore implements ConversationStore {
             insertSessionMessage(sessionId, sequence, UUID.fromString(requiredClaim.messageJobId().value()), "TOOL", requiredCreatedAt);
             jdbcTemplate.update("""
                     insert into tool_message(session_id, sequence, result_id, model_call_id, model_context, tool_name, tool_version, tool_kind,
-                        arguments_json, repository_id, revision, result_json, citeable)
-                    values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        arguments_json, repository_id, revision, result_json)
+                    values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """, sessionId, sequence, UUID.fromString(requiredResultId.value()), modelCallId, modelContext, requiredData.toolName(),
                     requiredData.toolVersion(), requiredData.persistedKind(), requiredData.canonicalArguments(),
-                    requiredData.repositoryId().orElse(null), requiredData.revision().orElse(null), requiredData.resultJson(), requiredData.citeable());
+                    requiredData.repositoryId().orElse(null), requiredData.revision().orElse(null), requiredData.resultJson());
             return new ToolMessage(requiredClaim.sessionId(), new SessionSequence(sequence), Optional.of(requiredClaim.messageJobId()),
                     requiredCreatedAt, MessageRole.TOOL, requiredResultId, modelCallId, modelContext, requiredData.toolName(), requiredData.toolVersion(),
-                    requiredData.canonicalArguments(), requiredData.repositoryId(), requiredData.revision(), requiredData.resultJson(), requiredData.citeable());
+                    requiredData.canonicalArguments(), requiredData.repositoryId(), requiredData.revision(), requiredData.resultJson());
         });
     }
 
@@ -566,7 +566,7 @@ public final class PostgresConversationStore implements ConversationStore {
     private List<SessionMessage> loadToolMessages(UUID sessionId) {
         return jdbcTemplate.query("""
                 select message.sequence, message.message_job_id, message.created_at, detail.result_id, detail.model_call_id, detail.model_context, detail.tool_name,
-                       detail.tool_version, detail.arguments_json, detail.repository_id, detail.revision, detail.result_json, detail.citeable
+                       detail.tool_version, detail.arguments_json, detail.repository_id, detail.revision, detail.result_json
                 from session_message message join tool_message detail on detail.session_id = message.session_id and detail.sequence = message.sequence
                 where message.session_id = ?
                 """, (resultSet, rowNumber) -> new ToolMessage(new SessionId(sessionId.toString()), new SessionSequence(resultSet.getLong("sequence")),
@@ -575,7 +575,7 @@ public final class PostgresConversationStore implements ConversationStore {
                 new ResultId(resultSet.getObject("result_id", UUID.class).toString()), resultSet.getString("model_call_id"),
                 resultSet.getString("model_context"), resultSet.getString("tool_name"),
                 resultSet.getString("tool_version"), resultSet.getString("arguments_json"), Optional.ofNullable(resultSet.getString("repository_id")),
-                Optional.ofNullable(resultSet.getString("revision")), resultSet.getString("result_json"), resultSet.getBoolean("citeable")), sessionId);
+                Optional.ofNullable(resultSet.getString("revision")), resultSet.getString("result_json")), sessionId);
     }
 
     private List<SessionMessage> loadFeedbackMessages(UUID sessionId) {
@@ -631,14 +631,14 @@ public final class PostgresConversationStore implements ConversationStore {
         }
         try {
             return jdbcTemplate.query("""
-                    select result_id, session_id, tool_name, tool_version, arguments_json, repository_id, revision, result_json, citeable
+                    select result_id, session_id, tool_name, tool_version, arguments_json, repository_id, revision, result_json
                     from tool_message where result_id = ?
                     """, (resultSet, rowNumber) -> new ResultProjection(
                     new ResultId(resultSet.getObject("result_id", UUID.class).toString()),
                     new SessionId(resultSet.getObject("session_id", UUID.class).toString()), resultSet.getString("tool_name"),
                     resultSet.getString("tool_version"), resultSet.getString("arguments_json"),
                     Optional.ofNullable(resultSet.getString("repository_id")), Optional.ofNullable(resultSet.getString("revision")),
-                    resultSet.getString("result_json"), resultSet.getBoolean("citeable")), parsedResultId).stream().findFirst();
+                    resultSet.getString("result_json")), parsedResultId).stream().findFirst();
         } catch (RuntimeException exception) { throw translate(exception); }
     }
 

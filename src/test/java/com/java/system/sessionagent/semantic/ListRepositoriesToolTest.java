@@ -28,7 +28,7 @@ class ListRepositoriesToolTest {
     @Test
     void wraps_catalog_repositories_inside_the_production_data_envelope() throws Exception {
         ToolExecution execution = new ToolExecution(new ToolName("list_repositories"), "v1", ToolKind.CATALOG, "{}",
-                Optional.empty(), Optional.empty(), "{\"repositories\":[{\"repositoryId\":\"payment-service\"}]}", false);
+                Optional.empty(), Optional.empty(), "{\"repositories\":[{\"repositoryId\":\"payment-service\"}]}");
         String resultJson = new com.java.system.sessionagent.tool.application.ToolResultEnvelopeFactory().envelope("result-1",
                 new com.java.system.sessionagent.tool.application.ToolResultEnvelopeFactory().validate(execution));
 
@@ -55,7 +55,6 @@ class ListRepositoriesToolTest {
         assertFalse(definition.inputSchema().contains("repositoryId"));
         assertEquals(Optional.empty(), execution.repositoryId());
         assertEquals(Optional.empty(), execution.revision());
-        assertFalse(execution.citeable());
         assertEquals("{\"repositories\":[{\"repositoryId\":\"payment-service\",\"revision\":\"revision-a\"}]}", execution.dataJson());
     }
 

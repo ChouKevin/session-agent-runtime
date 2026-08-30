@@ -352,7 +352,7 @@ class SessionAgentLiveIT {
                 assertThat(requiredText(result, "revision")).isEqualTo(revision.orElseThrow());
             }
             return new ToolResult(requiredSequence(toolMessage), resultId, requiredText(toolMessage, "toolName"), repositoryId, revision,
-                    result.path("citeable").asBoolean(false), requiredText(result, "canonicalArguments"), requiredText(result, "resultJson"));
+                    requiredText(result, "canonicalArguments"), requiredText(result, "resultJson"));
         }
 
         private Optional<ToolResult> previousCatalog(String sessionId, String jobId, JsonNode messages) throws Exception {
@@ -455,7 +455,6 @@ class SessionAgentLiveIT {
             String toolName,
             Optional<String> repositoryId,
             Optional<String> revision,
-            boolean citeable,
             String canonicalArguments,
             String resultJson) {
     }
