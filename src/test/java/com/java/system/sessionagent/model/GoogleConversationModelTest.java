@@ -1,6 +1,5 @@
 package com.java.system.sessionagent.model;
 
-import com.java.system.sessionagent.conversation.domain.AssistantReply;
 import com.java.system.sessionagent.conversation.domain.MessageJobId;
 import com.java.system.sessionagent.conversation.domain.ModelDecision;
 import com.java.system.sessionagent.conversation.domain.ModelCallContext;
@@ -111,18 +110,17 @@ class GoogleConversationModelTest {
     }
 
     @Test
-    void decodes_a_strict_final_reply_and_uses_no_callbacks() {
-        RecordingChatModel chatModel = new RecordingChatModel(response(
-                new AssistantMessage("{\"citations\":[{\"value\":\"result-1\"}],\"message\":\"Answer\"}"), null));
+    void returns_json_final_content_as_an_opaque_string() {
+        String rawReply = "{\"paymentMethods\":[\"CREDIT_CARD\",\"WALLET\"]}";
+        RecordingChatModel chatModel = new RecordingChatModel(response(new AssistantMessage(rawReply)));
         GoogleConversationModel model = new GoogleConversationModel(chatModel, new PromptResource());
-        List<ModelUsage> observedUsage = new ArrayList<>();
 
-        AssistantReply decision = model.reply(replyRequest(), observedUsage::add);
+        String reply = model.reply(replyRequest(), usage -> { });
 
-        assertThat(decision).isEqualTo(new AssistantReply("Answer", List.of(new ResultId("result-1"))));
+        assertThat(reply).isEqualTo(rawReply);
         ToolCallingChatOptions options = (ToolCallingChatOptions) chatModel.prompt.getOptions();
         assertThat(CollectionUtils.isEmpty(options.getToolCallbacks())).isTrue();
-        assertThat(observedUsage).containsExactly(new ModelUsage(0, 0, 0, false));
+        assertThat(chatModel.callCount).isEqualTo(1);
     }
 
     @Test
@@ -156,20 +154,17 @@ class GoogleConversationModelTest {
     }
 
     @Test
-    void records_invalid_final_completion_before_throwing_correctable_failure() {
+    void records_opaque_final_completion() {
         RecordingModelCallRecorder recorder = new RecordingModelCallRecorder();
         GoogleConversationModel model = diagnosticModel(response(new AssistantMessage("not-json")), recorder);
 
-        assertThatThrownBy(() -> model.reply(replyRequestWithOrdinal(4), usage -> { }))
-                .isInstanceOf(ModelCallFailure.class)
-                .extracting(exception -> ((ModelCallFailure) exception).kind())
-                .isEqualTo(ModelCallFailure.Kind.CORRECTABLE);
+        assertThat(model.reply(replyRequestWithOrdinal(4), usage -> { })).isEqualTo("not-json");
 
         assertThat(recorder.records()).singleElement().satisfies(record -> {
             assertThat(record.phase()).isEqualTo(ModelCallPhase.FINAL_REPLY);
-            assertThat(record.outcome()).isEqualTo(ModelCallOutcome.INVALID_RESPONSE);
+            assertThat(record.outcome()).isEqualTo(ModelCallOutcome.FINAL_REPLY);
             assertThat(record.rawCompletion()).contains("not-json");
-            assertThat(record.decodeError()).isPresent();
+            assertThat(record.decodeError()).isEmpty();
         });
     }
 
@@ -282,25 +277,25 @@ class GoogleConversationModelTest {
     }
 
     @Test
-    void creates_one_provider_native_structured_reply_call_without_tools() {
+    void leaves_google_final_reply_format_unrestricted() {
         RecordingGoogleChatModel chatModel = new RecordingGoogleChatModel(response(
-                new AssistantMessage("{\"citations\":[{\"value\":\"result-1\"}],\"message\":\"Answer\"}"), null));
+                new AssistantMessage("## Answer\n\n- CREDIT_CARD"), null));
         GoogleConversationModel model = new GoogleConversationModel(
                 chatModel, new PromptResource(), new NoOpConversationTelemetry(), "gemini-3.1-flash-lite");
 
-        AssistantReply reply = model.reply(replyRequest(), usage -> { });
+        String reply = model.reply(replyRequest(), usage -> { });
 
-        assertThat(reply).isEqualTo(new AssistantReply("Answer", List.of(new ResultId("result-1"))));
-        assertThat(chatModel.callCount).isEqualTo(1);
+        assertThat(reply).isEqualTo("## Answer\n\n- CREDIT_CARD");
         GoogleGenAiChatOptions options = (GoogleGenAiChatOptions) chatModel.prompt.getOptions();
         assertThat(options.getIncludeThoughts()).isFalse();
         assertThat(options.getToolCallbacks()).isEmpty();
-        assertThat(options.getResponseMimeType()).isEqualTo("application/json");
-        assertThat(options.getResponseSchema()).contains("\"message\"", "\"citations\"");
+        assertThat(options.getResponseMimeType()).isNull();
+        assertThat(options.getResponseSchema()).isNull();
+        assertThat(chatModel.callCount).isEqualTo(1);
     }
 
     @Test
-    void delegates_final_reply_conversion_to_spring_ai_instead_of_the_runtime_codec() {
+    void returns_final_reply_without_using_the_runtime_codec() {
         StrictJsonCodec jsonCodec = mock(StrictJsonCodec.class);
         when(jsonCodec.canonicalize(any())).thenReturn("[]");
         RecordingChatModel chatModel = new RecordingChatModel(response(
@@ -308,14 +303,14 @@ class GoogleConversationModelTest {
         GoogleConversationModel model = new GoogleConversationModel(ChatClient.create(chatModel), new PromptResource(),
                 new SpringAiToolCallbackFactory(), new ConversationHistoryProjector(), jsonCodec);
 
-        AssistantReply reply = model.reply(replyRequest(), usage -> { });
+        String reply = model.reply(replyRequest(), usage -> { });
 
-        assertThat(reply).isEqualTo(new AssistantReply("Answer", List.of(new ResultId("result-1"))));
-        verify(jsonCodec, never()).decode(any(), org.mockito.ArgumentMatchers.eq(AssistantReply.class));
+        assertThat(reply).isEqualTo("{\"citations\":[{\"value\":\"result-1\"}],\"message\":\"Answer\"}");
+        verify(jsonCodec, never()).decode(any(), org.mockito.ArgumentMatchers.eq(String.class));
     }
 
     @Test
-    void appends_exact_citeable_result_ids_to_the_final_reply_request() {
+    void adds_a_citation_free_final_reply_instruction() {
         RecordingChatModel chatModel = new RecordingChatModel(response(
                 new AssistantMessage("{\"citations\":[{\"value\":\"source-result\"}],\"message\":\"Answer\"}"), null));
         GoogleConversationModel model = new GoogleConversationModel(chatModel, new PromptResource());
@@ -339,31 +334,20 @@ class GoogleConversationModelTest {
         org.springframework.ai.chat.messages.Message finalInstruction = chatModel.prompt.getInstructions().getLast();
         assertThat(finalInstruction).isInstanceOf(org.springframework.ai.chat.messages.UserMessage.class);
         assertThat(finalInstruction.getText())
-                .contains("source-result")
-                .contains("complete empty code search")
-                .contains("source citation does not replace")
-                .doesNotContain("catalog-result", "catalog-payload", "private-source-payload");
+                .isEqualTo("Runtime final reply: answer the latest user request now. No tools are available in this call. "
+                        + "Follow any output format requested by the user and return the answer content directly.");
     }
 
     @Test
-    void asks_spring_ai_to_enforce_the_final_reply_json_schema() {
-        RecordingGoogleChatModel chatModel = new RecordingGoogleChatModel(response(
-                new AssistantMessage("{\"citations\":[{\"value\":\"result-1\"}],\"message\":\"Answer\"}"), null));
-        GoogleConversationModel model = new GoogleConversationModel(
-                chatModel, new PromptResource(), new NoOpConversationTelemetry(), "gemini-3.1-flash-lite");
+    void uses_the_primary_final_text_without_rejecting_additional_provider_candidates() {
+        RecordingChatModel chatModel = new RecordingChatModel(response(
+                new AssistantMessage("primary answer"),
+                new AssistantMessage("secondary candidate")));
+        GoogleConversationModel model = new GoogleConversationModel(chatModel, new PromptResource());
 
-        model.reply(replyRequest(), usage -> { });
+        String reply = model.reply(replyRequest(), usage -> { });
 
-        GoogleGenAiChatOptions options = (GoogleGenAiChatOptions) chatModel.prompt.getOptions();
-        assertThat(options.getIncludeThoughts()).isFalse();
-        assertThat(options.getResponseMimeType()).isEqualTo("application/json");
-        assertThat(options.getResponseSchema())
-                .contains("\"message\"")
-                .contains("\"citations\"")
-                .contains("\"value\"")
-                .contains("\"required\" : [ \"citations\", \"message\" ]")
-                .contains("\"required\" : [ \"value\" ]");
-        assertThat(options.getToolCallbacks()).isEmpty();
+        assertThat(reply).isEqualTo("primary answer");
     }
 
     @Test
@@ -381,7 +365,7 @@ class GoogleConversationModelTest {
     }
 
     @Test
-    void rejects_a_json_final_reply_with_a_tool_call_without_repeating_the_provider_call() {
+    void returns_primary_final_text_even_when_provider_includes_tool_call_metadata() {
         AssistantMessage finalReplyWithToolCall = AssistantMessage.builder()
                 .content("{\"citations\":[{\"value\":\"result-1\"}],\"message\":\"Answer\"}")
                 .toolCalls(List.of(new AssistantMessage.ToolCall("call-1", "function", "catalog", "{}")))
@@ -389,23 +373,21 @@ class GoogleConversationModelTest {
         RecordingChatModel chatModel = new RecordingChatModel(response(finalReplyWithToolCall));
         GoogleConversationModel model = new GoogleConversationModel(chatModel, new PromptResource());
 
-        assertThatThrownBy(() -> model.reply(replyRequest(), usage -> { }))
-                .isInstanceOf(ModelCallFailure.class)
-                .extracting(exception -> ((ModelCallFailure) exception).kind())
-                .isEqualTo(ModelCallFailure.Kind.CORRECTABLE);
+        assertThat(model.reply(replyRequest(), usage -> { }))
+                .isEqualTo("{\"citations\":[{\"value\":\"result-1\"}],\"message\":\"Answer\"}");
 
         assertThat(chatModel.callCount).isEqualTo(1);
     }
 
     @Test
-    void ignores_an_unknown_top_level_field_when_converting_the_final_reply() {
+    void returns_unrestricted_json_final_reply_unchanged() {
         RecordingChatModel chatModel = new RecordingChatModel(response(new AssistantMessage(
                 "{\"citations\":[{\"value\":\"result-1\"}],\"message\":\"Answer\",\"unexpected\":true}")));
         GoogleConversationModel model = new GoogleConversationModel(chatModel, new PromptResource());
 
-        AssistantReply reply = model.reply(replyRequest(), usage -> { });
+        String reply = model.reply(replyRequest(), usage -> { });
 
-        assertThat(reply).isEqualTo(new AssistantReply("Answer", List.of(new ResultId("result-1"))));
+        assertThat(reply).isEqualTo("{\"citations\":[{\"value\":\"result-1\"}],\"message\":\"Answer\",\"unexpected\":true}");
         assertThat(chatModel.callCount).isEqualTo(1);
     }
 
@@ -430,16 +412,15 @@ class GoogleConversationModelTest {
     }
 
     @Test
-    void does_not_repeat_the_provider_call_when_final_json_is_invalid() {
+    void treats_non_json_final_text_as_success_without_repeating_the_provider_call() {
         ConversationTelemetry telemetry = mock(ConversationTelemetry.class);
         RecordingChatModel chatModel = new RecordingChatModel(response(new AssistantMessage("not-json")));
         GoogleConversationModel model = new GoogleConversationModel(chatModel, new PromptResource(), telemetry);
 
-        assertThatThrownBy(() -> model.reply(replyRequest(), usage -> { }))
-                .isInstanceOf(ModelCallFailure.class);
+        assertThat(model.reply(replyRequest(), usage -> { })).isEqualTo("not-json");
 
-        verify(telemetry).model("FAILURE", Optional.of("CORRECTABLE"), new ModelUsage(0, 0, 0, false));
-        verify(telemetry, never()).model(org.mockito.ArgumentMatchers.eq("SUCCESS"), any(), any());
+        verify(telemetry).model("SUCCESS", Optional.of("UNAVAILABLE"), new ModelUsage(0, 0, 0, false));
+        verify(telemetry, never()).model(org.mockito.ArgumentMatchers.eq("FAILURE"), any(), any());
         assertThat(chatModel.callCount).isEqualTo(1);
     }
 

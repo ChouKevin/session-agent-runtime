@@ -1,6 +1,5 @@
 package com.java.system.sessionagent.storage;
 
-import com.java.system.sessionagent.conversation.domain.AssistantReply;
 import com.java.system.sessionagent.conversation.domain.FeedbackMessage;
 import com.java.system.sessionagent.conversation.domain.IncomingMessage;
 import com.java.system.sessionagent.conversation.domain.MessageReceipt;
@@ -9,6 +8,7 @@ import com.java.system.sessionagent.conversation.domain.ResultId;
 import com.java.system.sessionagent.conversation.domain.SessionMessage;
 import com.java.system.sessionagent.conversation.domain.ToolMessage;
 import com.java.system.sessionagent.conversation.domain.AssistantMessage;
+import com.java.system.sessionagent.conversation.domain.JobStatus;
 import com.java.system.sessionagent.conversation.port.out.ConversationStore;
 import com.java.system.sessionagent.conversation.port.out.ConversationStoreFailure;
 import com.java.system.sessionagent.conversation.port.out.StaleWorkClaimException;
@@ -65,16 +65,15 @@ class PostgresConversationCommitPostgresIT {
     }
 
     @Test
-    void atomically_commits_a_tool_then_a_cited_terminal_assistant_reply() {
+    void atomically_commits_a_tool_then_an_opaque_terminal_assistant_reply() {
         ConversationStore store = newStore();
         MessageReceipt receipt = store.receive(new IncomingMessage("thread-1", "alice", "source-1", "hello"));
         MessageWorkClaim claim = store.claimNext("worker-1", Duration.ofSeconds(30)).orElseThrow();
-        ResultId resultId = appendSource(store, claim);
-        store.appendAssistant(claim, new AssistantReply("done", java.util.List.of(resultId)), NOW);
+        appendSource(store, claim);
+        store.appendAssistant(claim, "done", NOW);
 
         assertThat(jdbcTemplate.queryForObject("select count(*) from session_message", Integer.class)).isEqualTo(3);
         assertThat(jdbcTemplate.queryForObject("select count(*) from tool_message", Integer.class)).isEqualTo(1);
-        assertThat(jdbcTemplate.queryForObject("select count(*) from assistant_citation", Integer.class)).isEqualTo(1);
         assertThat(jdbcTemplate.queryForObject("select status from message_job where message_job_id = ?", String.class, id(receipt)))
                 .isEqualTo("DONE");
         assertThat(store.readJob(receipt.messageJobId())).hasValueSatisfying(job -> assertThat(job.replySequence()).isPresent());
@@ -83,7 +82,7 @@ class PostgresConversationCommitPostgresIT {
         ToolMessage tool = (ToolMessage) history.get(1);
         AssistantMessage assistant = (AssistantMessage) history.get(2);
         assertThat(tool.resultJson()).isEqualTo("{}");
-        assertThat(assistant.citations()).containsExactly(resultId);
+        assertThat(assistant.message()).isEqualTo("done");
     }
 
     @Test
@@ -127,7 +126,7 @@ class PostgresConversationCommitPostgresIT {
         jdbcTemplate.update("update message_job set locked_until = clock_timestamp() - interval '1 millisecond' where message_job_id = ?", UUID.fromString(original.messageJobId().value()));
         store.claimNext("worker-2", Duration.ofSeconds(30)).orElseThrow();
 
-        assertThatThrownBy(() -> store.appendFeedback(original, "INVALID_CITATION", "safe", false,
+        assertThatThrownBy(() -> store.appendFeedback(original, "MODEL_OUTPUT_INVALID", "safe", false,
                 Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(), NOW))
                 .isExactlyInstanceOf(StaleWorkClaimException.class);
 
@@ -136,31 +135,24 @@ class PostgresConversationCommitPostgresIT {
     }
 
     @Test
-    void treats_a_non_uuid_model_citation_id_as_an_absent_result() {
+    void treats_a_non_uuid_result_id_as_an_absent_result() {
         ConversationStore store = newStore();
 
         assertThat(store.readResult(new ResultId("hallucinated-result-id"))).isEmpty();
     }
 
     @Test
-    void rolls_back_a_cross_session_citation_without_allocating_a_sequence_or_completing_the_job() {
+    void persists_an_arbitrary_opaque_reply() {
         ConversationStore store = newStore();
         store.receive(new IncomingMessage("thread-1", "alice", "source-1", "hello"));
-        store.receive(new IncomingMessage("thread-2", "alice", "source-2", "hello"));
-        MessageWorkClaim targetClaim = store.claimNext("worker-1", Duration.ofSeconds(30)).orElseThrow();
-        MessageWorkClaim foreignClaim = store.claimNext("worker-2", Duration.ofSeconds(30)).orElseThrow();
-        ResultId foreignResult = appendSource(store, foreignClaim);
+        MessageWorkClaim claim = store.claimNext("worker-1", Duration.ofSeconds(30)).orElseThrow();
 
-        assertThatThrownBy(() -> store.appendAssistant(targetClaim, new AssistantReply("bad", java.util.List.of(foreignResult)), NOW))
-                .isInstanceOf(ConversationStoreFailure.class)
-                .extracting(exception -> ((ConversationStoreFailure) exception).kind())
-                .isEqualTo(ConversationStoreFailure.Kind.CONTRACT);
+        store.appendAssistant(claim, "{\"opaque\":true}", NOW);
 
-        assertThat(jdbcTemplate.queryForObject("select next_sequence from conversation_session where session_id = ?", Long.class, UUID.fromString(targetClaim.sessionId().value())))
-                .isEqualTo(2L);
-        assertThat(jdbcTemplate.queryForObject("select count(*) from assistant_message", Integer.class)).isZero();
-        assertThat(jdbcTemplate.queryForObject("select status from message_job where message_job_id = ?", String.class, UUID.fromString(targetClaim.messageJobId().value()))).isEqualTo("WORKING");
-        assertThat(store.readJob(foreignClaim.messageJobId())).hasValueSatisfying(job -> assertThat(job.status().name()).isEqualTo("WORKING"));
+        assertThat(store.readJob(claim.messageJobId())).hasValueSatisfying(job -> assertThat(job.status()).isEqualTo(JobStatus.DONE));
+        assertThat(jdbcTemplate.queryForObject("select count(*) from assistant_message", Integer.class)).isEqualTo(1);
+        assertThat(jdbcTemplate.queryForObject("select message from assistant_message", String.class)).isEqualTo("{\"opaque\":true}");
+        assertThat(jdbcTemplate.queryForObject("select status from message_job where message_job_id = ?", String.class, UUID.fromString(claim.messageJobId().value()))).isEqualTo("DONE");
     }
 
     @Test
@@ -169,7 +161,7 @@ class PostgresConversationCommitPostgresIT {
         MessageReceipt receipt = store.receive(new IncomingMessage("thread-1", "alice", "source-1", "hello"));
         MessageWorkClaim claim = store.claimNext("worker-1", Duration.ofSeconds(30)).orElseThrow();
 
-        store.appendFeedback(claim, "INVALID_CITATION", "safe", false, Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(), NOW);
+        store.appendFeedback(claim, "MODEL_OUTPUT_INVALID", "safe", false, Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(), NOW);
         assertThat(jdbcTemplate.queryForObject("select status from message_job where message_job_id = ?", String.class, id(receipt))).isEqualTo("WORKING");
         store.appendFeedback(claim, "CALL_LIMIT_REACHED", "safe", true, Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(), NOW);
 
@@ -244,7 +236,7 @@ class PostgresConversationCommitPostgresIT {
         jdbcTemplate.update("update message_job set locked_until = clock_timestamp() - interval '1 millisecond' where message_job_id = ?",
                 id(receipt));
 
-        assertThatThrownBy(() -> store.appendFeedback(claim, "INVALID_CITATION", "safe", false,
+        assertThatThrownBy(() -> store.appendFeedback(claim, "MODEL_OUTPUT_INVALID", "safe", false,
                 Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(), NOW.plusSeconds(31)))
                 .isExactlyInstanceOf(StaleWorkClaimException.class);
 
@@ -265,7 +257,7 @@ class PostgresConversationCommitPostgresIT {
                 statement.setObject(1, UUID.fromString(claim.sessionId().value()));
                 statement.executeQuery();
             }
-            Future<?> append = executor.submit(() -> store.appendFeedback(claim, "INVALID_CITATION", "safe", false,
+            Future<?> append = executor.submit(() -> store.appendFeedback(claim, "MODEL_OUTPUT_INVALID", "safe", false,
                     Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(), NOW));
             awaitSessionLockWait();
             try (java.sql.PreparedStatement statement = connection.prepareStatement("select pg_sleep(0.05)")) {

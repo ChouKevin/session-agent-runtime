@@ -1,7 +1,6 @@
 package com.java.system.sessionagent.storage;
 
 import com.java.system.sessionagent.conversation.domain.AssistantMessage;
-import com.java.system.sessionagent.conversation.domain.AssistantReply;
 import com.java.system.sessionagent.conversation.domain.FeedbackMessage;
 import com.java.system.sessionagent.conversation.domain.IncomingMessage;
 import com.java.system.sessionagent.conversation.domain.JobStatus;
@@ -450,24 +449,19 @@ public final class PostgresConversationStore implements ConversationStore {
     }
 
     @Override
-    public AssistantMessage appendAssistant(MessageWorkClaim claim, AssistantReply reply, Instant createdAt) {
+    public AssistantMessage appendAssistant(MessageWorkClaim claim, String message, Instant createdAt) {
         MessageWorkClaim requiredClaim = Objects.requireNonNull(claim, "Message work claim must not be null");
-        AssistantReply requiredReply = Objects.requireNonNull(reply, "Assistant reply must not be null");
+        Assert.hasText(message, "Assistant message must not be blank");
         Instant requiredCreatedAt = Objects.requireNonNull(createdAt, "Message creation time must not be null");
         return inTransaction(() -> {
             requireLiveClaim(requiredClaim);
             UUID sessionId = sessionId(requiredClaim);
-            lockCitedTools(sessionId, requiredReply.citations());
             long sequence = allocateSequence(sessionId);
             insertSessionMessage(sessionId, sequence, UUID.fromString(requiredClaim.messageJobId().value()), "ASSISTANT", requiredCreatedAt);
-            jdbcTemplate.update("insert into assistant_message(session_id, sequence, message) values (?, ?, ?)", sessionId, sequence, requiredReply.message());
-            for (int position = 0; position < requiredReply.citations().size(); position++) {
-                jdbcTemplate.update("insert into assistant_citation(session_id, assistant_sequence, position, result_id) values (?, ?, ?, ?)",
-                        sessionId, sequence, position, UUID.fromString(requiredReply.citations().get(position).value()));
-            }
+            jdbcTemplate.update("insert into assistant_message(session_id, sequence, message) values (?, ?, ?)", sessionId, sequence, message);
             completeJob(requiredClaim, sequence, clock.instant());
             return new AssistantMessage(requiredClaim.sessionId(), new SessionSequence(sequence), Optional.of(requiredClaim.messageJobId()),
-                    requiredCreatedAt, MessageRole.ASSISTANT, requiredReply.message(), requiredReply.citations());
+                    requiredCreatedAt, MessageRole.ASSISTANT, message);
         });
     }
 
@@ -558,16 +552,6 @@ public final class PostgresConversationStore implements ConversationStore {
         if (changed != 1) { throw new StaleWorkClaimException(); }
     }
 
-    private void lockCitedTools(UUID sessionId, List<ResultId> citations) {
-        for (ResultId citation : citations) {
-            List<UUID> results = jdbcTemplate.query("""
-                    select result_id from tool_message where session_id = ? and result_id = ? and citeable = true for update
-                    """, (resultSet, rowNumber) -> resultSet.getObject("result_id", UUID.class), sessionId,
-                    UUID.fromString(citation.value()));
-            if (results.isEmpty()) { throw ConversationStoreFailure.contract(new IllegalStateException("Cited tool result is unavailable")); }
-        }
-    }
-
     private List<SessionMessage> loadUserMessages(UUID sessionId) {
         return jdbcTemplate.query("""
                 select message.sequence, message.created_at, detail.participant_id, detail.message
@@ -613,15 +597,11 @@ public final class PostgresConversationStore implements ConversationStore {
                 select message.sequence, message.message_job_id, message.created_at, detail.message
                 from session_message message join assistant_message detail on detail.session_id = message.session_id and detail.sequence = message.sequence
                 where message.session_id = ?
-                """, (resultSet, rowNumber) -> {
-            long sequence = resultSet.getLong("sequence");
-            List<ResultId> citations = jdbcTemplate.query("select result_id from assistant_citation where session_id = ? and assistant_sequence = ? order by position",
-                    (citationSet, citationRow) -> new ResultId(citationSet.getObject("result_id", UUID.class).toString()), sessionId, sequence);
-            return new AssistantMessage(new SessionId(sessionId.toString()), new SessionSequence(sequence),
+                """, (resultSet, rowNumber) -> new AssistantMessage(new SessionId(sessionId.toString()),
+            new SessionSequence(resultSet.getLong("sequence")),
                     Optional.of(new MessageJobId(resultSet.getObject("message_job_id", UUID.class).toString())),
                     resultSet.getObject("created_at", OffsetDateTime.class).toInstant(), MessageRole.ASSISTANT,
-                    resultSet.getString("message"), citations);
-        }, sessionId);
+                    resultSet.getString("message")), sessionId);
     }
 
     @Override

@@ -1,6 +1,5 @@
 package com.java.system.sessionagent.conversation.application;
 
-import com.java.system.sessionagent.conversation.domain.AssistantReply;
 import com.java.system.sessionagent.conversation.domain.MessageJobId;
 import com.java.system.sessionagent.conversation.domain.MessageWorkClaim;
 import com.java.system.sessionagent.conversation.domain.ModelCallContext;
@@ -44,7 +43,6 @@ public final class MessageJobService implements MessageJobPort {
     private final ConversationModel conversationModel;
     private final DirectToolRegistry toolRegistry;
     private final ToolResultEnvelopeFactory envelopeFactory;
-    private final CitationValidator citationValidator;
     private final Clock clock;
     private final MessageJobRetryPolicy retryPolicy;
     private final ConversationTelemetry telemetry;
@@ -69,7 +67,6 @@ public final class MessageJobService implements MessageJobPort {
         this.conversationModel = Objects.requireNonNull(conversationModel, "Conversation model must not be null");
         this.toolRegistry = Objects.requireNonNull(toolRegistry, "Tool registry must not be null");
         this.envelopeFactory = new ToolResultEnvelopeFactory();
-        this.citationValidator = new CitationValidator(this.conversationStore);
         this.clock = Objects.requireNonNull(clock, "Clock must not be null");
         this.retryPolicy = Objects.requireNonNull(retryPolicy, "Message job retry policy must not be null");
         this.telemetry = Objects.requireNonNull(telemetry, "Conversation telemetry must not be null");
@@ -129,7 +126,7 @@ public final class MessageJobService implements MessageJobPort {
     private boolean processFinalReply(MessageWorkClaim claim, WorkGuard workGuard, List<SessionMessage> history,
                                       ModelCallContext callContext, boolean finalCall) {
         logModelCallStarted(claim, callContext.ordinal(), "FINAL_REPLY", history.size(), 0);
-        AssistantReply reply;
+        String reply;
         try {
             reply = conversationModel.reply(new ReplyRequest(history, callContext),
                     usage -> logModelCallUsage(claim, callContext.ordinal(), usage));
@@ -145,11 +142,16 @@ public final class MessageJobService implements MessageJobPort {
             }
             return handleFailure(claim, workGuard, ConversationFailurePolicy.model(failure), ToolFeedbackDetails.empty(), "MODEL");
         }
-        logModelCallDecision(claim, callContext.ordinal(), "FINAL_REPLY", "ASSISTANT_REPLY");
+        logModelCallDecision(claim, callContext.ordinal(), "FINAL_REPLY", "ASSISTANT_TEXT");
         if (!workGuard.stillOwned()) {
             return false;
         }
-        return validateReply(claim, workGuard, reply, finalCall);
+        try {
+            conversationStore.appendAssistant(claim, reply, clock.instant());
+        } catch (StaleWorkClaimException exception) {
+            return false;
+        }
+        return false;
     }
 
     private void recoverStorageFailure(MessageWorkClaim claim, WorkGuard guard, ConversationStoreFailure failure) {
@@ -245,30 +247,6 @@ public final class MessageJobService implements MessageJobPort {
             telemetry.tool(toolCall.toolName().value(), "STALE", Optional.empty(), Optional.empty());
             return false;
         }
-    }
-
-    private boolean validateReply(MessageWorkClaim claim, WorkGuard guard, AssistantReply reply, boolean finalCall) {
-        CitationValidator.Validation validation = citationValidator.validate(claim.sessionId(), reply.citations());
-        if (validation instanceof CitationValidator.Validation.Accepted accepted) {
-            if (guard.stillOwned()) {
-                try {
-                    conversationStore.appendAssistant(claim, new AssistantReply(reply.message(), accepted.citations()), clock.instant());
-                } catch (StaleWorkClaimException exception) {
-                    return false;
-                }
-            }
-            return false;
-        }
-        if (validation instanceof CitationValidator.Validation.Correctable correctable) {
-            logCitationRejected(claim, correctable.reason(), reply.citations().size());
-            if (finalCall) {
-                appendFeedback(claim, guard, FeedbackCode.CALL_LIMIT_REACHED, true, ToolFeedbackDetails.empty());
-                return false;
-            }
-            return appendFeedback(claim, guard, FeedbackCode.INVALID_CITATION, false, ToolFeedbackDetails.empty());
-        }
-        appendFeedback(claim, guard, FeedbackCode.INVALID_CITATION, true, ToolFeedbackDetails.empty());
-        return false;
     }
 
     private boolean handleFailure(MessageWorkClaim claim, WorkGuard guard, ConversationFailurePolicy.Failure failure,
@@ -371,12 +349,6 @@ public final class MessageJobService implements MessageJobPort {
     private static void logModelCallFailed(MessageWorkClaim claim, int ordinal, String phase, ModelCallFailure.Kind kind) {
         LOGGER.info("model_call_failed sessionId={} messageJobId={} ordinal={} phase={} closedFailureKind={}",
                 claim.sessionId().value(), claim.messageJobId().value(), ordinal, phase, kind);
-    }
-
-    private static void logCitationRejected(MessageWorkClaim claim, CitationValidator.CorrectionReason reason,
-                                            int citationCount) {
-        LOGGER.info("assistant_citation_rejected sessionId={} messageJobId={} phase=FINAL_REPLY reason={} citationCount={}",
-                claim.sessionId().value(), claim.messageJobId().value(), reason, citationCount);
     }
 
     private static ToolFeedbackDetails toolDetails(ModelDecision.UseTool toolCall) {

@@ -109,7 +109,7 @@ class ConversationHistoryProjectorTest {
                         Optional.of("call-source"), Optional.of("get_source_segment"),
                         Optional.of("{\"repositoryId\":\"payment-service\"}"), Optional.of(MODEL_CONTEXT)),
                 new AssistantMessage(SESSION_ID, new SessionSequence(5), Optional.of(JOB_ID), CREATED_AT,
-                        MessageRole.ASSISTANT, "The catalog is available.", List.of(new ResultId("result-catalog"))),
+                        MessageRole.ASSISTANT, "The catalog is available."),
                 new UserMessage(SESSION_ID, new SessionSequence(6), Optional.of(JOB_ID), CREATED_AT,
                         MessageRole.USER, "Bob", "Please inspect the payment code."),
                 new FeedbackMessage(SESSION_ID, new SessionSequence(7), Optional.of(JOB_ID), CREATED_AT,

@@ -2,7 +2,6 @@ package com.java.system.sessionagent.conversation;
 
 import com.java.system.sessionagent.conversation.application.ConversationMessageService;
 import com.java.system.sessionagent.conversation.domain.AssistantMessage;
-import com.java.system.sessionagent.conversation.domain.AssistantReply;
 import com.java.system.sessionagent.conversation.domain.FeedbackMessage;
 import com.java.system.sessionagent.conversation.domain.IncomingMessage;
 import com.java.system.sessionagent.conversation.domain.MessageJobId;
@@ -153,7 +152,7 @@ class ConversationMessageServiceTest {
         }
 
         @Override
-        public AssistantMessage appendAssistant(MessageWorkClaim claim, AssistantReply reply, Instant createdAt) {
+        public AssistantMessage appendAssistant(MessageWorkClaim claim, String message, Instant createdAt) {
             throw new UnsupportedOperationException("Assistant persistence is not part of message intake");
         }
 

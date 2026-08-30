@@ -1,7 +1,6 @@
 package com.java.system.sessionagent.conversation.port.out;
 
 import com.java.system.sessionagent.conversation.domain.AssistantMessage;
-import com.java.system.sessionagent.conversation.domain.AssistantReply;
 import com.java.system.sessionagent.conversation.domain.FeedbackMessage;
 import com.java.system.sessionagent.conversation.domain.IncomingMessage;
 import com.java.system.sessionagent.conversation.domain.JobStatus;
@@ -55,7 +54,7 @@ public interface ConversationStore {
             Optional<String> modelContext,
             Instant createdAt);
 
-    AssistantMessage appendAssistant(MessageWorkClaim claim, AssistantReply reply, Instant createdAt);
+    AssistantMessage appendAssistant(MessageWorkClaim claim, String message, Instant createdAt);
 
     boolean scheduleRetry(MessageWorkClaim claim, Duration retryDelay);
 

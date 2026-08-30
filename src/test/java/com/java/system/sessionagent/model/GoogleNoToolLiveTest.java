@@ -1,6 +1,5 @@
 package com.java.system.sessionagent.model;
 
-import com.java.system.sessionagent.conversation.domain.AssistantReply;
 import com.java.system.sessionagent.conversation.domain.MessageJobId;
 import com.java.system.sessionagent.conversation.domain.MessageRole;
 import com.java.system.sessionagent.conversation.domain.ModelCallContext;
@@ -85,10 +84,9 @@ class GoogleNoToolLiveTest {
 
         ModelDecision planning = model.plan(modelRequest, usage -> { });
         assertThat(planning).isEqualTo(new ModelDecision.AnswerReady());
-        AssistantReply reply = model.reply(replyRequest, usage -> { });
+        String reply = model.reply(replyRequest, usage -> { });
 
-        assertThat(reply.message()).isNotBlank();
-        assertThat(reply.citations()).containsExactly(new ResultId("source-result"));
+        assertThat(reply).isNotBlank();
         assertThat(countingModel.calls()).isEqualTo(2);
         assertThat(recorder.records()).satisfiesExactly(
                 planningRecord -> {

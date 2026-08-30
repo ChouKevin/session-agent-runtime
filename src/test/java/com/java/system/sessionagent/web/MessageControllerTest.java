@@ -1,8 +1,11 @@
 package com.java.system.sessionagent.web;
 
 import com.java.system.sessionagent.conversation.domain.IncomingMessage;
+import com.java.system.sessionagent.conversation.domain.AssistantMessage;
 import com.java.system.sessionagent.conversation.domain.MessageJobId;
+import com.java.system.sessionagent.conversation.domain.MessageRole;
 import com.java.system.sessionagent.conversation.domain.MessageReceipt;
+import com.java.system.sessionagent.conversation.domain.SessionSequence;
 import com.java.system.sessionagent.conversation.domain.SessionId;
 import com.java.system.sessionagent.conversation.port.in.ConversationQueryPort;
 import com.java.system.sessionagent.conversation.port.in.MessageIntakePort;
@@ -143,7 +146,9 @@ class MessageControllerTest {
                         java.time.Instant.parse("2026-08-16T00:00:01Z"), com.java.system.sessionagent.conversation.domain.MessageRole.FEEDBACK,
                         "REVISION_OUTDATED", "{\"repositoryId\":\"payment-service\",\"requestedRevision\":\"R1\",\"currentRevision\":\"R2\"}", false,
                         Optional.of("call"), Optional.of("codebase_search"), Optional.of("{\"repositoryId\":\"payment-service\",\"revision\":\"R1\"}"),
-                        Optional.of("sensitive-model-context")))));
+                        Optional.of("sensitive-model-context")),
+                new AssistantMessage(new SessionId(sessionId), new SessionSequence(4), Optional.of(new MessageJobId(jobId)),
+                        java.time.Instant.parse("2026-08-16T00:00:02Z"), MessageRole.ASSISTANT, "opaque answer"))));
         MockMvc mvc = mvc(intake, queries);
 
         mvc.perform(get("/internal/message-jobs/{messageJobId}", jobId))
@@ -160,7 +165,9 @@ class MessageControllerTest {
                 .andExpect(jsonPath("$[1].rejectedArguments").value("{\"repositoryId\":\"payment-service\",\"revision\":\"R1\"}"))
                 .andExpect(jsonPath("$[1].message").value("{\"repositoryId\":\"payment-service\",\"requestedRevision\":\"R1\",\"currentRevision\":\"R2\"}"))
                 .andExpect(jsonPath("$[1].modelContext").doesNotExist())
-                .andExpect(jsonPath("$[1].resultJson").doesNotExist());
+                .andExpect(jsonPath("$[1].resultJson").doesNotExist())
+                .andExpect(jsonPath("$[2].message").value("opaque answer"))
+                .andExpect(jsonPath("$[2].citations").doesNotExist());
     }
 
     @Test

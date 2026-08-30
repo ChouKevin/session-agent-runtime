@@ -1,6 +1,5 @@
 package com.java.system.sessionagent.model;
 
-import com.java.system.sessionagent.conversation.domain.AssistantReply;
 import com.java.system.sessionagent.conversation.domain.ModelCallContext;
 import com.java.system.sessionagent.conversation.domain.ModelCallOutcome;
 import com.java.system.sessionagent.conversation.domain.ModelCallPhase;
@@ -9,7 +8,6 @@ import com.java.system.sessionagent.conversation.domain.ModelDecision;
 import com.java.system.sessionagent.conversation.domain.ModelRequest;
 import com.java.system.sessionagent.conversation.domain.ModelUsage;
 import com.java.system.sessionagent.conversation.domain.ReplyRequest;
-import com.java.system.sessionagent.conversation.domain.ToolMessage;
 import com.java.system.sessionagent.conversation.port.out.ModelCallFailure;
 import com.java.system.sessionagent.conversation.port.out.ModelCallRecorder;
 import com.java.system.sessionagent.conversation.port.out.ConversationTelemetry;
@@ -18,8 +16,6 @@ import com.java.system.sessionagent.tool.domain.ToolName;
 import com.java.system.sessionagent.tool.json.StrictJsonCodec;
 import org.springframework.ai.chat.client.AdvisorParams;
 import org.springframework.ai.chat.client.ChatClient;
-import org.springframework.ai.chat.client.ResponseEntity;
-import org.springframework.ai.chat.client.advisor.StructuredOutputValidationAdvisor;
 import org.springframework.ai.chat.metadata.ChatResponseMetadata;
 import org.springframework.ai.chat.metadata.ChatGenerationMetadata;
 import org.springframework.ai.chat.metadata.EmptyUsage;
@@ -209,19 +205,17 @@ public final class GoogleConversationModel implements com.java.system.sessionage
     }
 
     @Override
-    public AssistantReply reply(ReplyRequest request, Consumer<ModelUsage> usageObserver) {
+    public String reply(ReplyRequest request, Consumer<ModelUsage> usageObserver) {
         Assert.notNull(request, "Reply request must not be null");
         Assert.notNull(usageObserver, "Model usage observer must not be null");
         List<Message> messages = replyMessagesFor(request);
         LOGGER.info("google_model_request phase=FINAL_REPLY messageCount={} callbackCount={}", messages.size(), 0);
         SpringAiCallCapture callCapture = new SpringAiCallCapture(clock);
         ChatResponse response;
-        AssistantReply reply;
+        String reply;
         try {
-            ResponseEntity<ChatResponse, AssistantReply> responseEntity = replyCall(messages, callCapture);
-            response = Objects.requireNonNull(responseEntity.response(), "Spring AI final reply response must not be null");
-            validateFinalReplyShape(response);
-            reply = Objects.requireNonNull(responseEntity.entity(), "Spring AI final reply entity must not be null");
+            response = replyCall(messages, callCapture);
+            reply = finalReplyText(response);
         } catch (RuntimeException exception) {
             ModelCallFailure failure = callCapture.providerFailure()
                     .map(GoogleConversationModel::classifyProviderFailure)
@@ -259,19 +253,9 @@ public final class GoogleConversationModel implements com.java.system.sessionage
         List<Message> messages = new ArrayList<>();
         messages.add(new org.springframework.ai.chat.messages.SystemMessage(promptResource.content()));
         messages.addAll(historyProjector.project(request.history()));
-        List<String> resultIds = request.history().stream()
-                .filter(ToolMessage.class::isInstance)
-                .map(ToolMessage.class::cast)
-                .filter(ToolMessage::citeable)
-                .map(message -> message.resultId().value())
-                .distinct()
-                .toList();
         messages.add(new org.springframework.ai.chat.messages.UserMessage(
-                "Runtime final reply requirement: no tools are available. Return only the final JSON object described "
-                        + "by the system instruction. Every citation value must be chosen from this exact list: "
-                        + jsonCodec.canonicalize(resultIds)
-                        + ". Re-read the tool results in history before choosing citations. If the answer reports codebase "
-                        + "absence, cite a supporting complete empty code search; a source citation does not replace it."));
+                "Runtime final reply: answer the latest user request now. No tools are available in this call. "
+                        + "Follow any output format requested by the user and return the answer content directly."));
         return List.copyOf(messages);
     }
 
@@ -294,14 +278,10 @@ public final class GoogleConversationModel implements com.java.system.sessionage
         }
     }
 
-    private ResponseEntity<ChatResponse, AssistantReply> replyCall(List<Message> messages, SpringAiCallCapture callCapture) {
-        StructuredOutputValidationAdvisor replyValidator = StructuredOutputValidationAdvisor.builder()
-                .outputType(AssistantReply.class)
-                .maxRepeatAttempts(0)
-                .build();
+    private ChatResponse replyCall(List<Message> messages, SpringAiCallCapture callCapture) {
         ChatClient.ChatClientRequestSpec request = chatClient.prompt()
                 .advisors(AdvisorParams.toolCallingAdvisorAutoRegister(false))
-                .advisors(replyValidator, callCapture)
+                .advisors(callCapture)
                 .messages(messages)
                 .toolCallbacks(List.of());
         if (googleOptions.isPresent()) {
@@ -310,7 +290,8 @@ public final class GoogleConversationModel implements com.java.system.sessionage
                     .toolCallbacks(List.of());
             request = request.options(options);
         }
-        return request.call().responseEntity(AssistantReply.class, spec -> spec.useProviderStructuredOutput());
+        return Objects.requireNonNull(request.call().chatResponse(),
+                "Spring AI final reply response must not be null");
     }
 
     private static GoogleGenAiChatOptions configureGoogleOptions(ChatModel chatModel, String modelName) {
@@ -430,18 +411,11 @@ public final class GoogleConversationModel implements com.java.system.sessionage
         return new ModelDecision.AnswerReady();
     }
 
-    private static void validateFinalReplyShape(ChatResponse response) {
-        List<Generation> actionableResults = response.getResults().stream()
-                .filter(result -> !isThought(result))
-                .toList();
-        if (actionableResults.size() != 1) {
-            throw ModelCallFailure.correctable();
-        }
-        AssistantMessage message = Optional.ofNullable(actionableResults.getFirst().getOutput())
+    private static String finalReplyText(ChatResponse response) {
+        return actionableMessage(response)
+                .map(AssistantMessage::getText)
+                .filter(StringUtils::hasText)
                 .orElseThrow(ModelCallFailure::correctable);
-        if (message.hasToolCalls() || !StringUtils.hasText(message.getText())) {
-            throw ModelCallFailure.correctable();
-        }
     }
 
     private static boolean isThought(Generation generation) {

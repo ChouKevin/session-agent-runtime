@@ -1,7 +1,6 @@
 package com.java.system.sessionagent.conversation;
 
 import com.java.system.sessionagent.conversation.application.MessageJobService;
-import com.java.system.sessionagent.conversation.domain.AssistantReply;
 import com.java.system.sessionagent.conversation.domain.MessageWorkClaim;
 import com.java.system.sessionagent.conversation.domain.FeedbackMessage;
 import com.java.system.sessionagent.conversation.domain.ModelDecision;
@@ -69,7 +68,7 @@ class MessageJobServiceTest {
         assertThat(model.snapshots).containsExactly(List.of("list_repositories", "source"), List.of("list_repositories", "source"), List.of("list_repositories", "source"));
         assertThat(store.toolMessages).hasSize(2);
         assertThat(store.toolMessages.get(1).arguments()).isEqualTo("{\"repositoryId\":\"payment-service\"}");
-        assertThat(store.assistantReply).isEqualTo(new AssistantReply("Answer", List.of(store.toolMessages.getLast().resultId())));
+        assertThat(store.assistantReply).isEqualTo("Answer");
     }
 
     @Test
@@ -92,13 +91,13 @@ class MessageJobServiceTest {
 
         assertThat(store.feedbackCodes).containsExactly("INVALID_TOOL_INPUT");
         assertThat(store.toolMessages).hasSize(2);
-        assertThat(store.assistantReply.citations()).containsExactly(store.toolMessages.getLast().resultId());
+        assertThat(store.assistantReply).isEqualTo("Answer");
         verify(telemetry).tool("not-issued", "INVALID_INPUT", Optional.empty(), Optional.empty());
         verify(telemetry).feedback("INVALID_TOOL_INPUT");
     }
 
     @Test
-    void continues_planning_after_reply_correction_until_the_call_limit() {
+    void persists_an_opaque_final_reply_without_citation_validation() {
         RecordingStore store = new RecordingStore();
         store.seedSource();
         List<Integer> planOrdinals = new java.util.ArrayList<>();
@@ -110,7 +109,7 @@ class MessageJobServiceTest {
                 },
                 (request, usageObserver) -> {
                     replyOrdinals.add(request.callContext().ordinal());
-                    return new AssistantReply("bad", List.of(new ResultId("not-a-result")));
+                    return "bad";
                 });
         DirectToolRegistry registry = new DirectToolRegistry(List.of(
                 registration("list_repositories", ToolKind.CATALOG, Optional.empty(), Optional.empty(), "{\"repositories\":[]}")));
@@ -119,13 +118,11 @@ class MessageJobServiceTest {
 
         service.process(store.claim, () -> true);
 
-        assertThat(store.feedbackCodes).containsExactly(
-                "INVALID_CITATION", "INVALID_CITATION", "INVALID_CITATION", "INVALID_CITATION", "INVALID_CITATION",
-                "CALL_LIMIT_REACHED");
-        assertThat(planOrdinals).containsExactly(1, 3, 5, 7, 9, 11);
-        assertThat(replyOrdinals).containsExactly(2, 4, 6, 8, 10, 12);
-        assertThat(store.calls).isEqualTo(12);
-        assertThat(store.assistantReply).isNull(); // cs-allow terminal feedback means no assistant message
+        assertThat(store.feedbackCodes).isEmpty();
+        assertThat(planOrdinals).containsExactly(1);
+        assertThat(replyOrdinals).containsExactly(2);
+        assertThat(store.calls).isEqualTo(2);
+        assertThat(store.assistantReply).isEqualTo("bad");
     }
 
     @Test
@@ -165,7 +162,7 @@ class MessageJobServiceTest {
     }
 
     @Test
-    void returns_to_planning_after_an_early_invalid_citation() {
+    void persists_an_early_final_reply_without_requesting_citation_correction() {
         RecordingStore store = new RecordingStore();
         store.seedSource();
         List<Integer> planOrdinals = new java.util.ArrayList<>();
@@ -177,10 +174,7 @@ class MessageJobServiceTest {
                 },
                 (request, usageObserver) -> {
                     replyOrdinals.add(request.callContext().ordinal());
-                    if (request.callContext().ordinal() == 2) {
-                        return new AssistantReply("bad", List.of(new ResultId("not-a-result")));
-                    }
-                    return new AssistantReply("answer", List.of(new ResultId("source-result")));
+                    return "bad";
                 });
         MessageJobService service = new MessageJobService(store, model, new DirectToolRegistry(List.of()),
                 Clock.fixed(Instant.parse("2026-08-16T00:00:00Z"), ZoneOffset.UTC));
@@ -189,21 +183,14 @@ class MessageJobServiceTest {
         try {
             service.process(store.claim, () -> true);
 
-            assertThat(planOrdinals).containsExactly(1, 3);
-            assertThat(replyOrdinals).containsExactly(2, 4);
-            assertThat(store.calls).isEqualTo(4);
-            assertThat(store.feedbackMessages).singleElement().satisfies(feedback -> {
-                assertThat(feedback.code()).isEqualTo("INVALID_CITATION");
-                assertThat(feedback.terminal()).isFalse();
-            });
-            assertThat(store.assistantReply).isEqualTo(new AssistantReply("answer", List.of(new ResultId("source-result"))));
+            assertThat(planOrdinals).containsExactly(1);
+            assertThat(replyOrdinals).containsExactly(2);
+            assertThat(store.calls).isEqualTo(2);
+            assertThat(store.feedbackMessages).isEmpty();
+            assertThat(store.assistantReply).isEqualTo("bad");
             assertThat(appender.list).extracting(ILoggingEvent::getFormattedMessage)
                     .contains("model_call_decision sessionId=session-1 messageJobId=job-1 ordinal=2 "
-                                    + "phase=FINAL_REPLY decisionCategory=ASSISTANT_REPLY",
-                            "model_call_decision sessionId=session-1 messageJobId=job-1 ordinal=4 "
-                                    + "phase=FINAL_REPLY decisionCategory=ASSISTANT_REPLY")
-                    .contains("assistant_citation_rejected sessionId=session-1 messageJobId=job-1 phase=FINAL_REPLY "
-                            + "reason=RESULT_NOT_FOUND citationCount=1");
+                                    + "phase=FINAL_REPLY decisionCategory=ASSISTANT_TEXT");
         } finally {
             detachAppender(MessageJobService.class, appender);
         }
@@ -269,7 +256,7 @@ class MessageJobServiceTest {
         ModelDecision.UseTool rejected = new ModelDecision.UseTool(
                 "source-before-catalog", new ToolName("source"), "{not-json}", MODEL_CONTEXT);
         ScriptedModel model = new ScriptedModel(store,
-                new AssistantReply("done", List.of(new ResultId("source-result"))), rejected, new ModelDecision.AnswerReady());
+                "done", rejected, new ModelDecision.AnswerReady());
         DirectToolRegistry registry = new DirectToolRegistry(List.of(
                 registration("list_repositories", ToolKind.CATALOG, Optional.empty(), Optional.empty(), "{\"repositories\":[]}"),
                 countedRegistration("source", ToolKind.SOURCE, sourceExecutions)));
@@ -294,13 +281,13 @@ class MessageJobServiceTest {
     }
 
     @Test
-    void turns_a_twelfth_invalid_citation_into_only_terminal_call_limit_feedback() {
+    void persists_a_twelfth_opaque_final_reply() {
         RecordingStore store = new RecordingStore();
         store.calls = 11;
         store.seedSource();
         ConversationModel model = model(
                 (request, usageObserver) -> { throw new AssertionError("plan must not be called"); },
-                (request, usageObserver) -> new AssistantReply("bad", List.of(new ResultId("unknown-result"))));
+                (request, usageObserver) -> "bad");
         MessageJobService service = new MessageJobService(store, model, new DirectToolRegistry(List.of()),
                 Clock.fixed(Instant.parse("2026-08-16T00:00:00Z"), ZoneOffset.UTC));
         ListAppender<ILoggingEvent> appender = attachAppender(MessageJobService.class);
@@ -308,12 +295,12 @@ class MessageJobServiceTest {
         try {
             service.process(store.claim, () -> true);
 
-            assertThat(store.feedbackCodes).containsExactly("CALL_LIMIT_REACHED");
-            assertThat(store.feedbackMessages).singleElement().extracting(FeedbackMessage::terminal).isEqualTo(true);
+            assertThat(store.feedbackCodes).isEmpty();
+            assertThat(store.feedbackMessages).isEmpty();
+            assertThat(store.assistantReply).isEqualTo("bad");
             assertThat(appender.list).extracting(ILoggingEvent::getFormattedMessage)
-                    .contains("assistant_citation_rejected sessionId=session-1 messageJobId=job-1 phase=FINAL_REPLY "
-                            + "reason=RESULT_NOT_FOUND citationCount=1");
-            assertThat(logTemplatesAndArguments(appender)).doesNotContain("unknown-result");
+                    .contains("model_call_decision sessionId=session-1 messageJobId=job-1 ordinal=12 "
+                            + "phase=FINAL_REPLY decisionCategory=ASSISTANT_TEXT");
         } finally {
             detachAppender(MessageJobService.class, appender);
         }
@@ -328,14 +315,14 @@ class MessageJobServiceTest {
                 com.java.system.sessionagent.conversation.domain.JobStatus.WORKING, 0, 11, Optional.empty()));
         ConversationModel model = model(
                 (request, usageObserver) -> { throw new AssertionError("plan must not be called"); },
-                (request, usageObserver) -> new AssistantReply("answer", List.of(new ResultId("source-result"))));
+                (request, usageObserver) -> "answer");
         MessageJobService service = new MessageJobService(store, model, new DirectToolRegistry(List.of()),
                 Clock.fixed(Instant.parse("2026-08-16T00:00:00Z"), ZoneOffset.UTC));
 
         service.process(store.claim, () -> true);
 
         assertThat(store.feedbackCodes).isEmpty();
-        assertThat(store.assistantReply.message()).isEqualTo("answer");
+        assertThat(store.assistantReply).isEqualTo("answer");
         assertThat(store.scheduledAt).isEmpty();
         assertThat(store.calls).isEqualTo(12);
     }
@@ -353,7 +340,7 @@ class MessageJobServiceTest {
                 },
                 (request, usageObserver) -> {
                     replyOrdinals.add(request.callContext().ordinal());
-                    return new AssistantReply("answer", List.of(new ResultId("source-result")));
+                    return "answer";
                 });
         MessageJobService service = new MessageJobService(store, model, new DirectToolRegistry(List.of()),
                 Clock.fixed(Instant.parse("2026-08-16T00:00:00Z"), ZoneOffset.UTC));
@@ -375,7 +362,7 @@ class MessageJobServiceTest {
                 (request, usageObserver) -> { throw new AssertionError("plan must not be called"); },
                 (request, usageObserver) -> {
                     replyOrdinals.add(request.callContext().ordinal());
-                    return new AssistantReply("answer", List.of(new ResultId("source-result")));
+                    return "answer";
                 });
         MessageJobService service = new MessageJobService(store, model, new DirectToolRegistry(List.of()),
                 Clock.fixed(Instant.parse("2026-08-16T00:00:00Z"), ZoneOffset.UTC));
@@ -684,7 +671,7 @@ class MessageJobServiceTest {
             }
 
             @Override
-            public AssistantReply reply(com.java.system.sessionagent.conversation.domain.ReplyRequest request,
+            public String reply(com.java.system.sessionagent.conversation.domain.ReplyRequest request,
                                         java.util.function.Consumer<com.java.system.sessionagent.conversation.domain.ModelUsage> usageObserver) {
                 return replyAction.reply(request, usageObserver);
             }
@@ -699,14 +686,14 @@ class MessageJobServiceTest {
 
     @FunctionalInterface
     private interface ReplyAction {
-        AssistantReply reply(com.java.system.sessionagent.conversation.domain.ReplyRequest request,
+        String reply(com.java.system.sessionagent.conversation.domain.ReplyRequest request,
                              java.util.function.Consumer<com.java.system.sessionagent.conversation.domain.ModelUsage> usageObserver);
     }
 
     private static final class ScriptedModel implements ConversationModel {
         private final List<ModelDecision> decisions;
         private final RecordingStore store;
-        private final Optional<AssistantReply> scriptedReply;
+        private final Optional<String> scriptedReply;
         private final List<List<String>> snapshots = new java.util.ArrayList<>();
         private int index;
 
@@ -716,7 +703,7 @@ class MessageJobServiceTest {
             this.decisions = List.of(decisions);
         }
 
-        private ScriptedModel(RecordingStore store, AssistantReply reply, ModelDecision... decisions) {
+        private ScriptedModel(RecordingStore store, String reply, ModelDecision... decisions) {
             this.store = store;
             this.scriptedReply = Optional.of(reply);
             this.decisions = List.of(decisions);
@@ -734,16 +721,9 @@ class MessageJobServiceTest {
         }
 
         @Override
-        public AssistantReply reply(com.java.system.sessionagent.conversation.domain.ReplyRequest request,
+        public String reply(com.java.system.sessionagent.conversation.domain.ReplyRequest request,
                                     java.util.function.Consumer<com.java.system.sessionagent.conversation.domain.ModelUsage> usageObserver) {
-            return scriptedReply.orElseGet(() -> new AssistantReply("Answer", request.history().stream()
-                    .filter(com.java.system.sessionagent.conversation.domain.ToolMessage.class::isInstance)
-                    .map(com.java.system.sessionagent.conversation.domain.ToolMessage.class::cast)
-                    .filter(com.java.system.sessionagent.conversation.domain.ToolMessage::citeable)
-                    .map(com.java.system.sessionagent.conversation.domain.ToolMessage::resultId)
-                    .reduce((first, second) -> second)
-                    .map(List::of)
-                    .orElseThrow()));
+            return scriptedReply.orElse("Answer");
         }
     }
 
@@ -753,7 +733,7 @@ class MessageJobServiceTest {
         private final List<com.java.system.sessionagent.conversation.domain.ToolMessage> toolMessages = new java.util.ArrayList<>();
         private final List<String> feedbackCodes = new java.util.ArrayList<>();
         private final List<FeedbackMessage> feedbackMessages = new java.util.ArrayList<>();
-        private AssistantReply assistantReply;
+        private String assistantReply;
         private int calls;
         private Optional<MessageJobProjection> job = Optional.empty();
         private Optional<Instant> scheduledAt = Optional.empty();
@@ -776,7 +756,7 @@ class MessageJobServiceTest {
             toolMessages.add(new com.java.system.sessionagent.conversation.domain.ToolMessage(claim.sessionId(), new SessionSequence(1), Optional.of(claim.messageJobId()), claim.claimedAt(), MessageRole.TOOL,
                     new ResultId("source-result"), "source-call", MODEL_CONTEXT, "source", "v1", "{\"repositoryId\":\"payment-service\"}", Optional.of("payment-service"), Optional.of("rev-a"), "{\"resultId\":\"source-result\",\"toolName\":\"source\",\"repositoryId\":\"payment-service\",\"revision\":\"rev-a\",\"data\":{}}", true));
         }
-        @Override public com.java.system.sessionagent.conversation.domain.AssistantMessage appendAssistant(MessageWorkClaim ignored, AssistantReply reply, Instant now) { assistantReply = reply; return new com.java.system.sessionagent.conversation.domain.AssistantMessage(claim.sessionId(), new SessionSequence(3), Optional.of(claim.messageJobId()), now, MessageRole.ASSISTANT, reply.message(), reply.citations()); }
+        @Override public com.java.system.sessionagent.conversation.domain.AssistantMessage appendAssistant(MessageWorkClaim ignored, String reply, Instant now) { assistantReply = reply; return new com.java.system.sessionagent.conversation.domain.AssistantMessage(claim.sessionId(), new SessionSequence(3), Optional.of(claim.messageJobId()), now, MessageRole.ASSISTANT, reply); }
         @Override public Optional<ResultProjection> readResult(ResultId resultId) { return toolMessages.stream().filter(message -> message.resultId().equals(resultId)).findFirst().map(message -> new ResultProjection(message.resultId(), message.sessionId(), message.toolName(), message.toolVersion(), message.arguments(), message.repositoryId(), message.revision(), message.resultJson(), message.citeable())); }
         @Override public com.java.system.sessionagent.conversation.domain.MessageReceipt receive(com.java.system.sessionagent.conversation.domain.IncomingMessage message) { throw new UnsupportedOperationException(); }
         @Override public Optional<MessageWorkClaim> claimNext(String workerId, java.time.Duration leaseDuration) { throw new UnsupportedOperationException(); }

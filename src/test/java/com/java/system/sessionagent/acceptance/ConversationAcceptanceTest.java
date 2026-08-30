@@ -3,7 +3,6 @@ package com.java.system.sessionagent.acceptance;
 import com.java.system.sessionagent.conversation.application.ConversationMessageService;
 import com.java.system.sessionagent.conversation.application.MessageJobService;
 import com.java.system.sessionagent.conversation.domain.AssistantMessage;
-import com.java.system.sessionagent.conversation.domain.AssistantReply;
 import com.java.system.sessionagent.conversation.domain.FeedbackMessage;
 import com.java.system.sessionagent.conversation.domain.IncomingMessage;
 import com.java.system.sessionagent.conversation.domain.JobStatus;
@@ -50,8 +49,7 @@ class ConversationAcceptanceTest {
             runtime.process(receipt);
 
             AssistantMessage reply = runtime.reply(receipt);
-            assertThat(reply.citations()).hasSize(1);
-            assertThat(runtime.store.readResult(reply.citations().getFirst())).get().extracting(ConversationStore.ResultProjection::citeable).isEqualTo(true);
+            assertThat(reply.message()).isEqualTo("The repository information is available.");
             assertThat(runtime.store.toolMessages(receipt.messageJobId())).anySatisfy(message -> {
                 assertThat(message.repositoryId()).contains("payment-service");
                 assertThat(message.resultJson()).contains("credit card", "bank transfer", "wallet");
@@ -73,10 +71,11 @@ class ConversationAcceptanceTest {
             runtime.process(receipt);
 
             AssistantMessage reply = runtime.reply(receipt);
-            ToolMessage cited = runtime.citedTool(reply);
             assertThat(reply.message()).contains("current runtime value is unavailable");
-            assertThat(cited.resultJson()).contains("formula is loaded from JSON settings");
-            assertThat(cited.repositoryId()).contains("payment-service");
+            assertThat(runtime.store.toolMessages(receipt.messageJobId())).anySatisfy(message -> {
+                assertThat(message.resultJson()).contains("formula is loaded from JSON settings");
+                assertThat(message.repositoryId()).contains("payment-service");
+            });
         }
     }
 
@@ -93,7 +92,7 @@ class ConversationAcceptanceTest {
             assertThat(runtime.semantic.calls()).anySatisfy(call -> assertThat(call.path()).isEqualTo("/v1/api-routes/lookup"));
             assertThat(runtime.semantic.calls()).filteredOn(call -> call.path().equals("/v1/api-routes/lookup"))
                     .singleElement().satisfies(call -> assertThat(call.body()).contains("\"repositoryId\":\"payment-service\"", "\"revision\":\"payment-revision-1\""));
-            assertThat(runtime.citedTool(reply).resultJson()).contains("NOT_FOUND");
+            assertThat(sourceMessages).anySatisfy(message -> assertThat(message.resultJson()).contains("NOT_FOUND"));
         }
     }
 
@@ -110,9 +109,7 @@ class ConversationAcceptanceTest {
                     .extracting(FakeSemanticService.Call::path)
                     .contains("/v1/repositories/order-service/entry-points", "/v1/repositories/payment-service/entry-points");
             AssistantMessage reply = runtime.reply(receipt);
-            assertThat(reply.citations()).containsExactlyInAnyOrderElementsOf(sources.stream().map(ToolMessage::resultId).toList());
-            assertThat(reply.citations()).allSatisfy(citation -> assertThat(runtime.store.readResult(citation)).get()
-                    .extracting(ConversationStore.ResultProjection::citeable).isEqualTo(true));
+            assertThat(reply.message()).contains("Cancellation and refund information");
         }
     }
 
@@ -124,8 +121,8 @@ class ConversationAcceptanceTest {
             MessageReceipt second = runtime.receive("repeat-session", "alice", "repeat-2", "Which payment methods are supported?");
             runtime.process(second);
 
-            ResultId firstResult = runtime.citedTool(runtime.reply(first)).resultId();
-            ResultId secondResult = runtime.citedTool(runtime.reply(second)).resultId();
+            ResultId firstResult = runtime.store.toolMessages(first.messageJobId()).getLast().resultId();
+            ResultId secondResult = runtime.store.toolMessages(second.messageJobId()).getLast().resultId();
             assertThat(secondResult).isNotEqualTo(firstResult);
             assertThat(runtime.semantic.calls()).filteredOn(call -> call.path().equals("/v1/repositories/payment-service/entry-points")).hasSize(2);
         }
@@ -141,7 +138,8 @@ class ConversationAcceptanceTest {
             assertThat(runtime.store.toolMessages(receipt.messageJobId())).filteredOn(message -> message.toolName().equals("list_repositories")).hasSize(2);
             assertThat(runtime.semantic.calls()).filteredOn(call -> call.path().equals("/v1/repositories")).hasSize(2);
             assertThat(runtime.semantic.calls()).anySatisfy(call -> assertThat(call.path()).isEqualTo("/v1/repositories/payment-service/entry-points"));
-            assertThat(runtime.citedTool(runtime.reply(receipt)).repositoryId()).contains("payment-service");
+            assertThat(runtime.store.toolMessages(receipt.messageJobId())).anySatisfy(message ->
+                    assertThat(message.repositoryId()).contains("payment-service"));
         }
     }
 
@@ -172,12 +170,6 @@ class ConversationAcceptanceTest {
         AssistantMessage reply(MessageReceipt receipt) {
             return store.messages(receipt.sessionId()).stream().filter(AssistantMessage.class::isInstance).map(AssistantMessage.class::cast)
                     .filter(message -> message.messageJobId().filter(receipt.messageJobId()::equals).isPresent()).findFirst().orElseThrow();
-        }
-
-        ToolMessage citedTool(AssistantMessage reply) {
-            ResultId citation = reply.citations().getFirst();
-            return store.messages(reply.sessionId()).stream().filter(ToolMessage.class::isInstance).map(ToolMessage.class::cast)
-                    .filter(message -> message.resultId().equals(citation)).findFirst().orElseThrow();
         }
 
         List<ModelRequest> modelRequests() {
@@ -310,10 +302,10 @@ class ConversationAcceptanceTest {
         }
 
         @Override
-        public AssistantMessage appendAssistant(MessageWorkClaim claim, AssistantReply reply, Instant createdAt) {
+        public AssistantMessage appendAssistant(MessageWorkClaim claim, String message, Instant createdAt) {
             List<SessionMessage> history = messages.get(claim.sessionId());
             AssistantMessage assistant = new AssistantMessage(claim.sessionId(), sequence(history), Optional.of(claim.messageJobId()), createdAt,
-                    MessageRole.ASSISTANT, reply.message(), reply.citations());
+                    MessageRole.ASSISTANT, message);
             history.add(assistant);
             Job job = jobs.get(claim.messageJobId());
             jobs.put(claim.messageJobId(), new Job(job.sessionId(), JobStatus.DONE, job.retryCount(), job.modelCallCount(), Optional.of(assistant.sequence())));

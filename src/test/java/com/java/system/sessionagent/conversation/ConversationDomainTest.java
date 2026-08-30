@@ -1,7 +1,6 @@
 package com.java.system.sessionagent.conversation;
 
 import com.java.system.sessionagent.conversation.domain.AssistantMessage;
-import com.java.system.sessionagent.conversation.domain.AssistantReply;
 import com.java.system.sessionagent.conversation.domain.FeedbackMessage;
 import com.java.system.sessionagent.conversation.domain.IncomingMessage;
 import com.java.system.sessionagent.conversation.domain.MessageJobId;
@@ -78,39 +77,18 @@ class ConversationDomainTest {
     }
 
     @Test
-    void requiresNonblankProseAndUniqueOrderedCitationsWithDefensiveCopy() {
-        ResultId first = new ResultId("result-1");
-        ResultId second = new ResultId("result-2");
-        List<ResultId> citations = new ArrayList<>(List.of(first, second));
-
-        AssistantReply assistantReply = new AssistantReply("Answer", citations);
-        citations.clear();
-
-        assertThat(assistantReply.citations()).containsExactly(first, second);
-        assertThatThrownBy(() -> assistantReply.citations().add(new ResultId("result-3")))
-                .isInstanceOf(UnsupportedOperationException.class);
-        assertThatIllegalArgumentException().isThrownBy(() -> new AssistantReply(" ", List.of(first)));
-        assertThatIllegalArgumentException().isThrownBy(() -> new AssistantReply("Answer", List.of()));
-        assertThatIllegalArgumentException().isThrownBy(() -> new AssistantReply("Answer", List.of(first, first)));
-    }
-
-    @Test
-    void defensivelyCopiesAssistantMessageCitations() {
-        List<ResultId> citations = new ArrayList<>(List.of(new ResultId("result-1")));
+    void requiresNonblankAssistantMessageText() {
         AssistantMessage assistantMessage = new AssistantMessage(
                 SESSION_ID,
                 SEQUENCE,
                 Optional.of(JOB_ID),
                 CREATED_AT,
                 MessageRole.ASSISTANT,
-                "Answer",
-                citations);
+                "Answer");
 
-        citations.clear();
-
-        assertThat(assistantMessage.citations()).containsExactly(new ResultId("result-1"));
-        assertThatThrownBy(() -> assistantMessage.citations().clear())
-                .isInstanceOf(UnsupportedOperationException.class);
+        assertThat(assistantMessage.message()).isEqualTo("Answer");
+        assertThatIllegalArgumentException().isThrownBy(() -> new AssistantMessage(
+                SESSION_ID, SEQUENCE, Optional.of(JOB_ID), CREATED_AT, MessageRole.ASSISTANT, " "));
     }
 
     @Test
@@ -156,7 +134,7 @@ class ConversationDomainTest {
         assertThatIllegalArgumentException().isThrownBy(() -> new UserMessage(
                 SESSION_ID, SEQUENCE, Optional.empty(), CREATED_AT, MessageRole.TOOL, "participant", "message"));
         assertThatIllegalArgumentException().isThrownBy(() -> new AssistantMessage(
-                SESSION_ID, SEQUENCE, Optional.of(JOB_ID), CREATED_AT, MessageRole.FEEDBACK, "answer", List.of(new ResultId("result-1"))));
+                SESSION_ID, SEQUENCE, Optional.of(JOB_ID), CREATED_AT, MessageRole.FEEDBACK, "answer"));
         assertThatIllegalArgumentException().isThrownBy(() -> new FeedbackMessage(
                 SESSION_ID, SEQUENCE, Optional.of(JOB_ID), CREATED_AT, MessageRole.ASSISTANT,
                 "INVALID_REPLY", "message", false, Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty()));
@@ -186,8 +164,7 @@ class ConversationDomainTest {
                 Optional.empty(),
                 CREATED_AT,
                 MessageRole.ASSISTANT,
-                "Answer",
-                List.of(new ResultId("result-1"))));
+                "Answer"));
         assertThatIllegalArgumentException().isThrownBy(() -> new FeedbackMessage(
                 SESSION_ID,
                 SEQUENCE,

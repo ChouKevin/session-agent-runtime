@@ -17,7 +17,6 @@ import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
@@ -74,7 +73,6 @@ class SessionAgentLiveIT {
         assertContainsOneOf(state.assistantText(), "WEBM", "webm");
         assertContainsOneOf(state.assistantText(), "MOV", "mov");
         assertThat(state.sourceRepositoryIds()).contains("video-service");
-        assertThat(state.citedRepositoryIds()).contains("video-service");
         assertThat(catalogRevision(currentCatalog(state), "payment-service")).isNotBlank();
     }
 
@@ -110,9 +108,7 @@ class SessionAgentLiveIT {
         assertThat(requiredText(rejectedArguments, "revision")).isEqualTo(requestedRevision);
         assertThat(requiredText(retriedArguments, "revision")).isEqualTo(currentRevision);
         assertThat(state.assistantText()).contains("MOBILE_PAYMENT");
-        assertThat(state.citations()).isNotEmpty();
-        assertThat(state.citations()).allSatisfy(citation ->
-                assertThat(state.resultById(citation).revision()).contains(currentRevision));
+        assertThat(state.toolResults()).anySatisfy(tool -> assertThat(tool.revision()).contains(currentRevision));
     }
 
     @Test
@@ -149,7 +145,6 @@ class SessionAgentLiveIT {
         assertContainsOneOf(answer, "WEBM", "webm");
         assertContainsOneOf(answer, "MOV", "mov");
         assertThat(state.sourceRepositoryIds()).contains("video-service");
-        assertThat(state.citedRepositoryIds()).contains("video-service");
         return state.toReport("VIDEO_FORMATS_CONFIRMED");
     }
 
@@ -165,7 +160,6 @@ class SessionAgentLiveIT {
         assertThat(fullCoverageEmptySearchIds)
                 .withFailMessage("absence answer did not use a full-coverage empty code search")
                 .isNotEmpty();
-        assertThat(state.citations()).anyMatch(fullCoverageEmptySearchIds::contains);
         return state.toReport("ABSENT_BEHAVIOR_REPORTED");
     }
 
@@ -184,7 +178,6 @@ class SessionAgentLiveIT {
         assertThat(answer).doesNotContain("不會自動退款", "不會退款");
         assertThat(normalizedAnswer).doesNotContain("will not automatically refund", "does not automatically refund");
         assertThat(state.sourceRepositoryIds()).contains("order-service", "payment-service");
-        assertThat(state.citedRepositoryIds()).contains("order-service", "payment-service");
         return state.toReport("CANCELLATION_PROVEN_REFUND_UNPROVEN");
     }
 
@@ -329,14 +322,12 @@ class SessionAgentLiveIT {
             String assistantText = requiredText(assistant, "message");
             List<String> toolOrder = new ArrayList<>();
             List<ToolResult> toolResults = new ArrayList<>();
-            Map<String, ToolResult> resultsById = new HashMap<>();
             List<RepositoryRevision> repositories = new ArrayList<>();
             Set<String> sourceRepositoryIds = new HashSet<>();
             for (JsonNode tool : toolMessages) {
                 ToolResult toolResult = readToolResult(sessionId, tool);
                 toolOrder.add(toolResult.toolName());
                 toolResults.add(toolResult);
-                resultsById.put(toolResult.resultId(), toolResult);
                 if (toolResult.repositoryId().isPresent()) {
                     String requiredRepositoryId = toolResult.repositoryId().orElseThrow();
                     JsonNode arguments = parseStructuredJson(toolResult.canonicalArguments());
@@ -347,18 +338,8 @@ class SessionAgentLiveIT {
                     repositories.add(new RepositoryRevision(requiredRepositoryId, requiredRevision));
                 }
             }
-            List<String> citations = citationIds(assistant);
-            assertThat(citations).isNotEmpty();
-            Set<String> citedRepositoryIds = new HashSet<>();
-            for (String citation : citations) {
-                ToolResult citedResult = resultsById.get(citation);
-                assertThat(citedResult).isNotNull();
-                assertThat(citedResult.citeable()).isTrue();
-                assertThat(citedResult.repositoryId()).isPresent();
-                citedRepositoryIds.add(citedResult.repositoryId().orElseThrow());
-            }
-            return new ScenarioState(sessionId, jobId, assistantText, toolOrder, toolResults, repositories, citations, feedbackMessages,
-                    resultsById, previousCatalog(sessionId, jobId, messages), sourceRepositoryIds, citedRepositoryIds);
+            return new ScenarioState(sessionId, jobId, assistantText, toolOrder, toolResults, repositories, feedbackMessages,
+                    previousCatalog(sessionId, jobId, messages), sourceRepositoryIds);
         }
 
         private ToolResult readToolResult(String sessionId, JsonNode toolMessage) throws Exception {
@@ -427,14 +408,6 @@ class SessionAgentLiveIT {
                 && data.path("coverage").path("issues").isEmpty();
     }
 
-    private List<String> citationIds(JsonNode assistant) {
-        List<String> citations = new ArrayList<>();
-        for (JsonNode citation : assistant.path("citations")) {
-            citations.add(citation.asText());
-        }
-        return citations;
-    }
-
     private String requiredText(JsonNode node, String field) {
         JsonNode value = node.path(field);
         assertThat(value.isTextual()).isTrue();
@@ -467,20 +440,12 @@ class SessionAgentLiveIT {
             List<String> toolOrder,
             List<ToolResult> toolResults,
             List<RepositoryRevision> repositories,
-            List<String> citations,
             List<JsonNode> feedbackMessages,
-            Map<String, ToolResult> resultsById,
             Optional<ToolResult> previousCatalog,
-            Set<String> sourceRepositoryIds,
-            Set<String> citedRepositoryIds) {
-
-        private ToolResult resultById(String resultId) {
-            return Optional.ofNullable(resultsById.get(resultId))
-                    .orElseThrow(() -> new AssertionError("citation did not reference a successful result from this message job"));
-        }
+            Set<String> sourceRepositoryIds) {
 
         private ScenarioReport toReport(String outcome) {
-            return new ScenarioReport(sessionId, jobId, toolOrder, repositories, citations, outcome);
+            return new ScenarioReport(sessionId, jobId, toolOrder, repositories, outcome);
         }
     }
 
@@ -503,7 +468,6 @@ class SessionAgentLiveIT {
             String messageJobId,
             List<String> toolOrder,
             List<RepositoryRevision> repositories,
-            List<String> citations,
             String outcome) {
     }
 }

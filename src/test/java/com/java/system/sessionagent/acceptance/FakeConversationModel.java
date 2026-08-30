@@ -1,11 +1,9 @@
 package com.java.system.sessionagent.acceptance;
 
-import com.java.system.sessionagent.conversation.domain.AssistantReply;
 import com.java.system.sessionagent.conversation.domain.FeedbackMessage;
 import com.java.system.sessionagent.conversation.domain.ModelDecision;
 import com.java.system.sessionagent.conversation.domain.ModelRequest;
 import com.java.system.sessionagent.conversation.domain.ReplyRequest;
-import com.java.system.sessionagent.conversation.domain.ResultId;
 import com.java.system.sessionagent.conversation.domain.SessionMessage;
 import com.java.system.sessionagent.conversation.domain.ToolMessage;
 import com.java.system.sessionagent.conversation.domain.UserMessage;
@@ -82,27 +80,16 @@ final class FakeConversationModel implements ConversationModel {
     }
 
     @Override
-    public AssistantReply reply(ReplyRequest request, Consumer<com.java.system.sessionagent.conversation.domain.ModelUsage> usageObserver) {
+    public String reply(ReplyRequest request, Consumer<com.java.system.sessionagent.conversation.domain.ModelUsage> usageObserver) {
         replyRequests.add(request);
         UserMessage question = request.history().stream().filter(UserMessage.class::isInstance).map(UserMessage.class::cast)
                 .max(Comparator.comparingLong(message -> message.sequence().value())).orElseThrow();
-        List<SessionMessage> jobHistory = request.history().stream()
-                .filter(message -> message.messageJobId().equals(question.messageJobId())).toList();
         String text = question.message().toLowerCase(java.util.Locale.ROOT);
-        ResultId citation = jobHistory.stream().filter(ToolMessage.class::isInstance).map(ToolMessage.class::cast)
-                .filter(ToolMessage::citeable).max(Comparator.comparingLong(message -> message.sequence().value())).orElseThrow().resultId();
-        List<ResultId> citations = text.contains("cancellation")
-                ? jobHistory.stream().filter(ToolMessage.class::isInstance).map(ToolMessage.class::cast)
-                        .filter(ToolMessage::citeable)
-                        .filter(message -> message.repositoryId().filter(repositoryId -> repositoryId.equals("order-service") || repositoryId.equals("payment-service")).isPresent())
-                        .map(ToolMessage::resultId).toList()
-                : List.of(citation);
-        String answer = text.contains("fee")
+        return text.contains("fee")
                 ? "The source shows a JSON-configured formula, but the current runtime value is unavailable."
                 : text.contains("bnpl") ? "No BNPL behavior was found in the typed repository queries."
-                : text.contains("cancellation") ? "Cancellation and refund evidence was inspected across both repositories."
-                : "The source-backed repository information is available.";
-        return new AssistantReply(answer, citations);
+                : text.contains("cancellation") ? "Cancellation and refund information was inspected across both repositories."
+                : "The repository information is available.";
     }
 
     private static ModelDecision.UseTool tool(String callId, ToolName toolName, String arguments) {

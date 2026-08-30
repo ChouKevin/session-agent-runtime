@@ -24,7 +24,7 @@ class MultiParticipantConversationTest {
             assertThat(users).extracting(UserMessage::message).containsExactly("Which payment methods are supported?");
             assertThat(runtime.history(bob.sessionId())).noneMatch(message -> message instanceof com.java.system.sessionagent.conversation.domain.FeedbackMessage feedback
                     && feedback.code().equals("WAITING_FOR_USER"));
-            assertThat(runtime.reply(bob).citations()).isNotEmpty();
+            assertThat(runtime.reply(bob).message()).isNotBlank();
         }
     }
 }
