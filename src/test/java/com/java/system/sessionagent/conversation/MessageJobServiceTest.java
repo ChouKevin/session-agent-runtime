@@ -176,6 +176,24 @@ class MessageJobServiceTest {
         });
     }
 
+    @Test
+    void correctable_failures_reuse_the_loop_and_complete_at_the_configured_budget() {
+        RecordingStore store = new RecordingStore();
+        ScriptedModel model = new ScriptedModel(
+                ModelCallFailure.correctable(),
+                ModelCallFailure.correctable(),
+                ModelCallFailure.correctable());
+
+        service(store, model, List.of(), 3).process(store.claim, () -> true);
+
+        assertThat(model.calls).isEqualTo(3);
+        assertThat(model.processClaimDepths).containsOnly(1);
+        assertThat(store.batches()).satisfiesExactly(
+                batch -> assertThat(batch.jobUpdate()).isEqualTo(ConversationStore.JobUpdate.KEEP_WORKING),
+                batch -> assertThat(batch.jobUpdate()).isEqualTo(ConversationStore.JobUpdate.KEEP_WORKING),
+                batch -> assertThat(batch.jobUpdate()).isEqualTo(ConversationStore.JobUpdate.COMPLETE));
+    }
+
     private static MessageJobService service(RecordingStore store, ConversationModel model,
                                              List<ToolRegistration<?>> registrations, int maxModelCalls) {
         return new MessageJobService(store, model, new DirectToolRegistry(registrations), CLOCK, maxModelCalls,
@@ -207,6 +225,7 @@ class MessageJobServiceTest {
     private static final class ScriptedModel implements ConversationModel {
         private final List<Object> replies;
         private final List<Integer> historySizes = new ArrayList<>();
+        private final List<Integer> processClaimDepths = new ArrayList<>();
         private int index;
         private int calls;
 
@@ -217,6 +236,10 @@ class MessageJobServiceTest {
         @Override
         public ModelReply respond(ModelRequest request, ModelCallReservation reservation, Consumer<ModelUsage> usageObserver) {
             historySizes.add(request.history().size());
+            processClaimDepths.add(Math.toIntExact(StackWalker.getInstance().walk(frames -> frames
+                    .filter(frame -> frame.getClassName().equals(MessageJobService.class.getName()))
+                    .filter(frame -> frame.getMethodName().equals("processClaim"))
+                    .count())));
             reservation.reserve();
             calls++;
             Object next = replies.get(index++);

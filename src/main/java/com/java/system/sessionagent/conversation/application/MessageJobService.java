@@ -114,7 +114,9 @@ public final class MessageJobService implements MessageJobPort {
                 appendRuntime(claim, guard, List.of(runtime(MODEL_CALL_LIMIT_REACHED)), ConversationStore.JobUpdate.COMPLETE);
                 return;
             } catch (ModelCallFailure failure) {
-                handleModelFailure(claim, guard, reservation, failure);
+                if (handleModelFailure(claim, guard, reservation, failure)) {
+                    continue;
+                }
                 return;
             }
             if (!guard.stillOwned()) {
@@ -182,7 +184,7 @@ public final class MessageJobService implements MessageJobPort {
                 request.toolName().value(), request.input(), output);
     }
 
-    private void handleModelFailure(
+    private boolean handleModelFailure(
             MessageWorkClaim claim,
             WorkGuard guard,
             ReservationState reservation,
@@ -192,20 +194,18 @@ public final class MessageJobService implements MessageJobPort {
         if (failure.kind() == ModelCallFailure.Kind.CORRECTABLE) {
             ConversationStore.JobUpdate update = ordinal < maxModelCalls
                     ? ConversationStore.JobUpdate.KEEP_WORKING : ConversationStore.JobUpdate.COMPLETE;
-            boolean appended = appendRuntime(claim, guard, List.of(runtime(MODEL_OUTPUT_INVALID)), update);
-            if (appended && update == ConversationStore.JobUpdate.KEEP_WORKING) {
-                processClaim(claim, guard);
-            }
-            return;
+            return appendRuntime(claim, guard, List.of(runtime(MODEL_OUTPUT_INVALID)), update)
+                    && update == ConversationStore.JobUpdate.KEEP_WORKING;
         }
         if (failure.kind() == ModelCallFailure.Kind.CONTEXT_TOO_LARGE) {
             appendRuntime(claim, guard, List.of(runtime(CONTEXT_TOO_LARGE)), ConversationStore.JobUpdate.COMPLETE);
-            return;
+            return false;
         }
         if (failure.kind() == ModelCallFailure.Kind.TRANSIENT && ordinal < maxModelCalls && scheduleRetry(claim, guard)) {
-            return;
+            return false;
         }
         appendRuntime(claim, guard, List.of(runtime(MODEL_UNAVAILABLE)), ConversationStore.JobUpdate.COMPLETE);
+        return false;
     }
 
     private boolean scheduleRetry(MessageWorkClaim claim, WorkGuard guard) {
