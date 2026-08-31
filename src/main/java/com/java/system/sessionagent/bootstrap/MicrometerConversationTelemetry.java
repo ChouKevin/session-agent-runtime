@@ -20,7 +20,8 @@ public final class MicrometerConversationTelemetry implements ConversationTeleme
     private static final Set<String> INTAKE_OUTCOMES = Set.of("ACCEPTED", "REJECTED");
     private static final Set<String> JOB_OUTCOMES = Set.of("EMPTY", "CLAIMED", "COMPLETED", "OWNERSHIP_LOST", "FAILED");
     private static final Set<String> MODEL_OUTCOMES = Set.of("SUCCESS", "FAILURE");
-    private static final Set<String> MODEL_CATEGORIES = Set.of("STOP", "MAX_TOKENS", "SAFETY", "RECITATION", "OTHER", "UNAVAILABLE", "RESPONSE");
+    private static final Set<String> MODEL_CATEGORIES = Set.of(
+            "STOP", "MAX_TOKENS", "SAFETY", "RECITATION", "OTHER", "UNAVAILABLE", "RESPONSE", "OUTPUT_INVALID");
     private static final Set<String> TOOL_OUTCOMES = Set.of("SUCCESS", "INVALID_INPUT", "FAILURE");
     private static final Set<String> FEEDBACK_CODES = Set.of(
             "INVALID_TOOL_INPUT", "TOOL_INPUT_TOO_LARGE", "UNKNOWN_REPOSITORY",

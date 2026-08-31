@@ -89,11 +89,16 @@ public final class SpringAiConversationModel implements ConversationModel {
             response = chatModel.call(prompt);
         } catch (RuntimeException exception) {
             ModelCallFailure failure = classifyProviderFailure(exception);
-            telemetry.model("FAILURE", Optional.of("UNAVAILABLE"), new ModelUsage(0, 0, 0, false),
-                    elapsedSince(requestStartedAt));
+            recordFailure("UNAVAILABLE", requestStartedAt);
             throw failure;
         }
-        ModelReply reply = normalize(response);
+        ModelReply reply;
+        try {
+            reply = normalize(response);
+        } catch (ModelCallFailure failure) {
+            recordFailure("OUTPUT_INVALID", requestStartedAt);
+            throw failure;
+        }
         ModelUsage modelUsage = usage(response);
         usageObserver.accept(modelUsage);
         telemetry.model("SUCCESS", Optional.of("RESPONSE"), modelUsage, elapsedSince(requestStartedAt));
@@ -174,6 +179,11 @@ public final class SpringAiConversationModel implements ConversationModel {
 
     private static Duration elapsedSince(long startedAt) {
         return Duration.ofNanos(System.nanoTime() - startedAt);
+    }
+
+    private void recordFailure(String category, long requestStartedAt) {
+        telemetry.model("FAILURE", Optional.of(category), new ModelUsage(0, 0, 0, false),
+                elapsedSince(requestStartedAt));
     }
 
     private static boolean hasContextTooLargeSignal(Throwable exception) {

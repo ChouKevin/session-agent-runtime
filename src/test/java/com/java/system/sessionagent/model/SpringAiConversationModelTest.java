@@ -1,5 +1,6 @@
 package com.java.system.sessionagent.model;
 
+import com.java.system.sessionagent.bootstrap.MicrometerConversationTelemetry;
 import com.java.system.sessionagent.conversation.domain.ModelReply;
 import com.java.system.sessionagent.conversation.domain.ModelRequest;
 import com.java.system.sessionagent.conversation.domain.ModelUsage;
@@ -10,6 +11,9 @@ import com.java.system.sessionagent.tool.application.ToolRegistration;
 import com.java.system.sessionagent.tool.application.ToolSnapshot;
 import com.java.system.sessionagent.tool.domain.ToolDefinition;
 import com.java.system.sessionagent.tool.domain.ToolName;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.Timer;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.Test;
 import org.springframework.ai.chat.metadata.ChatResponseMetadata;
 import org.springframework.ai.chat.metadata.DefaultUsage;
@@ -101,6 +105,29 @@ class SpringAiConversationModelTest {
                 .isInstanceOf(ModelCallFailure.class)
                 .extracting(exception -> ((ModelCallFailure) exception).kind())
                 .isEqualTo(ModelCallFailure.Kind.CORRECTABLE);
+    }
+
+    @Test
+    void records_one_failure_counter_and_duration_for_an_unusable_provider_response() {
+        SimpleMeterRegistry registry = new SimpleMeterRegistry();
+        RecordingChatModel chatModel = new RecordingChatModel(response(new AssistantMessage("   ")));
+        SpringAiConversationModel model = new SpringAiConversationModel(chatModel, new PromptResource(),
+                new MicrometerConversationTelemetry(registry));
+
+        assertThatThrownBy(() -> model.respond(request(), () -> 1, usage -> { }))
+                .isInstanceOf(ModelCallFailure.class)
+                .extracting(exception -> ((ModelCallFailure) exception).kind())
+                .isEqualTo(ModelCallFailure.Kind.CORRECTABLE);
+
+        Counter failureCounter = registry.find("session_agent.model").tags(
+                "outcome", "FAILURE", "category", "OUTPUT_INVALID", "usage_available", "false").counter();
+        Timer failureDuration = registry.find("session_agent.model.duration").tags(
+                "outcome", "FAILURE", "category", "OUTPUT_INVALID", "usage_available", "false").timer();
+        assertThat(chatModel.callCount).isEqualTo(1);
+        assertThat(failureCounter).isNotNull();
+        assertThat(failureCounter.count()).isEqualTo(1.0);
+        assertThat(failureDuration).isNotNull();
+        assertThat(failureDuration.count()).isEqualTo(1);
     }
 
     @Test
