@@ -50,8 +50,8 @@ class SessionAgentLiveIT {
     }
 
     private String requiredBaseUrl() {
-        String baseUrl = System.getenv("SESSION_AGENT_LIVE_BASE_URL");
-        Assumptions.assumeTrue(StringUtils.hasText(baseUrl), "SESSION_AGENT_LIVE_BASE_URL is required");
+        String baseUrl = System.getenv("SESSION_AGENT_BASE_URL");
+        Assumptions.assumeTrue(StringUtils.hasText(baseUrl), "SESSION_AGENT_BASE_URL is required");
         return baseUrl;
     }
 

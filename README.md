@@ -76,7 +76,7 @@ export SESSION_AGENT_POSTGRES_PASSWORD='<local PostgreSQL password>'
 SESSION_AGENT_LIVE=true bash live-test.sh
 ```
 
-`live-test.sh` creates a unique Compose project, requests an ephemeral loopback port, runs the opt-in HTTP acceptance test, and removes only that project and its disposable PostgreSQL volume. It never starts, stops, resets, or cleans Semantic.
+`live-test.sh` creates a unique Compose project, requests an ephemeral loopback port, exports its `SESSION_AGENT_BASE_URL` to the opt-in HTTP acceptance test, and removes only that project and its disposable PostgreSQL volume. It never starts, stops, resets, or cleans Semantic.
 
 The live report under `target/live-reports/` contains safe metadata only: session/job IDs, configured model, tool order, repository/revision pairs, outcome, and available Spring AI usage. It excludes questions, prompts, raw tool results, HTTP bodies, model context, and credentials.
 

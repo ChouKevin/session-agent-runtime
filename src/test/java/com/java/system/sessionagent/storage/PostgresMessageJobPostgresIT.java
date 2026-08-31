@@ -62,10 +62,14 @@ class PostgresMessageJobPostgresIT {
         assertThat(store.scheduleRetry(firstClaim, Duration.ZERO)).isTrue();
         assertThat(store.loadHistory(first.sessionId())).extracting(message -> message.sequence().value()).containsExactly(1L, 2L);
         MessageWorkClaim reclaimed = store.claimNext("worker", Duration.ofSeconds(30)).orElseThrow();
+        assertThat(store.loadHistory(first.sessionId())).extracting(message -> message.sequence().value())
+                .containsExactly(1L, 2L);
         store.append(reclaimed, new ConversationStore.MessageBatch(List.of(new ConversationStore.AssistantData("done")),
                 ConversationStore.JobUpdate.COMPLETE), NOW.plusSeconds(1));
         MessageReceipt second = store.receive(new IncomingMessage("thread", "alice", "second", "two"));
         MessageWorkClaim secondClaim = store.claimNext("worker", Duration.ofSeconds(30)).orElseThrow();
+        assertThat(store.loadHistory(second.sessionId())).extracting(message -> message.sequence().value())
+                .containsExactly(1L, 2L, 3L, 4L);
         store.append(secondClaim, new ConversationStore.MessageBatch(List.of(new ConversationStore.AssistantData("second done")),
                 ConversationStore.JobUpdate.COMPLETE), NOW.plusSeconds(2));
         assertThat(store.loadHistory(second.sessionId())).extracting(message -> message.sequence().value())

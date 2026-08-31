@@ -6,8 +6,9 @@ compose_file="${runtime_root}/docker/compose.yaml"
 dockerfile="${runtime_root}/Dockerfile"
 env_example="${runtime_root}/docker/.env.example"
 live_test="${runtime_root}/live-test.sh"
+live_junit_test="${runtime_root}/src/test/java/com/java/system/sessionagent/live/SessionAgentLiveIT.java"
 
-for required_file in "${compose_file}" "${dockerfile}" "${env_example}" "${live_test}"; do
+for required_file in "${compose_file}" "${dockerfile}" "${env_example}" "${live_test}" "${live_junit_test}"; do
     if [[ ! -f "${required_file}" ]]; then
         printf 'missing required Docker contract file: %s\n' "${required_file}" >&2
         exit 1
@@ -84,6 +85,15 @@ if [[ -z "${runtime_health_line}" || -z "${live_maven_line}" || "${runtime_healt
     printf 'live test must await runtime health before Maven acceptance\n' >&2
     exit 1
 fi
+
+grep -Fq 'export SESSION_AGENT_BASE_URL="http://${published_port}"' "${live_test}" || {
+    printf 'live runner must export the SessionAgentLiveIT base URL\n' >&2
+    exit 1
+}
+grep -Fq 'System.getenv("SESSION_AGENT_BASE_URL")' "${live_junit_test}" || {
+    printf 'SessionAgentLiveIT must read the live runner base URL\n' >&2
+    exit 1
+}
 
 for required_input in SEMANTIC_BASE_URL SEMANTIC_API_TOKEN GOOGLE_API_KEY GOOGLE_GENAI_MODEL; do
     grep -Fq "${required_input}" "${compose_file}" || {

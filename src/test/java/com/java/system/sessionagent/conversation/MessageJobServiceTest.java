@@ -2,15 +2,19 @@ package com.java.system.sessionagent.conversation;
 
 import com.java.system.sessionagent.conversation.application.MessageJobRetryPolicy;
 import com.java.system.sessionagent.conversation.application.MessageJobService;
+import com.java.system.sessionagent.conversation.domain.AssistantMessage;
 import com.java.system.sessionagent.conversation.domain.JobStatus;
 import com.java.system.sessionagent.conversation.domain.MessageJobId;
 import com.java.system.sessionagent.conversation.domain.MessageRole;
 import com.java.system.sessionagent.conversation.domain.MessageWorkClaim;
 import com.java.system.sessionagent.conversation.domain.ModelReply;
+import com.java.system.sessionagent.conversation.domain.ModelRequest;
 import com.java.system.sessionagent.conversation.domain.ModelUsage;
 import com.java.system.sessionagent.conversation.domain.SessionId;
+import com.java.system.sessionagent.conversation.domain.SessionMessage;
 import com.java.system.sessionagent.conversation.domain.SessionSequence;
 import com.java.system.sessionagent.conversation.domain.ToolRequest;
+import com.java.system.sessionagent.conversation.domain.ToolObservation;
 import com.java.system.sessionagent.conversation.domain.UserMessage;
 import com.java.system.sessionagent.conversation.port.out.ConversationModel;
 import com.java.system.sessionagent.conversation.port.out.ConversationStore;
@@ -27,6 +31,7 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.OptionalInt;
@@ -35,6 +40,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -86,15 +92,30 @@ class MessageJobServiceTest {
     void persists_mixed_assistant_text_and_ordered_tool_observations_before_the_next_model_call() {
         ConversationStore store = mock(ConversationStore.class);
         MessageWorkClaim claim = claim();
-        when(store.loadHistory(claim.sessionId())).thenReturn(List.of(user()), List.of(user()));
+        List<SessionMessage> durableHistory = new ArrayList<>(List.of(user()));
+        when(store.loadHistory(claim.sessionId())).thenAnswer(invocation -> List.copyOf(durableHistory));
         when(store.reserveModelCall(eq(claim), eq(3), any(Instant.class))).thenReturn(OptionalInt.of(1), OptionalInt.of(2));
+        doAnswer(invocation -> {
+            ConversationStore.MessageBatch batch = invocation.getArgument(1, ConversationStore.MessageBatch.class);
+            if (batch.jobUpdate() == ConversationStore.JobUpdate.KEEP_WORKING) {
+                appendToDurableHistory(claim, durableHistory, batch);
+            }
+            return null;
+        }).when(store).append(eq(claim), any(ConversationStore.MessageBatch.class), any(Instant.class));
         ToolRegistration<ToolInput> first = registration("first", input -> "first output");
         ToolRegistration<ToolInput> second = registration("second", input -> "second output");
-        ConversationModel model = scriptedModel(
-                new ModelReply.UseTools(Optional.of("Checking."), List.of(
+        List<ModelRequest> requests = new ArrayList<>();
+        AtomicInteger modelCalls = new AtomicInteger();
+        ConversationModel model = (request, reservation, usage) -> {
+            requests.add(request);
+            reservation.reserve();
+            if (modelCalls.getAndIncrement() == 0) {
+                return new ModelReply.UseTools(Optional.of("Checking."), List.of(
                         new ToolRequest(new ToolName("first"), "{\"value\":\"a\"}"),
-                        new ToolRequest(new ToolName("second"), "{\"value\":\"b\"}"))),
-                new ModelReply.Text("Done"));
+                        new ToolRequest(new ToolName("second"), "{\"value\":\"b\"}")));
+            }
+            return new ModelReply.Text("Done");
+        };
 
         service(store, model, List.of(first, second), 3).process(claim, () -> true);
 
@@ -111,6 +132,24 @@ class MessageJobServiceTest {
                 .extracting(ConversationStore.ToolObservationData::toolName)
                 .containsExactly("first", "second");
         assertThat(batches.getAllValues().get(1).messages()).containsExactly(new ConversationStore.AssistantData("Done"));
+        assertThat(requests).hasSize(2);
+        List<SessionMessage> secondRequestHistory = requests.get(1).history();
+        assertThat(secondRequestHistory).extracting(SessionMessage::role)
+                .containsExactly(MessageRole.USER, MessageRole.ASSISTANT, MessageRole.TOOL, MessageRole.TOOL);
+        assertThat(secondRequestHistory).extracting(message -> message.sequence().value())
+                .containsExactly(1L, 2L, 3L, 4L);
+        assertThat(secondRequestHistory.get(1)).isInstanceOfSatisfying(AssistantMessage.class,
+                assistant -> assertThat(assistant.message()).isEqualTo("Checking."));
+        assertThat(secondRequestHistory.get(2)).isInstanceOfSatisfying(ToolObservation.class, observation -> {
+            assertThat(observation.toolName()).isEqualTo("first");
+            assertThat(observation.input()).isEqualTo("{\"value\":\"a\"}");
+            assertThat(observation.output()).isEqualTo("first output");
+        });
+        assertThat(secondRequestHistory.get(3)).isInstanceOfSatisfying(ToolObservation.class, observation -> {
+            assertThat(observation.toolName()).isEqualTo("second");
+            assertThat(observation.input()).isEqualTo("{\"value\":\"b\"}");
+            assertThat(observation.output()).isEqualTo("second output");
+        });
     }
 
     @Test
@@ -181,7 +220,11 @@ class MessageJobServiceTest {
         }).process(claim, () -> true);
 
         verify(store, org.mockito.Mockito.never()).scheduleRetry(any(), any());
-        verify(store, org.mockito.Mockito.times(1)).append(eq(claim), any(), any(Instant.class));
+        org.mockito.ArgumentCaptor<ConversationStore.MessageBatch> batch = org.mockito.ArgumentCaptor.forClass(ConversationStore.MessageBatch.class);
+        verify(store, org.mockito.Mockito.times(1)).append(eq(claim), batch.capture(), any(Instant.class));
+        assertThat(batch.getValue().jobUpdate()).isEqualTo(ConversationStore.JobUpdate.COMPLETE);
+        assertThat(batch.getValue().messages()).containsExactly(
+                new ConversationStore.RuntimeData("MODEL_UNAVAILABLE", "Runtime model is unavailable."));
     }
 
     @Test
@@ -221,6 +264,23 @@ class MessageJobServiceTest {
             reservation.reserve();
             return replies[index.getAndIncrement()];
         };
+    }
+
+    private static void appendToDurableHistory(MessageWorkClaim claim, List<SessionMessage> history,
+                                               ConversationStore.MessageBatch batch) {
+        for (ConversationStore.MessageData message : batch.messages()) {
+            SessionSequence sequence = new SessionSequence(history.size() + 1L);
+            if (message instanceof ConversationStore.AssistantData assistant) {
+                history.add(new AssistantMessage(claim.sessionId(), sequence, Optional.of(claim.messageJobId()), NOW,
+                        MessageRole.ASSISTANT, assistant.message()));
+            } else if (message instanceof ConversationStore.ToolObservationData observation) {
+                history.add(new ToolObservation(claim.sessionId(), sequence, Optional.of(claim.messageJobId()), NOW,
+                        MessageRole.TOOL, observation.observationId(), observation.toolName(), observation.input(),
+                        observation.output()));
+            } else {
+                throw new AssertionError("Unexpected nonterminal message: " + message.getClass().getSimpleName());
+            }
+        }
     }
 
     private static MessageWorkClaim claim() {
