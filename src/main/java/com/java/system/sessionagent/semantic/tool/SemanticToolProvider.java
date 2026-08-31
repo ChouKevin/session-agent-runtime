@@ -68,7 +68,9 @@ public final class SemanticToolProvider {
         ToolDefinition definition = new ToolDefinition(
                 LIST_REPOSITORIES,
                 VERSION,
-                "List repositories available from Semantic Service",
+                "List available repositories and their current repositoryId/revision pairs. "
+                        + "Use when a repository-specific query is useful and visible history has no reliable "
+                        + "repositoryId/revision pair. The catalog identifies repositories; it does not describe source behavior.",
                 schemaFactory.schemaFor(ListRepositoriesInput.class),
                 ToolKind.CATALOG);
         ToolRegistration<ListRepositoriesInput> registration = new ToolRegistration<>(

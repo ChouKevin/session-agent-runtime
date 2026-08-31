@@ -12,7 +12,8 @@ public final class ToolFailureFeedback {
 
     public static String revisionOutdated(ToolExecutionFailure.RevisionOutdatedDetails details) {
         return JSON.canonicalize(new RevisionOutdatedPayload(details.repositoryId(), details.requestedRevision(),
-                details.currentRevision(), "Repository revision is outdated. Retry the same useful tool with currentRevision."));
+                details.currentRevision(), "Repository revision is outdated. Retry the same useful tool with "
+                        + "currentRevision and keep every other argument unchanged."));
     }
 
     private record RevisionOutdatedPayload(String repositoryId, String requestedRevision, String currentRevision,

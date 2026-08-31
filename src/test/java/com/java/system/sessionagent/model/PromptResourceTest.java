@@ -19,14 +19,12 @@ class PromptResourceTest {
     }
 
     @Test
-    void defines_the_citation_free_tool_and_final_reply_contract() {
+    void defines_only_cross_tool_evidence_and_reply_rules() {
         PromptResource promptResource = new PromptResource();
 
         assertThat(promptResource.content())
-                .contains("`list_repositories`")
-                .contains("catalog identifies repositories")
-                .contains("`codebase_search_code_facts`")
-                .contains("REVISION_OUTDATED")
+                .contains("Follow each tool's")
+                .contains("description and input schema")
                 .contains("Make only one tool call")
                 .contains("available only at runtime")
                 .contains("totalCount:0")
@@ -37,6 +35,9 @@ class PromptResourceTest {
                 .contains("Before making a cross-repository conclusion")
                 .contains("absence of a call in one method proves only the inspected code path")
                 .contains("downstream or runtime outcome")
+                .doesNotContain("`list_repositories`")
+                .doesNotContain("`codebase_search_code_facts`")
+                .doesNotContain("REVISION_OUTDATED")
                 .doesNotContainIgnoringCase("citation")
                 .doesNotContainIgnoringCase("citeable")
                 .doesNotContain("\"message\":\"<answer>\"");

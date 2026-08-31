@@ -17,6 +17,24 @@ import static org.assertj.core.api.Assertions.assertThat;
 class SpringAiToolCallbackFactoryTest {
 
     @Test
+    void exposes_repository_selection_guidance_through_the_catalog_tool() {
+        SemanticToolProvider provider = new SemanticToolProvider(
+                List::of, new SemanticSourceClient(RestClient.create()));
+        ToolSnapshot snapshot = new DirectToolRegistry(provider.registrations()).snapshot();
+
+        org.springframework.ai.tool.definition.ToolDefinition callbackDefinition =
+                new SpringAiToolCallbackFactory().create(snapshot).stream()
+                        .filter(callback -> callback.getToolDefinition().name().equals("list_repositories"))
+                        .findFirst()
+                        .orElseThrow()
+                        .getToolDefinition();
+
+        assertThat(callbackDefinition.description())
+                .contains("repository-specific query")
+                .contains("reliable repositoryId/revision pair");
+    }
+
+    @Test
     void forwards_the_semantic_definition_without_reencoding_its_schema() {
         RestClient restClient = RestClient.create();
         SemanticToolProvider provider = new SemanticToolProvider(
