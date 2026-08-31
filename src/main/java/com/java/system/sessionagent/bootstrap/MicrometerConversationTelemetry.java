@@ -20,11 +20,8 @@ public final class MicrometerConversationTelemetry implements ConversationTeleme
     private static final Set<String> INTAKE_OUTCOMES = Set.of("ACCEPTED", "REJECTED");
     private static final Set<String> JOB_OUTCOMES = Set.of("EMPTY", "CLAIMED", "COMPLETED", "OWNERSHIP_LOST", "FAILED");
     private static final Set<String> MODEL_OUTCOMES = Set.of("SUCCESS", "FAILURE");
-    private static final Set<String> FINISH_REASONS = Set.of("STOP", "MAX_TOKENS", "SAFETY", "RECITATION", "OTHER", "UNAVAILABLE");
-    private static final Set<String> TOOL_OUTCOMES = Set.of(
-            "SUCCESS", "INVALID_INPUT", "INPUT_TOO_LARGE", "REPOSITORY_NOT_FOUND", "REVISION_OUTDATED",
-            "INDEX_NOT_READY", "INDEX_CONTRACT_MISMATCH", "CODE_FACT_NOT_FOUND", "CODE_FACT_KIND_UNSUPPORTED",
-            "INVALID_QUERY", "SEMANTIC_INDEX_UNAVAILABLE", "FORBIDDEN", "INVALID_RESPONSE", "STALE");
+    private static final Set<String> MODEL_CATEGORIES = Set.of("STOP", "MAX_TOKENS", "SAFETY", "RECITATION", "OTHER", "UNAVAILABLE", "RESPONSE");
+    private static final Set<String> TOOL_OUTCOMES = Set.of("SUCCESS", "INVALID_INPUT", "FAILURE");
     private static final Set<String> FEEDBACK_CODES = Set.of(
             "INVALID_TOOL_INPUT", "TOOL_INPUT_TOO_LARGE", "UNKNOWN_REPOSITORY",
             "REVISION_OUTDATED", "INDEX_NOT_READY", "INDEX_CONTRACT_MISMATCH", "CODE_FACT_NOT_FOUND",
@@ -51,12 +48,17 @@ public final class MicrometerConversationTelemetry implements ConversationTeleme
     }
 
     @Override
-    public void model(String outcome, Optional<String> finishReason, ModelUsage usage) {
-        Assert.notNull(finishReason, "Model finish reason must not be null");
+    public void model(String outcome, Optional<String> category, ModelUsage usage, Duration duration) {
+        Assert.notNull(category, "Model category must not be null");
         Assert.notNull(usage, "Model usage must not be null");
-        increment("session_agent.model", "outcome", bounded(outcome, MODEL_OUTCOMES),
-                "finish_reason", bounded(finishReason.orElse("UNAVAILABLE"), FINISH_REASONS),
+        Assert.notNull(duration, "Model duration must not be null");
+        String boundedOutcome = bounded(outcome, MODEL_OUTCOMES);
+        String boundedCategory = bounded(category.orElse("UNAVAILABLE"), MODEL_CATEGORIES);
+        increment("session_agent.model", "outcome", boundedOutcome,
+                "category", boundedCategory,
                 "usage_available", Boolean.toString(usage.available()));
+        recordDuration("session_agent.model.duration", duration, "outcome", boundedOutcome,
+                "category", boundedCategory, "usage_available", Boolean.toString(usage.available()));
         if (usage.available()) {
             meterRegistry.counter("session_agent.model.tokens", "kind", "prompt").increment(usage.promptTokens());
             meterRegistry.counter("session_agent.model.tokens", "kind", "completion").increment(usage.completionTokens());
@@ -65,10 +67,12 @@ public final class MicrometerConversationTelemetry implements ConversationTeleme
     }
 
     @Override
-    public void tool(String toolName, String outcome, Optional<String> repositoryId, Optional<String> revision) {
-        Assert.notNull(repositoryId, "Repository ID must not be null");
-        Assert.notNull(revision, "Revision must not be null");
-        increment("session_agent.tool", "tool", bounded(toolName, TOOL_NAMES), "outcome", bounded(outcome, TOOL_OUTCOMES));
+    public void tool(String toolName, String outcome, Duration duration) {
+        Assert.notNull(duration, "Tool duration must not be null");
+        String boundedToolName = bounded(toolName, TOOL_NAMES);
+        String boundedOutcome = bounded(outcome, TOOL_OUTCOMES);
+        increment("session_agent.tool", "tool", boundedToolName, "outcome", boundedOutcome);
+        recordDuration("session_agent.tool.duration", duration, "tool", boundedToolName, "outcome", boundedOutcome);
     }
 
     @Override
@@ -84,6 +88,10 @@ public final class MicrometerConversationTelemetry implements ConversationTeleme
 
     private void increment(String metric, String... tags) {
         meterRegistry.counter(metric, tags).increment();
+    }
+
+    private void recordDuration(String metric, Duration duration, String... tags) {
+        meterRegistry.timer(metric, tags).record(duration);
     }
 
     private static String bounded(String candidate, Set<String> allowed) {

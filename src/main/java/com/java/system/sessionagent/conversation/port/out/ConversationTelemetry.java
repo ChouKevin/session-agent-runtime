@@ -11,9 +11,9 @@ public interface ConversationTelemetry {
 
     void job(String outcome);
 
-    void model(String outcome, Optional<String> finishReason, ModelUsage usage);
+    void model(String outcome, Optional<String> category, ModelUsage usage, Duration duration);
 
-    void tool(String toolName, String outcome, Optional<String> repositoryId, Optional<String> revision);
+    void tool(String toolName, String outcome, Duration duration);
 
     void feedback(String code);
 

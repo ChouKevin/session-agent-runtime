@@ -104,15 +104,16 @@ public final class MessageJobService implements MessageJobPort {
             ReservationState reservation = new ReservationState();
             ModelRequest request = new ModelRequest(history, tools);
             ModelReply reply;
+            long requestStartedAt = System.nanoTime();
             try {
-                logModelCallStarted(claim, history.size(), tools.definitions().size());
-                reply = conversationModel.respond(request, () -> reserve(claim, guard, reservation),
-                        usage -> logModelCallUsage(claim, reservation.ordinal(), usage));
+                reply = conversationModel.respond(request, () -> reserveAndLogModelRequest(claim, guard, reservation,
+                                history.size(), tools.definitions().size()),
+                        usage -> { });
             } catch (BudgetExhausted exception) {
                 appendRuntime(claim, guard, List.of(runtime(MODEL_CALL_LIMIT_REACHED)), ConversationStore.JobUpdate.COMPLETE);
                 return;
             } catch (ModelCallFailure failure) {
-                if (handleModelFailure(claim, guard, reservation, failure)) {
+                if (handleModelFailure(claim, guard, reservation, failure, elapsedSince(requestStartedAt))) {
                     continue;
                 }
                 return;
@@ -121,7 +122,7 @@ public final class MessageJobService implements MessageJobPort {
                 return;
             }
             int ordinal = reservation.ordinal();
-            logModelCallDecision(claim, ordinal, reply);
+            logModelResponse(claim, ordinal, reply, elapsedSince(requestStartedAt));
             if (reply instanceof ModelReply.Text text) {
                 appendRuntime(claim, guard, List.of(new ConversationStore.AssistantData(text.message())),
                         ConversationStore.JobUpdate.COMPLETE);
@@ -135,7 +136,7 @@ public final class MessageJobService implements MessageJobPort {
                 appendRuntime(claim, guard, messages, ConversationStore.JobUpdate.COMPLETE);
                 return;
             }
-            List<ConversationStore.MessageData> messages = toolBatch(useTools, tools);
+            List<ConversationStore.MessageData> messages = toolBatch(claim, ordinal, useTools, tools);
             if (!guard.stillOwned()) {
                 return;
             }
@@ -157,27 +158,51 @@ public final class MessageJobService implements MessageJobPort {
         return reserved.getAsInt();
     }
 
-    private List<ConversationStore.MessageData> toolBatch(ModelReply.UseTools reply, ToolSnapshot tools) {
+    private int reserveAndLogModelRequest(
+            MessageWorkClaim claim,
+            WorkGuard guard,
+            ReservationState state,
+            int historySize,
+            int toolCount) {
+        int ordinal = reserve(claim, guard, state);
+        logModelRequest(claim, ordinal, historySize, toolCount);
+        return ordinal;
+    }
+
+    private List<ConversationStore.MessageData> toolBatch(
+            MessageWorkClaim claim,
+            int ordinal,
+            ModelReply.UseTools reply,
+            ToolSnapshot tools) {
         List<ConversationStore.MessageData> messages = new ArrayList<>();
         reply.message().ifPresent(text -> messages.add(new ConversationStore.AssistantData(text)));
         for (ToolRequest request : reply.requests()) {
-            messages.add(executeTool(tools, request));
+            messages.add(executeTool(claim, ordinal, tools, request));
         }
         return List.copyOf(messages);
     }
 
-    private ConversationStore.ToolObservationData executeTool(ToolSnapshot tools, ToolRequest request) {
+    private ConversationStore.ToolObservationData executeTool(
+            MessageWorkClaim claim,
+            int ordinal,
+            ToolSnapshot tools,
+            ToolRequest request) {
+        long executionStartedAt = System.nanoTime();
         String output;
+        String outcome;
         try {
             output = toolRegistry.invoke(tools, request.toolName(), request.input());
-            telemetry.tool(request.toolName().value(), "SUCCESS", Optional.empty(), Optional.empty());
+            outcome = "SUCCESS";
         } catch (IllegalArgumentException failure) {
             output = ToolFailureOutput.format(new ToolExecutionFailure("TOOL_INPUT_INVALID", "The tool input is invalid."));
-            telemetry.tool(request.toolName().value(), "INVALID_INPUT", Optional.empty(), Optional.empty());
+            outcome = "INVALID_INPUT";
         } catch (ToolExecutionFailure failure) {
             output = ToolFailureOutput.format(failure);
-            telemetry.tool(request.toolName().value(), failure.code(), Optional.empty(), Optional.empty());
+            outcome = "FAILURE";
         }
+        Duration duration = elapsedSince(executionStartedAt);
+        telemetry.tool(request.toolName().value(), outcome, duration);
+        logToolExecution(claim, ordinal, outcome, duration);
         return new ConversationStore.ToolObservationData(new ObservationId(UUID.randomUUID().toString()),
                 request.toolName().value(), request.input(), output);
     }
@@ -186,9 +211,10 @@ public final class MessageJobService implements MessageJobPort {
             MessageWorkClaim claim,
             WorkGuard guard,
             ReservationState reservation,
-            ModelCallFailure failure) {
+            ModelCallFailure failure,
+            Duration duration) {
         int ordinal = reservation.ordinal();
-        logModelCallFailed(claim, ordinal, failure.kind());
+        logModelFailure(claim, ordinal, failure.kind(), duration);
         if (failure.kind() == ModelCallFailure.Kind.CORRECTABLE) {
             ConversationStore.JobUpdate update = ordinal < maxModelCalls
                     ? ConversationStore.JobUpdate.KEEP_WORKING : ConversationStore.JobUpdate.COMPLETE;
@@ -282,27 +308,41 @@ public final class MessageJobService implements MessageJobPort {
         };
     }
 
-    private static void logModelCallStarted(MessageWorkClaim claim, int historySize, int toolCount) {
-        LOGGER.info("model_call_started sessionId={} messageJobId={} historyCount={} visibleToolCount={}",
-                claim.sessionId().value(), claim.messageJobId().value(), historySize, toolCount);
+    private static void logModelRequest(MessageWorkClaim claim, int ordinal, int historySize, int toolCount) {
+        LOGGER.info("model_request sessionId={} messageJobId={} ordinal={} historyCount={} visibleToolCount={}",
+                claim.sessionId().value(), claim.messageJobId().value(), ordinal, historySize, toolCount);
     }
 
-    private static void logModelCallUsage(MessageWorkClaim claim, int ordinal,
-                                          com.java.system.sessionagent.conversation.domain.ModelUsage usage) {
-        LOGGER.info("model_call_usage sessionId={} messageJobId={} ordinal={} usageAvailable={} promptTokens={} completionTokens={} totalTokens={}",
-                claim.sessionId().value(), claim.messageJobId().value(), ordinal, usage.available(), usage.promptTokens(),
-                usage.completionTokens(), usage.totalTokens());
-    }
-
-    private static void logModelCallDecision(MessageWorkClaim claim, int ordinal, ModelReply reply) {
+    private static void logModelResponse(MessageWorkClaim claim, int ordinal, ModelReply reply, Duration duration) {
         String category = reply instanceof ModelReply.Text ? "ASSISTANT_TEXT" : "USE_TOOLS";
-        LOGGER.info("model_call_decision sessionId={} messageJobId={} ordinal={} decisionCategory={}",
-                claim.sessionId().value(), claim.messageJobId().value(), ordinal, category);
+        LOGGER.info("model_response sessionId={} messageJobId={} ordinal={} category={} durationMs={}",
+                claim.sessionId().value(), claim.messageJobId().value(), ordinal, category, duration.toMillis());
     }
 
-    private static void logModelCallFailed(MessageWorkClaim claim, int ordinal, ModelCallFailure.Kind kind) {
-        LOGGER.info("model_call_failed sessionId={} messageJobId={} ordinal={} closedFailureKind={}",
-                claim.sessionId().value(), claim.messageJobId().value(), ordinal, kind);
+    private static void logModelFailure(MessageWorkClaim claim, int ordinal, ModelCallFailure.Kind kind, Duration duration) {
+        LOGGER.info("model_failure sessionId={} messageJobId={} ordinal={} category={} durationMs={}",
+                claim.sessionId().value(), claim.messageJobId().value(), ordinal, failureCategory(kind), duration.toMillis());
+    }
+
+    private static void logToolExecution(
+            MessageWorkClaim claim,
+            int ordinal,
+            String outcome,
+            Duration duration) {
+        LOGGER.info("tool_execution sessionId={} messageJobId={} ordinal={} category={} durationMs={}",
+                claim.sessionId().value(), claim.messageJobId().value(), ordinal, outcome, duration.toMillis());
+    }
+
+    private static Duration elapsedSince(long startedAt) {
+        return Duration.ofNanos(System.nanoTime() - startedAt);
+    }
+
+    private static String failureCategory(ModelCallFailure.Kind kind) {
+        return switch (kind) {
+            case CORRECTABLE -> "OUTPUT_INVALID";
+            case CONTEXT_TOO_LARGE -> "CONTEXT_TOO_LARGE";
+            case TRANSIENT, TERMINAL -> "UNAVAILABLE";
+        };
     }
 
     private static final class BudgetExhausted extends RuntimeException {

@@ -3,6 +3,7 @@ package com.java.system.sessionagent.bootstrap;
 import com.java.system.sessionagent.conversation.domain.ModelUsage;
 import com.java.system.sessionagent.semantic.SemanticFailure;
 import com.java.system.sessionagent.semantic.domain.RepositoryId;
+import io.micrometer.core.instrument.Timer;
 import com.java.system.sessionagent.semantic.http.SemanticRepositoryClient;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import io.micrometer.observation.Observation;
@@ -28,23 +29,38 @@ import static org.springframework.test.web.client.response.MockRestResponseCreat
 class RuntimeObservabilityTest {
 
     @Test
-    void emitsOnlyLowCardinalityTagsAndNeverPersistsSensitiveToolValuesInMeters() {
+    void recordsContentFreeBoundedTelemetryWithModelAndToolDurations() {
         SimpleMeterRegistry registry = new SimpleMeterRegistry();
         MicrometerConversationTelemetry telemetry = new MicrometerConversationTelemetry(registry);
 
         telemetry.intake("ACCEPTED");
         telemetry.job("CLAIMED");
-        telemetry.model("SUCCESS", Optional.of("REPLY"), new ModelUsage(5, 3, 8, true));
-        telemetry.tool("list_repositories", "SUCCESS", Optional.of("repo-private"), Optional.of("revision-private"));
+        telemetry.model("SUCCESS", Optional.of("STOP"), new ModelUsage(5, 3, 8, true), Duration.ofMillis(25));
+        telemetry.tool("list_repositories", "SUCCESS", Duration.ofMillis(10));
         telemetry.feedback("INVALID_TOOL_INPUT");
         telemetry.retry("DEPENDENCY", Duration.ofSeconds(1));
-        telemetry.tool("repo-private", "provider-secret", Optional.of("repo-private"), Optional.of("revision-private"));
+        telemetry.model("provider-secret", Optional.of("provider-payload"), new ModelUsage(0, 0, 0, false),
+                Duration.ofMillis(5));
+        telemetry.tool("repo-private", "provider-secret", Duration.ofMillis(5));
 
         String tags = registry.getMeters().stream().flatMap(meter -> meter.getId().getTags().stream())
                 .map(tag -> tag.getKey() + "=" + tag.getValue()).reduce("", (left, right) -> left + "\n" + right);
-        assertThat(tags).doesNotContain("repo-private", "revision-private", "apiKey");
+        assertThat(tags).doesNotContain("repo-private", "revision-private", "provider-secret", "provider-payload",
+                "apiKey", "input-private", "output-private", "prompt-private", "completion-private");
         assertThat(registry.find("session_agent.tool").counter()).isNotNull();
         assertThat(registry.find("session_agent.tool").tags("tool", "OTHER", "outcome", "OTHER").counter()).isNotNull();
+        Timer modelDuration = registry.find("session_agent.model.duration").tags(
+                "outcome", "SUCCESS", "category", "STOP", "usage_available", "true").timer();
+        assertThat(modelDuration).isNotNull();
+        assertThat(modelDuration.count()).isEqualTo(1);
+        assertThat(modelDuration.totalTime(java.util.concurrent.TimeUnit.MILLISECONDS)).isEqualTo(25.0);
+        Timer toolDuration = registry.find("session_agent.tool.duration").tags(
+                "tool", "list_repositories", "outcome", "SUCCESS").timer();
+        assertThat(toolDuration).isNotNull();
+        assertThat(toolDuration.count()).isEqualTo(1);
+        assertThat(toolDuration.totalTime(java.util.concurrent.TimeUnit.MILLISECONDS)).isEqualTo(10.0);
+        assertThat(registry.find("session_agent.tool.duration").tags("tool", "OTHER", "outcome", "OTHER").timer())
+                .isNotNull();
     }
 
     @Test

@@ -10,8 +10,6 @@ import com.java.system.sessionagent.conversation.port.out.ModelCallFailure;
 import com.java.system.sessionagent.conversation.port.out.ModelCallReservation;
 import com.java.system.sessionagent.conversation.port.out.NoOpConversationTelemetry;
 import com.java.system.sessionagent.tool.domain.ToolName;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.metadata.ChatResponseMetadata;
 import org.springframework.ai.chat.metadata.EmptyUsage;
 import org.springframework.ai.chat.metadata.Usage;
@@ -28,6 +26,7 @@ import org.springframework.util.Assert;
 import org.springframework.util.StringUtils;
 
 import java.net.SocketTimeoutException;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -36,8 +35,6 @@ import java.util.Optional;
 import java.util.function.Consumer;
 
 public final class SpringAiConversationModel implements ConversationModel {
-
-    private static final Logger LOGGER = LoggerFactory.getLogger(SpringAiConversationModel.class);
 
     private final ChatModel chatModel;
     private final PromptResource promptResource;
@@ -87,19 +84,19 @@ public final class SpringAiConversationModel implements ConversationModel {
         Prompt prompt = promptFor(request);
         reservation.reserve();
         ChatResponse response;
+        long requestStartedAt = System.nanoTime();
         try {
             response = chatModel.call(prompt);
         } catch (RuntimeException exception) {
             ModelCallFailure failure = classifyProviderFailure(exception);
-            telemetry.model("FAILURE", Optional.of(failure.kind().name()), new ModelUsage(0, 0, 0, false));
+            telemetry.model("FAILURE", Optional.of("UNAVAILABLE"), new ModelUsage(0, 0, 0, false),
+                    elapsedSince(requestStartedAt));
             throw failure;
         }
         ModelReply reply = normalize(response);
         ModelUsage modelUsage = usage(response);
         usageObserver.accept(modelUsage);
-        telemetry.model("SUCCESS", Optional.empty(), modelUsage);
-        LOGGER.info("spring_ai_model_response resultCount={} usageAvailable={}", response.getResults().size(),
-                modelUsage.available());
+        telemetry.model("SUCCESS", Optional.of("RESPONSE"), modelUsage, elapsedSince(requestStartedAt));
         return reply;
     }
 
@@ -173,6 +170,10 @@ public final class SpringAiConversationModel implements ConversationModel {
             return ModelCallFailure.transientFailure();
         }
         return ModelCallFailure.terminal();
+    }
+
+    private static Duration elapsedSince(long startedAt) {
+        return Duration.ofNanos(System.nanoTime() - startedAt);
     }
 
     private static boolean hasContextTooLargeSignal(Throwable exception) {

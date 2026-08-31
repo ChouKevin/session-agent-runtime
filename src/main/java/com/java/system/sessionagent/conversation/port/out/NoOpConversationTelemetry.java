@@ -16,11 +16,11 @@ public final class NoOpConversationTelemetry implements ConversationTelemetry {
     }
 
     @Override
-    public void model(String outcome, Optional<String> finishReason, ModelUsage usage) {
+    public void model(String outcome, Optional<String> category, ModelUsage usage, Duration duration) {
     }
 
     @Override
-    public void tool(String toolName, String outcome, Optional<String> repositoryId, Optional<String> revision) {
+    public void tool(String toolName, String outcome, Duration duration) {
     }
 
     @Override

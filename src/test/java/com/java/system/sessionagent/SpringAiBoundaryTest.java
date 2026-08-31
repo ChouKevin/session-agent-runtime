@@ -20,7 +20,6 @@ class SpringAiBoundaryTest {
             .should().dependOnClassesThat().resideInAnyPackage("org.springframework.ai..");
 
     @ArchTest
-    static final ArchRule GOOGLE_AI_STAYS_IN_MODEL = noClasses()
-            .that().resideOutsideOfPackage("com.java.system.sessionagent.model..")
+    static final ArchRule GOOGLE_AI_DOES_NOT_APPEAR_IN_PRODUCTION = noClasses()
             .should().dependOnClassesThat().resideInAnyPackage("org.springframework.ai.google..");
 }
