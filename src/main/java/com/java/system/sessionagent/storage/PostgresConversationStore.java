@@ -292,6 +292,7 @@ public final class PostgresConversationStore implements ConversationStore {
             UUID sessionId = sessionId(requiredClaim);
             for (MessageData message : requiredBatch.messages()) {
                 long sequence = allocateSequence(sessionId);
+                requireLiveClaim(requiredClaim);
                 if (message instanceof AssistantData assistant) {
                     insertSessionMessage(sessionId, sequence, messageJobId(requiredClaim), "ASSISTANT", requiredCreatedAt);
                     jdbcTemplate.update("insert into assistant_message(session_id, sequence, message) values (?, ?, ?)",

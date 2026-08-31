@@ -12,6 +12,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 
@@ -48,6 +49,34 @@ class MessageJobWorkerTest {
 
         assertThatThrownBy(() -> worker(store, jobs, scheduler).poll()).isInstanceOf(IllegalStateException.class)
                 .hasMessage("failed");
+        verify(renewal).cancel(false);
+    }
+
+    @Test
+    void reports_lost_ownership_to_processing_when_the_heartbeat_is_rejected() {
+        ConversationStore store = mock(ConversationStore.class);
+        MessageWorkClaim claim = new MessageWorkClaim(new MessageJobId("job"), new SessionId("session"), "worker", 1,
+                Instant.parse("2026-08-31T00:00:00Z"), Instant.parse("2026-08-31T00:01:00Z"));
+        when(store.claimNext(any(String.class), any(Duration.class))).thenReturn(Optional.of(claim));
+        when(store.extendClaim(claim, Duration.ofSeconds(30))).thenReturn(false);
+        ScheduledExecutorService scheduler = mock(ScheduledExecutorService.class);
+        ScheduledFuture<?> renewal = mock(ScheduledFuture.class);
+        AtomicReference<Runnable> renewalTask = new AtomicReference<>();
+        org.mockito.Mockito.doAnswer(invocation -> {
+            renewalTask.set(invocation.getArgument(0));
+            return renewal;
+        }).when(scheduler).scheduleAtFixedRate(any(Runnable.class), org.mockito.ArgumentMatchers.anyLong(),
+                org.mockito.ArgumentMatchers.anyLong(), any());
+        MessageJobPort jobs = mock(MessageJobPort.class);
+        org.mockito.Mockito.doAnswer(invocation -> {
+            renewalTask.get().run();
+            assertThat(invocation.getArgument(1, com.java.system.sessionagent.conversation.port.in.WorkGuard.class).stillOwned()).isFalse();
+            return null;
+        }).when(jobs).process(org.mockito.Mockito.eq(claim), any());
+
+        assertThat(worker(store, jobs, scheduler).poll()).isTrue();
+
+        verify(store).extendClaim(claim, Duration.ofSeconds(30));
         verify(renewal).cancel(false);
     }
 
