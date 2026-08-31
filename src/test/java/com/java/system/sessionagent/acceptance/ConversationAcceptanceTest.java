@@ -1,5 +1,7 @@
 package com.java.system.sessionagent.acceptance;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.java.system.sessionagent.conversation.application.ConversationMessageService;
 import com.java.system.sessionagent.conversation.application.MessageJobService;
 import com.java.system.sessionagent.conversation.domain.AssistantMessage;
@@ -41,6 +43,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 class ConversationAcceptanceTest {
 
+    private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
+
     @Test
     void persists_a_direct_text_answer_without_a_tool_observation() {
         try (AcceptanceRuntime runtime = new AcceptanceRuntime(List.of(text("Hello.")))) {
@@ -56,7 +60,7 @@ class ConversationAcceptanceTest {
     }
 
     @Test
-    void persists_repository_catalog_then_source_observation_before_the_final_answer() {
+    void persists_repository_catalog_then_source_observation_before_the_final_answer() throws Exception {
         try (AcceptanceRuntime runtime = new AcceptanceRuntime(List.of(
                 tools(tool("list_repositories", "{}")),
                 tools(tool("codebase_list_entry_points", paymentEntryPointsInput())),
@@ -67,20 +71,20 @@ class ConversationAcceptanceTest {
             List<SessionMessage> history = runtime.history(receipt.sessionId());
             assertThat(history).extracting(SessionMessage::role)
                     .containsExactly(MessageRole.USER, MessageRole.TOOL, MessageRole.TOOL, MessageRole.ASSISTANT);
-            assertThat(history).filteredOn(ToolObservation.class::isInstance).extracting(ToolObservation.class::cast)
-                    .extracting(ToolObservation::toolName).containsExactly("list_repositories", "codebase_list_entry_points");
-            ToolObservation source = runtime.toolObservations(receipt).getLast();
-            assertThat(source.input()).isEqualTo(paymentEntryPointsInput());
-            assertThat(source.output()).contains("\"repositoryId\":\"payment-service\"", "\"revision\":\"payment-revision-1\"", "credit card");
+            List<ToolObservation> observations = runtime.toolObservations(receipt);
+            assertObservation(observations.get(0), 2, "list_repositories", "{}", repositoryCatalogOutput());
+            assertObservation(observations.get(1), 3, "codebase_list_entry_points", paymentEntryPointsInput(), paymentEntryPointsOutput());
             assertThat(runtime.reply(receipt).message()).contains("Credit card");
             assertThat(runtime.modelRequests()).extracting(request -> request.history().size()).containsExactly(1, 2, 3);
-            assertThat(runtime.modelRequests().getLast().history()).extracting(SessionMessage::role)
-                    .containsExactly(MessageRole.USER, MessageRole.TOOL, MessageRole.TOOL);
+            List<SessionMessage> laterRequest = runtime.modelRequests().getLast().history();
+            assertUser(laterRequest.get(0), 1, "alice", "Which payment methods are supported?");
+            assertObservation((ToolObservation) laterRequest.get(1), 2, "list_repositories", "{}", repositoryCatalogOutput());
+            assertObservation((ToolObservation) laterRequest.get(2), 3, "codebase_list_entry_points", paymentEntryPointsInput(), paymentEntryPointsOutput());
         }
     }
 
     @Test
-    void commits_an_ordered_two_tool_batch_before_the_next_model_request() {
+    void commits_an_ordered_two_tool_batch_before_the_next_model_request() throws Exception {
         try (AcceptanceRuntime runtime = new AcceptanceRuntime(List.of(
                 new ModelReply.UseTools(Optional.of("I will inspect both services."), List.of(
                         tool("codebase_list_entry_points", paymentEntryPointsInput()),
@@ -92,15 +96,19 @@ class ConversationAcceptanceTest {
             List<SessionMessage> history = runtime.history(receipt.sessionId());
             assertThat(history).extracting(SessionMessage::role).containsExactly(
                     MessageRole.USER, MessageRole.ASSISTANT, MessageRole.TOOL, MessageRole.TOOL, MessageRole.ASSISTANT);
-            assertThat(runtime.toolObservations(receipt)).extracting(ToolObservation::input)
-                    .containsExactly(paymentEntryPointsInput(), orderEntryPointsInput());
-            assertThat(runtime.modelRequests().get(1).history()).extracting(SessionMessage::role).containsExactly(
-                    MessageRole.USER, MessageRole.ASSISTANT, MessageRole.TOOL, MessageRole.TOOL);
+            List<ToolObservation> observations = runtime.toolObservations(receipt);
+            assertObservation(observations.get(0), 3, "codebase_list_entry_points", paymentEntryPointsInput(), paymentEntryPointsOutput());
+            assertObservation(observations.get(1), 4, "codebase_list_entry_points", orderEntryPointsInput(), orderEntryPointsOutput());
+            List<SessionMessage> laterRequest = runtime.modelRequests().get(1).history();
+            assertUser(laterRequest.get(0), 1, "alice", "Compare cancellation and payment handling.");
+            assertAssistant(laterRequest.get(1), 2, "I will inspect both services.");
+            assertObservation((ToolObservation) laterRequest.get(2), 3, "codebase_list_entry_points", paymentEntryPointsInput(), paymentEntryPointsOutput());
+            assertObservation((ToolObservation) laterRequest.get(3), 4, "codebase_list_entry_points", orderEntryPointsInput(), orderEntryPointsOutput());
         }
     }
 
     @Test
-    void reports_runtime_only_fee_data_as_unavailable_without_inventing_a_value() {
+    void reports_runtime_only_fee_data_as_unavailable_without_inventing_a_value() throws Exception {
         try (AcceptanceRuntime runtime = new AcceptanceRuntime(List.of(
                 tools(tool("codebase_list_entry_points", paymentEntryPointsInput())),
                 text("The source defines a JSON-configured formula, but the current database/API fee value is unavailable.")))) {
@@ -108,13 +116,17 @@ class ConversationAcceptanceTest {
             runtime.process(receipt);
 
             assertThat(runtime.reply(receipt).message()).contains("database/API fee value is unavailable");
-            assertThat(runtime.toolObservations(receipt)).singleElement().satisfies(observation ->
-                    assertThat(observation.output()).contains("formula is loaded from JSON settings"));
+            assertThat(runtime.reply(receipt).message()).doesNotContain("10%");
+            List<ToolObservation> observations = runtime.toolObservations(receipt);
+            assertObservation(observations.getFirst(), 2, "codebase_list_entry_points", paymentEntryPointsInput(), paymentEntryPointsOutput());
+            List<SessionMessage> laterRequest = runtime.modelRequests().getLast().history();
+            assertUser(laterRequest.get(0), 1, "alice", "What is the runtime fee?");
+            assertObservation((ToolObservation) laterRequest.get(1), 2, "codebase_list_entry_points", paymentEntryPointsInput(), paymentEntryPointsOutput());
         }
     }
 
     @Test
-    void reports_absent_bnpl_narrowly_as_not_found_in_inspected_code() {
+    void reports_absent_bnpl_narrowly_as_not_found_in_inspected_code() throws Exception {
         try (AcceptanceRuntime runtime = new AcceptanceRuntime(List.of(
                 tools(tool("codebase_search_code_facts", "{\"repositoryId\":\"payment-service\",\"revision\":\"payment-revision-1\",\"query\":\"BNPL\"}")),
                 text("BNPL behavior was not found in the inspected code.")))) {
@@ -122,9 +134,100 @@ class ConversationAcceptanceTest {
             runtime.process(receipt);
 
             assertThat(runtime.reply(receipt).message()).isEqualTo("BNPL behavior was not found in the inspected code.");
-            assertThat(runtime.toolObservations(receipt)).singleElement().satisfies(observation ->
-                    assertThat(observation.output()).contains("\"totalCount\":0", "\"hasMore\":false"));
+            List<ToolObservation> observations = runtime.toolObservations(receipt);
+            assertObservation(observations.getFirst(), 2, "codebase_search_code_facts", bnplSearchInput(), bnplSearchOutput());
+            assertThat(isCompleteNegativeCodeSearch(readJson(observations.getFirst().output()))).isTrue();
+            List<SessionMessage> laterRequest = runtime.modelRequests().getLast().history();
+            assertUser(laterRequest.get(0), 1, "alice", "Is BNPL supported?");
+            assertObservation((ToolObservation) laterRequest.get(1), 2, "codebase_search_code_facts", bnplSearchInput(), bnplSearchOutput());
         }
+    }
+
+    @Test
+    void does_not_certify_code_limited_absence_when_search_coverage_has_issues() throws Exception {
+        JsonNode incompleteSearch = readJson("""
+                {"data":{"totalCount":0,"hasMore":false,"coverage":{"issues":["partial-index"]},"facts":[]},
+                 "repositoryId":"payment-service","revision":"payment-revision-1"}
+                """);
+
+        assertThat(isCompleteNegativeCodeSearch(incompleteSearch)).isFalse();
+    }
+
+    private static void assertUser(SessionMessage message, long sequence, String participant, String text) {
+        assertThat(message).isInstanceOf(UserMessage.class);
+        UserMessage user = (UserMessage) message;
+        assertThat(user.sequence().value()).isEqualTo(sequence);
+        assertThat(user.participantId()).isEqualTo(participant);
+        assertThat(user.message()).isEqualTo(text);
+    }
+
+    private static void assertAssistant(SessionMessage message, long sequence, String text) {
+        assertThat(message).isInstanceOf(AssistantMessage.class);
+        AssistantMessage assistant = (AssistantMessage) message;
+        assertThat(assistant.sequence().value()).isEqualTo(sequence);
+        assertThat(assistant.message()).isEqualTo(text);
+    }
+
+    private static void assertObservation(
+            ToolObservation observation, long sequence, String toolName, String input, String output) throws Exception {
+        assertThat(observation.sequence().value()).isEqualTo(sequence);
+        assertThat(observation.toolName()).isEqualTo(toolName);
+        assertThat(observation.input()).isEqualTo(input);
+        assertThat(readJson(observation.output())).isEqualTo(readJson(output));
+    }
+
+    private static boolean isCompleteNegativeCodeSearch(JsonNode output) {
+        JsonNode data = output.required("data");
+        JsonNode totalCount = data.required("totalCount");
+        JsonNode hasMore = data.required("hasMore");
+        JsonNode issues = data.required("coverage").required("issues");
+        return totalCount.isIntegralNumber() && totalCount.intValue() == 0
+                && hasMore.isBoolean() && !hasMore.booleanValue()
+                && issues.isArray() && issues.isEmpty();
+    }
+
+    private static JsonNode readJson(String json) throws Exception {
+        return OBJECT_MAPPER.readTree(json);
+    }
+
+    private static String repositoryCatalogOutput() {
+        return """
+                {"repositories":[
+                  {"repositoryId":"payment-service","revision":"payment-revision-1"},
+                  {"repositoryId":"order-service","revision":"order-revision-1"}
+                ]}
+                """;
+    }
+
+    private static String paymentEntryPointsOutput() {
+        return entryPointsOutput("payment-service", "payment-revision-1",
+                "Payment methods include credit card, bank transfer, and wallet; fee formula is loaded from JSON settings.");
+    }
+
+    private static String orderEntryPointsOutput() {
+        return entryPointsOutput("order-service", "order-revision-1",
+                "Order cancellation is implemented before payment refund handling.");
+    }
+
+    private static String entryPointsOutput(String repositoryId, String revision, String description) {
+        return """
+                {"data":{"entryPoints":[{
+                  "sourceType":{"javaType":{"packageName":"com.example","className":"ConversationFixture"},
+                  "sourceFile":"src/main/java/com/example/ConversationFixture.java"},
+                  "description":"%s","basePaths":[],"methods":[]
+                }]},"repositoryId":"%s","revision":"%s"}
+                """.formatted(description, repositoryId, revision);
+    }
+
+    private static String bnplSearchInput() {
+        return "{\"repositoryId\":\"payment-service\",\"revision\":\"payment-revision-1\",\"query\":\"BNPL\"}";
+    }
+
+    private static String bnplSearchOutput() {
+        return """
+                {"data":{"totalCount":0,"hasMore":false,"coverage":{"issues":[]},"facts":[]},
+                 "repositoryId":"payment-service","revision":"payment-revision-1"}
+                """;
     }
 
     static ModelReply.Text text(String message) {
