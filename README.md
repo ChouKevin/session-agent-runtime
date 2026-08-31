@@ -1,83 +1,116 @@
-# Standalone Session Agent Runtime
+# Session Agent Runtime
 
-Session Agent Runtime owns the conversation, model/tool loop, feedback, and PostgreSQL history. It is built and deployed independently from Semantic.
+Session Agent Runtime is a standalone, provider-neutral conversation service. It owns durable conversation history, conversation-job ordering, model calls, tool execution, and PostgreSQL storage. Semantic remains a separate HTTP service that owns repository discovery, repository and revision validation, and code analysis.
 
-Semantic owns repository discovery, exact Git revisions, code analysis, and Mongo index data. Session Runtime does not clone or mount Git repositories, start JDT/JDT LS, contain business fixture source, or read Semantic MongoDB directly. It calls only the Semantic Query API.
+## Conversation loop
 
-## Repository and revision selection
+One submitted user message starts one **conversation turn**. A turn can make one or more **model calls**. A model call either returns direct assistant text or requests one or more tools. Tool execution is not a model call.
 
-All Semantic tools are visible to the model from its first response. When history does not already contain a reliable repository pair, the model can call `list_repositories`. The catalog is reference data and does not include a repository/revision pair. The model copies an exact `repositoryId` and its paired `revision` into later source tools; Runtime receives and forwards both values without selecting a repository or replacing identifiers.
-
-Semantic validates the pair. If a source tool returns `REVISION_OUTDATED`, Runtime appends non-terminal feedback containing the rejected arguments, requested revision, current revision, and retry guidance. Runtime does not retry the call. The model reads that feedback and decides whether to call the useful tool again with `currentRevision`. The same persisted session history remains intact; earlier messages and results are not rewritten.
-
-## Results and replies
-
-Every successful tool execution stores a `resultId`, tool identity, canonical arguments, result JSON, and repository/revision when the tool is source-backed. Catalog results omit repository/revision. Tool results remain visible in session history and can be fetched from `/internal/results/{resultId}`.
-
-`PLAN` calls may use zero or more sequential tools. `FINAL_REPLY` exposes no tools and stores the model's primary assistant content as an opaque string. Runtime does not parse or constrain prose, Markdown, JSON, code, or another textual format requested by the user. Tool history is inspectable execution history; Runtime does not validate whether a stored result supports a later claim.
-
-Runtime keeps code and runtime knowledge separate. When a value can only come from a database, configuration, secret, user input, or external API, the model must report that the current value is unavailable instead of inventing it. An empty code search supports only a codebase-limited conclusion.
-
-## Model calls
-
-`PLAN` sees the available tools and returns either a tool call or `AnswerReady`. `FINAL_REPLY` hides tools and makes one explicitly reserved call. The twelfth call is the final fallback.
-
-## Diagnostics
-
-`model_call_record` is diagnostic data, not session history. It currently retains raw Spring AI-level prompt and completion data without redaction or TTL.
-
-```bash
-docker compose exec -T postgres psql -U session_agent -d session_agent \
-  -c "select message_job_id, runtime_call_ordinal, provider_attempt, phase, outcome, raw_completion from model_call_record order by started_at;"
+```text
+load complete ordered session history and available tools
+                         |
+                         v
+                    call model
+              +----------+----------+
+              |                     |
+           direct text          tool requests
+              |                     |
+     append assistant text   run requests in order
+     complete the job        append one ordered batch
+                                    |
+                                    v
+                             call model again
 ```
 
-Recreate disposable databases after the current `V1` schema change.
+The model may request multiple tools in a response. They run sequentially in the model-provided order. Their observations become visible only on the next model call, so calls in the same batch must be independent. A call that needs an earlier result must wait for a later model response. One ordinary tool failure is recorded as that tool's observation and does not prevent later requests in the batch.
 
-## Dependencies
+Every model call receives all committed messages for the session in sequence, including messages from completed earlier turns. User messages retain their participant ID, so the history preserves speaker identity. Assistant text and tool input/output are opaque runtime data: the service does not impose a response format or interpret a tool's payload.
 
-Runtime calls the external Semantic Service over HTTP. The internal Semantic Tool Adapter depends on Tool contracts; Tool has no Semantic dependency.
+The runtime exposes the registered tools to the model but does not choose repositories. When a Semantic tool requires `repositoryId`, the model supplies it, using available repository information when needed. Semantic validates `repositoryId` and revision values; values returned by Semantic remain inside that tool's opaque output.
 
-## Conversation HTTP API
+## Durable history and HTTP API
 
-Submit a message, poll its job, then read history with the returned UUID values:
+Submit a message, poll its job, then read the complete session history:
 
 ```text
 POST /internal/messages
 GET  /internal/message-jobs/{messageJobId}
 GET  /internal/sessions/{sessionId}/messages
-GET  /internal/results/{resultId}
 ```
 
-`POST /internal/messages` accepts `sessionKey`, `participantId`, `sourceMessageId`, and `message`. Reusing a nonblank `sessionKey` continues the same conversation.
+`POST /internal/messages` accepts `sessionKey`, `participantId`, `sourceMessageId`, and `message`. Reusing a nonblank `sessionKey` continues the same session. The accepted response contains `sessionId` and `messageJobId`. The job response contains its IDs, `status`, `retryCount`, and `modelCallCount`.
 
-The session-history response exposes sequence/time, role, job/participant IDs, user or assistant text, tool result ID/name/version, repository/revision, and feedback code/terminal/rejected arguments. It does not inline tool result JSON or model-only context. Fetching `/internal/results/{resultId}` is a separate trusted internal operation and returns canonical arguments plus stored result JSON; do not expose these internal endpoints to an untrusted network without a security design.
+The history endpoint returns ordered records with shared `sequence`, `createdAt`, `messageJobId`, and `type` fields. Its four response types are:
 
-## Offline checks
+| Type | Type-specific fields |
+| --- | --- |
+| `USER` | `participantId`, `message` |
+| `ASSISTANT` | `message` |
+| `TOOL` | `observationId`, `toolName`, `input`, `output` |
+| `RUNTIME` | `code`, `message` |
+
+Tool observations are part of history and contain their own opaque input and output. There is no separate result-lookup endpoint.
+
+## Limits, retries, and recovery
+
+`session-agent.model.max-model-calls-per-message` controls the maximum provider requests for one user message. Its environment form is `SESSION_AGENT_MAX_MODEL_CALLS_PER_MESSAGE`; the default is 12. The count is reserved immediately before each real provider request, including failed attempts. On the final allowed call, a direct answer completes normally; tool requests are not run and the runtime appends `MODEL_CALL_LIMIT_REACHED` instead of making another forced call.
+
+Spring AI retries are disabled with `spring.ai.retry.max-attempts=1`. Retrying transient provider failures is owned by the runtime's conversation-job loop, which preserves the already-counted model call and avoids duplicate history.
+
+The runtime does not persist provider request or response payloads, provider metadata, or model diagnostics. It emits content-free operational telemetry for model-call outcome, latency, token usage when available, error category, and job/session correlation.
+
+Tool execution has no runtime deduplication layer. A read-only tool can run again if the process crashes after execution and before its observation batch commits. Any future side-effecting tool must provide idempotency at its adapter or external-service boundary.
+
+## Database and local runtime
+
+The shipped schema is a fresh V1 schema. Reset a disposable PostgreSQL database before starting this version; do not reuse a database from an earlier schema. The supplied live runner creates a unique Compose project and removes only that project's services and PostgreSQL volume on exit.
+
+The Compose service binds the runtime HTTP port to loopback only. Its required credentials are intentionally not committed. For a syntax-only Compose check, provide contract-only nonsecret values:
+
+```bash
+SEMANTIC_API_TOKEN='contract-semantic-token' \
+SESSION_AGENT_POSTGRES_PASSWORD='contract-only-password' \
+docker compose -f docker/compose.yaml config --quiet
+```
+
+## Verification
+
+Default tests use fakes and make no provider calls:
+
+```bash
+JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64 \
+mvn --batch-mode --no-transfer-progress test
+```
+
+PostgreSQL integration tests verify the fresh schema, atomic ordered history batches, complete-history loading, and persistence contracts:
+
+```bash
+JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64 \
+mvn --batch-mode --no-transfer-progress -Ppostgres-it verify
+```
+
+The shell contracts validate repository boundaries plus Compose, live-runner, and credential-handling contracts:
 
 ```bash
 bash src/test/shell/docker-contract-test.sh
-docker compose -f docker/compose.yaml config --quiet
-JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64 mvn --batch-mode --no-transfer-progress test
-JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64 mvn --batch-mode --no-transfer-progress -Ppostgres-it verify
+bash src/test/shell/repository-contract-test.sh
 ```
 
-The Compose API is bound only to `127.0.0.1`. Docker owns the project-scoped PostgreSQL volume and uses bounded `json-file` logs; there is no host log mount.
-
-## Live acceptance
-
-Live acceptance uses an already-running Semantic Query service that publishes payment, order, and video UAT repositories. Semantic owns and validates those sources. A Google GenAI key is also required.
+The minimal provider smoke test is opt-in and makes one user-only model call. It requires a configured Google API key and model:
 
 ```bash
-export SEMANTIC_BASE_URL='<existing Semantic Query URL>'
-export SEMANTIC_API_TOKEN='<query token>'
-export GOOGLE_API_KEY='<Google GenAI key>'
+GOOGLE_MODEL_LIVE=true mvn -Dtest=GoogleModelLiveTest test
+```
+
+The full-system opt-in test starts a fresh, uniquely named local Compose project, waits for runtime health, then verifies Semantic tools, observations, final text, and the history API. It requires a running Semantic Query service plus its token, a Google API key, model name, and a local disposable PostgreSQL password:
+
+```bash
+export SEMANTIC_BASE_URL='<Semantic Query URL>'
+export SEMANTIC_API_TOKEN='<Semantic Query token>'
+export GOOGLE_API_KEY='<Google API key>'
 export GOOGLE_GENAI_MODEL='gemini-3.1-flash-lite'
-export SESSION_AGENT_POSTGRES_PASSWORD='<local PostgreSQL password>'
+export SESSION_AGENT_POSTGRES_PASSWORD='<local disposable PostgreSQL password>'
 SESSION_AGENT_LIVE=true bash live-test.sh
 ```
 
-`live-test.sh` creates a unique Compose project, requests an ephemeral loopback port, exports its `SESSION_AGENT_BASE_URL` to the opt-in HTTP acceptance test, and removes only that project and its disposable PostgreSQL volume. It never starts, stops, resets, or cleans Semantic.
-
-The live report under `target/live-reports/` contains safe metadata only: session/job IDs, configured model, tool order, repository/revision pairs, outcome, and available Spring AI usage. It excludes questions, prompts, raw tool results, HTTP bodies, model context, and credentials.
-
-The deployment contract preserves blank `SLACK_APP_TOKEN`, `SLACK_BOT_TOKEN`, and `SLACK_BOT_USER_ID` inputs for a future transport. No Slack integration is implemented.
+The live report under `target/live-reports/` contains safe operational metadata only. It excludes user questions, prompts, raw tool outputs, HTTP bodies, provider payloads, and credentials.
