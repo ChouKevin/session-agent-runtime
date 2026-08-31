@@ -136,7 +136,7 @@ public final class MessageJobService implements MessageJobPort {
                 appendRuntime(claim, guard, messages, ConversationStore.JobUpdate.COMPLETE);
                 return;
             }
-            List<ConversationStore.MessageData> messages = toolBatch(claim, ordinal, useTools, tools);
+            List<ConversationStore.MessageData> messages = toolBatch(claim, guard, ordinal, useTools, tools);
             if (!guard.stillOwned()) {
                 return;
             }
@@ -171,12 +171,16 @@ public final class MessageJobService implements MessageJobPort {
 
     private List<ConversationStore.MessageData> toolBatch(
             MessageWorkClaim claim,
+            WorkGuard guard,
             int ordinal,
             ModelReply.UseTools reply,
             ToolSnapshot tools) {
         List<ConversationStore.MessageData> messages = new ArrayList<>();
         reply.message().ifPresent(text -> messages.add(new ConversationStore.AssistantData(text)));
         for (ToolRequest request : reply.requests()) {
+            if (!guard.stillOwned()) {
+                return List.of();
+            }
             messages.add(executeTool(claim, ordinal, tools, request));
         }
         return List.copyOf(messages);

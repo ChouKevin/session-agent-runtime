@@ -81,7 +81,7 @@ create table tool_observation (
     sequence bigint not null,
     role varchar(16) not null default 'TOOL' check (role = 'TOOL'),
     observation_id uuid not null unique,
-    tool_name varchar(128) not null,
+    tool_name varchar(128) not null check (tool_name ~ '[^[:space:]]'),
     input text not null,
     output text not null,
     primary key (session_id, sequence),
@@ -92,8 +92,8 @@ create table runtime_message (
     session_id uuid not null,
     sequence bigint not null,
     role varchar(16) not null default 'RUNTIME' check (role = 'RUNTIME'),
-    code varchar(64) not null,
-    message text not null check (length(message) > 0),
+    code varchar(64) not null check (code ~ '[^[:space:]]'),
+    message text not null check (message ~ '[^[:space:]]'),
     primary key (session_id, sequence),
     foreign key (session_id, sequence, role) references session_message(session_id, sequence, role)
 );

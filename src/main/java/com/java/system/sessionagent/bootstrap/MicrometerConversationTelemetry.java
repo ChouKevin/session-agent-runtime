@@ -1,13 +1,16 @@
 package com.java.system.sessionagent.bootstrap;
 
 import com.java.system.sessionagent.conversation.domain.ModelUsage;
+import com.java.system.sessionagent.conversation.domain.RuntimeMessageCode;
 import com.java.system.sessionagent.conversation.port.out.ConversationTelemetry;
 import io.micrometer.core.instrument.MeterRegistry;
 import org.springframework.util.Assert;
 
 import java.time.Duration;
+import java.util.Arrays;
 import java.util.Optional;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 public final class MicrometerConversationTelemetry implements ConversationTelemetry {
 
@@ -23,12 +26,9 @@ public final class MicrometerConversationTelemetry implements ConversationTeleme
     private static final Set<String> MODEL_CATEGORIES = Set.of(
             "STOP", "MAX_TOKENS", "SAFETY", "RECITATION", "OTHER", "UNAVAILABLE", "RESPONSE", "OUTPUT_INVALID");
     private static final Set<String> TOOL_OUTCOMES = Set.of("SUCCESS", "INVALID_INPUT", "FAILURE");
-    private static final Set<String> FEEDBACK_CODES = Set.of(
-            "INVALID_TOOL_INPUT", "TOOL_INPUT_TOO_LARGE", "UNKNOWN_REPOSITORY",
-            "REVISION_OUTDATED", "INDEX_NOT_READY", "INDEX_CONTRACT_MISMATCH", "CODE_FACT_NOT_FOUND",
-            "CODE_FACT_KIND_UNSUPPORTED", "INVALID_QUERY", "CALL_LIMIT_REACHED", "MODEL_OUTPUT_INVALID",
-            "CONTEXT_TOO_LARGE", "DATABASE_CONTRACT_ERROR", "DEPENDENCY_UNAVAILABLE", "DEPENDENCY_FORBIDDEN",
-            "DEPENDENCY_INVALID_RESPONSE");
+    private static final Set<String> RUNTIME_MESSAGE_CODES = Arrays.stream(RuntimeMessageCode.values())
+            .map(RuntimeMessageCode::name)
+            .collect(Collectors.toUnmodifiableSet());
     private static final Set<String> RETRY_CATEGORIES = Set.of("MODEL", "TOOL", "STORAGE", "DEPENDENCY");
 
     private final MeterRegistry meterRegistry;
@@ -78,7 +78,7 @@ public final class MicrometerConversationTelemetry implements ConversationTeleme
 
     @Override
     public void feedback(String code) {
-        increment("session_agent.feedback", "code", bounded(code, FEEDBACK_CODES));
+        increment("session_agent.feedback", "code", bounded(code, RUNTIME_MESSAGE_CODES));
     }
 
     @Override

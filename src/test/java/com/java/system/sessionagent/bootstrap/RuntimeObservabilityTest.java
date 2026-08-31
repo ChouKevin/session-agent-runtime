@@ -1,6 +1,7 @@
 package com.java.system.sessionagent.bootstrap;
 
 import com.java.system.sessionagent.conversation.domain.ModelUsage;
+import com.java.system.sessionagent.conversation.domain.RuntimeMessageCode;
 import com.java.system.sessionagent.semantic.SemanticFailure;
 import com.java.system.sessionagent.semantic.domain.RepositoryId;
 import io.micrometer.core.instrument.Timer;
@@ -61,6 +62,22 @@ class RuntimeObservabilityTest {
         assertThat(toolDuration.totalTime(java.util.concurrent.TimeUnit.MILLISECONDS)).isEqualTo(10.0);
         assertThat(registry.find("session_agent.tool.duration").tags("tool", "OTHER", "outcome", "OTHER").timer())
                 .isNotNull();
+    }
+
+    @Test
+    void preserves_final_runtime_feedback_codes_and_bounds_unknown_codes() {
+        SimpleMeterRegistry registry = new SimpleMeterRegistry();
+        MicrometerConversationTelemetry telemetry = new MicrometerConversationTelemetry(registry);
+
+        for (RuntimeMessageCode code : RuntimeMessageCode.values()) {
+            telemetry.feedback(code.name());
+        }
+        telemetry.feedback("provider-private-code");
+
+        for (RuntimeMessageCode code : RuntimeMessageCode.values()) {
+            assertThat(registry.find("session_agent.feedback").tag("code", code.name()).counter()).isNotNull();
+        }
+        assertThat(registry.find("session_agent.feedback").tag("code", "OTHER").counter()).isNotNull();
     }
 
     @Test

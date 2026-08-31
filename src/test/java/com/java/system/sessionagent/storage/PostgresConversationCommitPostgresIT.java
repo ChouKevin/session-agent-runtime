@@ -13,6 +13,8 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.time.Clock;
@@ -21,6 +23,8 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
+import java.sql.Timestamp;
+import java.util.UUID;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
@@ -28,6 +32,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import javax.sql.DataSource;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -176,6 +181,38 @@ class PostgresConversationCommitPostgresIT {
         assertThat(jdbcTemplate.queryForObject("select next_sequence from conversation_session", Long.class)).isEqualTo(2L);
         assertThat(jdbcTemplate.queryForObject("select status from message_job where message_job_id = ?", String.class,
                 java.util.UUID.fromString(receipt.messageJobId().value()))).isEqualTo("WORKING");
+    }
+
+    @Test
+    void rejects_whitespace_only_tool_and_runtime_fields_before_they_can_poison_history() {
+        ConversationStore store = store();
+        MessageReceipt receipt = store.receive(new IncomingMessage("thread", "alice", "source", "hello"));
+        MessageWorkClaim claim = store.claimNext("worker", Duration.ofSeconds(30)).orElseThrow();
+        DataSource dataSource = Objects.requireNonNull(jdbcTemplate.getDataSource(), "JDBC data source must not be null");
+        TransactionTemplate transaction = new TransactionTemplate(new DataSourceTransactionManager(dataSource));
+        UUID sessionId = UUID.fromString(receipt.sessionId().value());
+        UUID jobId = UUID.fromString(claim.messageJobId().value());
+        Timestamp createdAt = Timestamp.from(NOW);
+
+        assertThatThrownBy(() -> transaction.executeWithoutResult(status -> {
+            jdbcTemplate.update("insert into session_message(session_id, sequence, message_job_id, role, created_at) values (?, 2, ?, 'TOOL', ?)",
+                    sessionId, jobId, createdAt);
+            jdbcTemplate.update("insert into tool_observation(session_id, sequence, observation_id, tool_name, input, output) values (?, 2, ?, '   ', '{}', 'output')",
+                    sessionId, UUID.randomUUID());
+        })).isInstanceOf(RuntimeException.class);
+        assertThatThrownBy(() -> transaction.executeWithoutResult(status -> {
+            jdbcTemplate.update("insert into session_message(session_id, sequence, message_job_id, role, created_at) values (?, 2, ?, 'RUNTIME', ?)",
+                    sessionId, jobId, createdAt);
+            jdbcTemplate.update("insert into runtime_message(session_id, sequence, code, message) values (?, 2, '   ', 'message')", sessionId);
+        })).isInstanceOf(RuntimeException.class);
+        assertThatThrownBy(() -> transaction.executeWithoutResult(status -> {
+            jdbcTemplate.update("insert into session_message(session_id, sequence, message_job_id, role, created_at) values (?, 2, ?, 'RUNTIME', ?)",
+                    sessionId, jobId, createdAt);
+            jdbcTemplate.update("insert into runtime_message(session_id, sequence, code, message) values (?, 2, 'CODE', '   ')", sessionId);
+        })).isInstanceOf(RuntimeException.class);
+
+        assertThat(jdbcTemplate.queryForObject("select count(*) from tool_observation", Integer.class)).isZero();
+        assertThat(jdbcTemplate.queryForObject("select count(*) from runtime_message", Integer.class)).isZero();
     }
 
     private void waitForSessionLock() throws InterruptedException {

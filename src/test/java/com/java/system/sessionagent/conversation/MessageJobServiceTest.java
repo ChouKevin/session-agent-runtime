@@ -35,6 +35,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.OptionalInt;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -240,6 +241,32 @@ class MessageJobServiceTest {
             return new ModelReply.Text("answer");
         }).process(claim, () -> ownedChecks.getAndIncrement() == 0);
 
+        verify(store, org.mockito.Mockito.never()).append(any(), any(), any());
+    }
+
+    @Test
+    void stops_an_ordered_tool_batch_without_appending_when_ownership_is_lost_after_the_first_tool() {
+        ConversationStore store = mock(ConversationStore.class);
+        MessageWorkClaim claim = claim();
+        AtomicInteger laterToolCalls = new AtomicInteger();
+        AtomicBoolean owned = new AtomicBoolean(true);
+        when(store.loadHistory(claim.sessionId())).thenReturn(List.of(user()));
+        when(store.reserveModelCall(eq(claim), eq(3), any(Instant.class))).thenReturn(OptionalInt.of(1));
+        ToolRegistration<ToolInput> first = registration("first", input -> {
+            owned.set(false);
+            return "first output";
+        });
+        ToolRegistration<ToolInput> later = registration("later", input -> {
+            laterToolCalls.incrementAndGet();
+            return "later output";
+        });
+        ConversationModel model = scriptedModel(new ModelReply.UseTools(Optional.empty(), List.of(
+                new ToolRequest(new ToolName("first"), "{\"value\":\"a\"}"),
+                new ToolRequest(new ToolName("later"), "{\"value\":\"b\"}"))));
+
+        service(store, model, List.of(first, later), 3).process(claim, owned::get);
+
+        assertThat(laterToolCalls).hasValue(0);
         verify(store, org.mockito.Mockito.never()).append(any(), any(), any());
     }
 
