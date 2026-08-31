@@ -8,14 +8,12 @@ import com.java.system.sessionagent.conversation.port.in.ConversationQueryPort;
 import com.java.system.sessionagent.conversation.port.in.MessageIntakePort;
 import com.java.system.sessionagent.conversation.port.out.ConversationStore;
 import com.java.system.sessionagent.conversation.port.out.ConversationTelemetry;
-import com.java.system.sessionagent.conversation.port.out.ModelCallRecorder;
 import com.java.system.sessionagent.model.SpringAiConversationModel;
 import com.java.system.sessionagent.model.PromptResource;
 import com.java.system.sessionagent.semantic.http.SemanticRepositoryClient;
 import com.java.system.sessionagent.semantic.http.SemanticSourceClient;
 import com.java.system.sessionagent.semantic.tool.SemanticToolProvider;
 import com.java.system.sessionagent.storage.PostgresConversationStore;
-import com.java.system.sessionagent.storage.PostgresModelCallRecorder;
 import com.java.system.sessionagent.tool.application.DirectToolRegistry;
 import com.java.system.sessionagent.worker.MessageJobWorker;
 import com.java.system.sessionagent.worker.WorkerProperties;
@@ -108,11 +106,6 @@ public class RuntimeConfiguration {
     @Bean
     ConversationStore conversationStore(DataSource dataSource, Clock runtimeClock) {
         return new PostgresConversationStore(dataSource, runtimeClock);
-    }
-
-    @Bean
-    ModelCallRecorder modelCallRecorder(DataSource dataSource) {
-        return new PostgresModelCallRecorder(dataSource);
     }
 
     @Bean

@@ -22,7 +22,7 @@ create table session_message (
     session_id uuid not null references conversation_session(session_id),
     sequence bigint not null check (sequence >= 1),
     message_job_id uuid,
-    role varchar(16) not null check (role in ('USER','TOOL','ASSISTANT','FEEDBACK','RUNTIME')),
+    role varchar(16) not null check (role in ('USER', 'TOOL', 'ASSISTANT', 'RUNTIME')),
     created_at timestamptz not null,
     primary key (session_id, sequence),
     unique (session_id, sequence, role),
@@ -38,8 +38,7 @@ create table user_message (
     source_message_id varchar(256) not null,
     message text not null check (length(message) > 0),
     primary key (session_id, sequence),
-    foreign key (session_id, sequence, role)
-        references session_message(session_id, sequence, role),
+    foreign key (session_id, sequence, role) references session_message(session_id, sequence, role),
     foreign key (source_type, source_message_id, session_id, sequence)
         references source_message(source_type, source_message_id, session_id, user_message_sequence)
 );
@@ -48,116 +47,25 @@ create table message_job (
     message_job_id uuid primary key,
     session_id uuid not null,
     user_message_sequence bigint not null,
-    status varchar(16) not null check (status in ('PENDING','WORKING','RETRY','DONE')),
-    model_calls integer not null default 0 check (model_calls between 0 and 12),
+    status varchar(16) not null check (status in ('PENDING', 'WORKING', 'RETRY', 'DONE')),
+    model_calls integer not null default 0 check (model_calls >= 0),
     retry_count integer not null default 0 check (retry_count >= 0),
     available_at timestamptz not null,
     claim_number bigint not null default 0 check (claim_number >= 0),
     worker_id varchar(128),
     locked_until timestamptz,
-    reply_sequence bigint,
     created_at timestamptz not null,
     completed_at timestamptz,
     unique (message_job_id, session_id),
     unique (session_id, user_message_sequence),
-    foreign key (session_id, user_message_sequence)
-        references user_message(session_id, sequence),
-    foreign key (session_id, reply_sequence)
-        references session_message(session_id, sequence),
-    check ((status = 'WORKING') =
-        (worker_id is not null and locked_until is not null and claim_number > 0)),
-    check ((status = 'DONE') =
-        (completed_at is not null and reply_sequence is not null))
+    foreign key (session_id, user_message_sequence) references user_message(session_id, sequence),
+    check ((status = 'WORKING') = (worker_id is not null and locked_until is not null and claim_number > 0)),
+    check ((status = 'DONE') = (completed_at is not null)),
+    check (status <> 'DONE' or (worker_id is null and locked_until is null))
 );
-
-create table model_call_record (
-    diagnostic_id uuid primary key,
-    session_id uuid not null,
-    message_job_id uuid not null,
-    runtime_call_ordinal integer not null check (runtime_call_ordinal between 1 and 12),
-    provider_attempt integer not null check (provider_attempt >= 1),
-    phase varchar(16) not null check (phase in ('PLAN','FINAL_REPLY')),
-    outcome varchar(32) not null check (outcome in (
-        'TOOL_CALL','ANSWER_READY','FINAL_REPLY','INVALID_RESPONSE','PROVIDER_FAILURE')),
-    model_name varchar(256) not null check (
-        length(translate(model_name, U&'\0009\000A\000B\000C\000D\001C\001D\001E\001F\0020\1680\2000\2001\2002\2003\2004\2005\2006\2008\2009\200A\2028\2029\205F\3000', '')) > 0),
-    raw_prompt text not null check (
-        length(translate(raw_prompt, U&'\0009\000A\000B\000C\000D\001C\001D\001E\001F\0020\1680\2000\2001\2002\2003\2004\2005\2006\2008\2009\200A\2028\2029\205F\3000', '')) > 0),
-    raw_completion text,
-    raw_tool_calls text check (raw_tool_calls is null or raw_tool_calls is json),
-    finish_reason varchar(128),
-    response_error text,
-    provider_error text,
-    prompt_tokens bigint check (prompt_tokens >= 0),
-    completion_tokens bigint check (completion_tokens >= 0),
-    total_tokens bigint check (total_tokens >= 0),
-    started_at timestamptz not null,
-    completed_at timestamptz not null check (completed_at >= started_at),
-    unique (message_job_id, runtime_call_ordinal, provider_attempt),
-    foreign key (message_job_id, session_id)
-        references message_job(message_job_id, session_id),
-    check (
-        (prompt_tokens is null and completion_tokens is null and total_tokens is null)
-        or
-        (prompt_tokens is not null and completion_tokens is not null and total_tokens is not null)
-    ),
-    check (
-        (phase = 'PLAN' and outcome in (
-            'TOOL_CALL','ANSWER_READY','INVALID_RESPONSE','PROVIDER_FAILURE'))
-        or
-        (phase = 'FINAL_REPLY' and outcome in (
-            'FINAL_REPLY','INVALID_RESPONSE','PROVIDER_FAILURE'))
-    ),
-    check ((outcome = 'PROVIDER_FAILURE') = (provider_error is not null)),
-    check ((outcome = 'INVALID_RESPONSE') = (response_error is not null)),
-    check (
-        outcome <> 'TOOL_CALL'
-        or (raw_tool_calls is not null and raw_completion is null)
-    ),
-    check (
-        outcome not in ('ANSWER_READY','FINAL_REPLY','PROVIDER_FAILURE')
-        or raw_tool_calls is null
-    ),
-    check (
-        outcome not in ('ANSWER_READY','FINAL_REPLY')
-        or (
-            raw_completion is not null
-            and length(translate(raw_completion, U&'\0009\000A\000B\000C\000D\001C\001D\001E\001F\0020\1680\2000\2001\2002\2003\2004\2005\2006\2008\2009\200A\2028\2029\205F\3000', '')) > 0)
-    )
-);
-
-create index ix_model_call_record_session_job
-    on model_call_record(session_id, message_job_id, runtime_call_ordinal, provider_attempt);
 
 alter table session_message add constraint fk_session_message_job
     foreign key (message_job_id, session_id) references message_job(message_job_id, session_id);
-
-create table tool_message (
-    session_id uuid not null,
-    sequence bigint not null,
-    role varchar(16) not null default 'TOOL' check (role = 'TOOL'),
-    result_id uuid not null,
-    model_call_id varchar(256) not null,
-    model_context text not null check (length(model_context) > 0),
-    tool_name varchar(128) not null,
-    tool_version varchar(32) not null,
-    tool_kind varchar(16) not null check (tool_kind in ('CATALOG','SOURCE')),
-    arguments_json text not null check (arguments_json is json),
-    repository_id varchar(128),
-    revision varchar(128),
-    result_json text not null check (result_json is json),
-    primary key (session_id, sequence),
-    unique (result_id),
-    unique (session_id, model_call_id),
-    unique (session_id, result_id),
-    foreign key (session_id, sequence, role)
-        references session_message(session_id, sequence, role),
-    check (
-        (tool_kind = 'CATALOG' and repository_id is null and revision is null)
-        or
-        (tool_kind = 'SOURCE' and repository_id is not null and revision is not null)
-    )
-);
 
 create table assistant_message (
     session_id uuid not null,
@@ -165,61 +73,34 @@ create table assistant_message (
     role varchar(16) not null default 'ASSISTANT' check (role = 'ASSISTANT'),
     message text not null check (length(message) > 0),
     primary key (session_id, sequence),
-    foreign key (session_id, sequence, role)
-        references session_message(session_id, sequence, role)
+    foreign key (session_id, sequence, role) references session_message(session_id, sequence, role)
 );
 
 create table tool_observation (
     session_id uuid not null,
     sequence bigint not null,
     role varchar(16) not null default 'TOOL' check (role = 'TOOL'),
-    observation_id varchar(256) not null check (length(regexp_replace(observation_id, '[[:space:]]', '', 'g')) > 0),
-    tool_name varchar(128) not null check (length(regexp_replace(tool_name, '[[:space:]]', '', 'g')) > 0),
+    observation_id uuid not null unique,
+    tool_name varchar(128) not null,
     input text not null,
     output text not null,
     primary key (session_id, sequence),
-    unique (observation_id),
-    foreign key (session_id, sequence, role)
-        references session_message(session_id, sequence, role)
+    foreign key (session_id, sequence, role) references session_message(session_id, sequence, role)
 );
 
 create table runtime_message (
     session_id uuid not null,
     sequence bigint not null,
     role varchar(16) not null default 'RUNTIME' check (role = 'RUNTIME'),
-    code varchar(64) not null check (length(regexp_replace(code, '[[:space:]]', '', 'g')) > 0),
-    message text not null check (length(regexp_replace(message, '[[:space:]]', '', 'g')) > 0),
-    primary key (session_id, sequence),
-    foreign key (session_id, sequence, role)
-        references session_message(session_id, sequence, role)
-);
-
-create table feedback_message (
-    session_id uuid not null,
-    sequence bigint not null,
-    role varchar(16) not null default 'FEEDBACK' check (role = 'FEEDBACK'),
     code varchar(64) not null,
     message text not null check (length(message) > 0),
-    terminal boolean not null,
-    model_call_id varchar(256),
-    tool_name varchar(128),
-    rejected_arguments_json text,
-    model_context text,
     primary key (session_id, sequence),
-    foreign key (session_id, sequence, role)
-        references session_message(session_id, sequence, role),
-    check (
-        (model_call_id is null and tool_name is null and rejected_arguments_json is null and model_context is null)
-        or
-        (model_call_id is not null and tool_name is not null and rejected_arguments_json is not null and model_context is not null)
-    )
+    foreign key (session_id, sequence, role) references session_message(session_id, sequence, role)
 );
 
-create unique index uq_one_working_job_per_session
-    on message_job(session_id) where status = 'WORKING';
-create index ix_claimable_job
-    on message_job(available_at, created_at, message_job_id)
-    where status in ('PENDING','RETRY');
+create unique index uq_one_working_job_per_session on message_job(session_id) where status = 'WORKING';
+create index ix_claimable_job on message_job(available_at, created_at, message_job_id)
+    where status in ('PENDING', 'RETRY');
 
 create function reject_committed_row_change() returns trigger language plpgsql as $$
 begin
@@ -227,18 +108,22 @@ begin
 end;
 $$;
 
-create trigger source_message_append_only
-    before update or delete on source_message
+create trigger source_message_append_only before update or delete on source_message
     for each row execute function reject_committed_row_change();
-create trigger model_call_record_append_only
-    before update or delete on model_call_record
+create trigger session_message_append_only before update or delete on session_message
+    for each row execute function reject_committed_row_change();
+create trigger user_message_append_only before update or delete on user_message
+    for each row execute function reject_committed_row_change();
+create trigger assistant_message_append_only before update or delete on assistant_message
+    for each row execute function reject_committed_row_change();
+create trigger tool_observation_append_only before update or delete on tool_observation
+    for each row execute function reject_committed_row_change();
+create trigger runtime_message_append_only before update or delete on runtime_message
     for each row execute function reject_committed_row_change();
 
 create function restrict_conversation_session_change() returns trigger language plpgsql as $$
 begin
-    if tg_op = 'DELETE' then
-        raise exception 'conversation sessions must not be deleted';
-    end if;
+    if tg_op = 'DELETE' then raise exception 'conversation sessions must not be deleted'; end if;
     if new.session_id is distinct from old.session_id
         or new.source_type is distinct from old.source_type
         or new.session_key is distinct from old.session_key
@@ -250,36 +135,12 @@ begin
 end;
 $$;
 
-create trigger conversation_session_immutable
-    before update or delete on conversation_session
+create trigger conversation_session_immutable before update or delete on conversation_session
     for each row execute function restrict_conversation_session_change();
-create trigger session_message_append_only
-    before update or delete on session_message
-    for each row execute function reject_committed_row_change();
-create trigger user_message_append_only
-    before update or delete on user_message
-    for each row execute function reject_committed_row_change();
-create trigger tool_message_append_only
-    before update or delete on tool_message
-    for each row execute function reject_committed_row_change();
-create trigger assistant_message_append_only
-    before update or delete on assistant_message
-    for each row execute function reject_committed_row_change();
-create trigger tool_observation_append_only
-    before update or delete on tool_observation
-    for each row execute function reject_committed_row_change();
-create trigger runtime_message_append_only
-    before update or delete on runtime_message
-    for each row execute function reject_committed_row_change();
-create trigger feedback_message_append_only
-    before update or delete on feedback_message
-    for each row execute function reject_committed_row_change();
 
 create function reject_message_job_identity_change() returns trigger language plpgsql as $$
 begin
-    if tg_op = 'DELETE' then
-        raise exception 'message jobs must not be deleted';
-    end if;
+    if tg_op = 'DELETE' then raise exception 'message jobs must not be deleted'; end if;
     if new.message_job_id is distinct from old.message_job_id
         or new.session_id is distinct from old.session_id
         or new.user_message_sequence is distinct from old.user_message_sequence
@@ -290,103 +151,38 @@ begin
 end;
 $$;
 
-create trigger message_job_identity_immutable
-    before update or delete on message_job
+create trigger message_job_identity_immutable before update or delete on message_job
     for each row execute function reject_message_job_identity_change();
 
 create function require_message_detail() returns trigger language plpgsql as $$
-declare
-    detail_count integer;
+declare detail_count integer;
 begin
     select case new.role
-        when 'USER' then (select count(*) from user_message
-            where session_id = new.session_id and sequence = new.sequence)
-        when 'TOOL' then (select count(*) from tool_message
-            where session_id = new.session_id and sequence = new.sequence)
-            + (select count(*) from tool_observation
-            where session_id = new.session_id and sequence = new.sequence)
-        when 'ASSISTANT' then (select count(*) from assistant_message
-            where session_id = new.session_id and sequence = new.sequence)
-        when 'FEEDBACK' then (select count(*) from feedback_message
-            where session_id = new.session_id and sequence = new.sequence)
-        when 'RUNTIME' then (select count(*) from runtime_message
-            where session_id = new.session_id and sequence = new.sequence)
+        when 'USER' then (select count(*) from user_message where session_id = new.session_id and sequence = new.sequence)
+        when 'TOOL' then (select count(*) from tool_observation where session_id = new.session_id and sequence = new.sequence)
+        when 'ASSISTANT' then (select count(*) from assistant_message where session_id = new.session_id and sequence = new.sequence)
+        when 'RUNTIME' then (select count(*) from runtime_message where session_id = new.session_id and sequence = new.sequence)
     end into detail_count;
-    if detail_count <> 1 then
-        raise exception 'session message must have exactly one matching detail';
-    end if;
+    if detail_count <> 1 then raise exception 'session message must have exactly one matching detail'; end if;
     return new;
 end;
 $$;
 
-create constraint trigger session_message_requires_detail
-    after insert on session_message
-    deferrable initially deferred
-    for each row execute function require_message_detail();
-
-create constraint trigger tool_message_requires_one_detail
-    after insert on tool_message
-    deferrable initially deferred
-    for each row execute function require_message_detail();
-
-create constraint trigger tool_observation_requires_one_detail
-    after insert on tool_observation
-    deferrable initially deferred
-    for each row execute function require_message_detail();
+create constraint trigger session_message_requires_detail after insert on session_message
+    deferrable initially deferred for each row execute function require_message_detail();
+create constraint trigger tool_observation_requires_one_detail after insert on tool_observation
+    deferrable initially deferred for each row execute function require_message_detail();
 
 create function require_source_user() returns trigger language plpgsql as $$
-declare
-    user_count integer;
+declare user_count integer;
 begin
     select count(*) into user_count from user_message
-      where source_type = new.source_type
-        and source_message_id = new.source_message_id
-        and session_id = new.session_id
-        and sequence = new.user_message_sequence;
-    if user_count <> 1 then
-        raise exception 'source message must identify exactly one user message';
-    end if;
+        where source_type = new.source_type and source_message_id = new.source_message_id
+          and session_id = new.session_id and sequence = new.user_message_sequence;
+    if user_count <> 1 then raise exception 'source message must identify exactly one user message'; end if;
     return new;
 end;
 $$;
 
-create constraint trigger source_message_requires_user
-    after insert on source_message
-    deferrable initially deferred
-    for each row execute function require_source_user();
-
-create function require_terminal_job_reply() returns trigger language plpgsql as $$
-declare
-    reply_role varchar(16);
-    reply_job_id uuid;
-    feedback_terminal boolean;
-begin
-    if new.status <> 'DONE' then
-        return new;
-    end if;
-    select role, message_job_id into reply_role, reply_job_id from session_message
-      where session_id = new.session_id and sequence = new.reply_sequence;
-    if reply_job_id is distinct from new.message_job_id then
-        raise exception 'done job reply must belong to the same job';
-    end if;
-    if reply_role = 'FEEDBACK' then
-        select terminal into feedback_terminal from feedback_message
-          where session_id = new.session_id and sequence = new.reply_sequence;
-    end if;
-    if reply_role = 'ASSISTANT' then
-        return new;
-    end if;
-    if reply_role = 'RUNTIME' then
-        return new;
-    end if;
-    if reply_role = 'FEEDBACK' and coalesce(feedback_terminal, false) then
-        return new;
-    end if;
-    raise exception 'done job must reference terminal assistant or feedback';
-end;
-$$;
-
-create constraint trigger message_job_requires_terminal_reply
-    after insert or update on message_job
-    deferrable initially deferred
-    for each row execute function require_terminal_job_reply();
+create constraint trigger source_message_requires_user after insert on source_message
+    deferrable initially deferred for each row execute function require_source_user();

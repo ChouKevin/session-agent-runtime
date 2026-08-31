@@ -1,7 +1,6 @@
 package com.java.system.sessionagent.conversation.application;
 
 import com.java.system.sessionagent.conversation.domain.MessageWorkClaim;
-import com.java.system.sessionagent.conversation.domain.ModelCallContext;
 import com.java.system.sessionagent.conversation.domain.ModelReply;
 import com.java.system.sessionagent.conversation.domain.ModelRequest;
 import com.java.system.sessionagent.conversation.domain.ObservationId;
@@ -100,11 +99,10 @@ public final class MessageJobService implements MessageJobPort {
 
     private void processClaim(MessageWorkClaim claim, WorkGuard guard) {
         while (guard.stillOwned()) {
-            List<SessionMessage> history = conversationStore.loadHistory(claim.sessionId(), claim.messageJobId());
+            List<SessionMessage> history = conversationStore.loadHistory(claim.sessionId());
             ToolSnapshot tools = toolRegistry.snapshot();
             ReservationState reservation = new ReservationState();
-            ModelRequest request = new ModelRequest(history, tools,
-                    new ModelCallContext(claim.sessionId(), claim.messageJobId(), 1));
+            ModelRequest request = new ModelRequest(history, tools);
             ModelReply reply;
             try {
                 logModelCallStarted(claim, history.size(), tools.definitions().size());
@@ -174,11 +172,11 @@ public final class MessageJobService implements MessageJobPort {
             output = toolRegistry.invoke(tools, request.toolName(), request.input());
             telemetry.tool(request.toolName().value(), "SUCCESS", Optional.empty(), Optional.empty());
         } catch (IllegalArgumentException failure) {
-            output = ToolFailureOutput.format(ToolExecutionFailure.invalidInput());
+            output = ToolFailureOutput.format(new ToolExecutionFailure("TOOL_INPUT_INVALID", "The tool input is invalid."));
             telemetry.tool(request.toolName().value(), "INVALID_INPUT", Optional.empty(), Optional.empty());
         } catch (ToolExecutionFailure failure) {
             output = ToolFailureOutput.format(failure);
-            telemetry.tool(request.toolName().value(), failure.kind().name(), Optional.empty(), Optional.empty());
+            telemetry.tool(request.toolName().value(), failure.code(), Optional.empty(), Optional.empty());
         }
         return new ConversationStore.ToolObservationData(new ObservationId(UUID.randomUUID().toString()),
                 request.toolName().value(), request.input(), output);

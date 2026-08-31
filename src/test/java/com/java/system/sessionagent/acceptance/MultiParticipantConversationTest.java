@@ -2,6 +2,7 @@ package com.java.system.sessionagent.acceptance;
 
 import com.java.system.sessionagent.conversation.domain.MessageReceipt;
 import com.java.system.sessionagent.conversation.domain.ModelRequest;
+import com.java.system.sessionagent.conversation.domain.RuntimeMessage;
 import com.java.system.sessionagent.conversation.domain.ToolObservation;
 import com.java.system.sessionagent.conversation.domain.UserMessage;
 import org.junit.jupiter.api.Test;
@@ -21,10 +22,11 @@ class MultiParticipantConversationTest {
 
             ModelRequest firstBobRequest = runtime.modelRequests().getFirst();
             List<UserMessage> users = firstBobRequest.history().stream().filter(UserMessage.class::isInstance).map(UserMessage.class::cast).toList();
-            assertThat(users).extracting(UserMessage::participantId).containsExactly("bob");
-            assertThat(users).extracting(UserMessage::message).containsExactly("Which payment methods are supported?");
-            assertThat(runtime.history(bob.sessionId())).noneMatch(message -> message instanceof com.java.system.sessionagent.conversation.domain.FeedbackMessage feedback
-                    && feedback.code().equals("WAITING_FOR_USER"));
+            assertThat(users).extracting(UserMessage::participantId).containsExactly("alice", "bob");
+            assertThat(users).extracting(UserMessage::message).containsExactly("Can you clarify the payment methods?",
+                    "Which payment methods are supported?");
+            assertThat(runtime.history(bob.sessionId())).noneMatch(message -> message instanceof RuntimeMessage runtimeMessage
+                    && runtimeMessage.code().equals("WAITING_FOR_USER"));
             ToolObservation source = runtime.latestSourceTool(bob);
             assertThat(source.output()).contains("\"repositoryId\":\"payment-service\"");
             assertThat(source.observationId()).isNotNull();

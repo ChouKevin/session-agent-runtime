@@ -1,35 +1,35 @@
 package com.java.system.sessionagent.web;
 
-import com.java.system.sessionagent.conversation.domain.IncomingMessage;
+import com.java.system.sessionagent.bootstrap.RuntimeConfiguration;
 import com.java.system.sessionagent.conversation.domain.AssistantMessage;
+import com.java.system.sessionagent.conversation.domain.IncomingMessage;
+import com.java.system.sessionagent.conversation.domain.JobStatus;
 import com.java.system.sessionagent.conversation.domain.MessageJobId;
-import com.java.system.sessionagent.conversation.domain.MessageRole;
 import com.java.system.sessionagent.conversation.domain.MessageReceipt;
-import com.java.system.sessionagent.conversation.domain.SessionSequence;
+import com.java.system.sessionagent.conversation.domain.MessageRole;
+import com.java.system.sessionagent.conversation.domain.ObservationId;
+import com.java.system.sessionagent.conversation.domain.RuntimeMessage;
 import com.java.system.sessionagent.conversation.domain.SessionId;
+import com.java.system.sessionagent.conversation.domain.SessionSequence;
+import com.java.system.sessionagent.conversation.domain.ToolObservation;
+import com.java.system.sessionagent.conversation.domain.UserMessage;
 import com.java.system.sessionagent.conversation.port.in.ConversationQueryPort;
 import com.java.system.sessionagent.conversation.port.in.MessageIntakePort;
 import com.java.system.sessionagent.conversation.port.in.MessageJobView;
-import com.java.system.sessionagent.conversation.port.in.ConversationResultView;
-import com.java.system.sessionagent.bootstrap.RuntimeConfiguration;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.MediaType;
+import org.springframework.http.converter.json.Jackson2ObjectMapperBuilder;
 import org.springframework.http.converter.json.MappingJackson2HttpMessageConverter;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
-import org.springframework.http.converter.json.Jackson2ObjectMapperBuilder;
 
+import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
-import java.util.OptionalLong;
 
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.times;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
-import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
@@ -37,163 +37,73 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 
 class MessageControllerTest {
 
+    private static final String SESSION_ID = "a1d4cefe-d5b5-4f40-b9f6-beb41a6831af";
+    private static final String JOB_ID = "f47bdb7e-75c3-4dbf-bdd4-1f8681705b62";
+    private static final Instant CREATED_AT = Instant.parse("2026-08-31T10:00:01Z");
+
     @Test
-    void accepts_database_identity_limits_and_rejects_values_that_exceed_them() throws Exception {
+    void serializes_each_final_history_message_with_only_its_type_specific_fields() throws Exception {
         MessageIntakePort intake = mock(MessageIntakePort.class);
         ConversationQueryPort queries = mock(ConversationQueryPort.class);
-        MessageReceipt receipt = new MessageReceipt(new SessionId("a1d4cefe-d5b5-4f40-b9f6-beb41a6831af"),
-                new MessageJobId("f47bdb7e-75c3-4dbf-bdd4-1f8681705b62"));
-        when(intake.receive(any(IncomingMessage.class))).thenReturn(receipt);
+        when(queries.findJob(JOB_ID)).thenReturn(Optional.of(new MessageJobView(JOB_ID, SESSION_ID, JobStatus.DONE, 1, 2)));
+        when(queries.messages(SESSION_ID)).thenReturn(Optional.of(List.of(
+                new UserMessage(new SessionId(SESSION_ID), new SessionSequence(1), Optional.of(new MessageJobId(JOB_ID)), CREATED_AT,
+                        MessageRole.USER, "alice", "hello"),
+                new ToolObservation(new SessionId(SESSION_ID), new SessionSequence(2), Optional.of(new MessageJobId(JOB_ID)), CREATED_AT,
+                        MessageRole.TOOL, new ObservationId("4455b5ba-7b93-44cf-bd76-0d756e325eb5"), "lookup", "{}", "plain output"),
+                new AssistantMessage(new SessionId(SESSION_ID), new SessionSequence(3), Optional.of(new MessageJobId(JOB_ID)), CREATED_AT,
+                        MessageRole.ASSISTANT, "answer"),
+                new RuntimeMessage(new SessionId(SESSION_ID), new SessionSequence(4), Optional.of(new MessageJobId(JOB_ID)), CREATED_AT,
+                        MessageRole.RUNTIME, "MODEL_UNAVAILABLE", "retry later"))));
         MockMvc mvc = mvc(intake, queries);
-        String accepted = "x".repeat(256);
-        String rejected = "x".repeat(257);
 
-        mvc.perform(post("/internal/messages").contentType(MediaType.APPLICATION_JSON).content("""
-                {"sessionKey":"%s","participantId":"%s","sourceMessageId":"%s","message":"hello"}
-                """.formatted(accepted, accepted, accepted)))
-                .andExpect(status().isAccepted());
-        mvc.perform(post("/internal/messages").contentType(MediaType.APPLICATION_JSON).content("""
-                {"sessionKey":"%s","participantId":"alice","sourceMessageId":"source","message":"hello"}
-                """.formatted(rejected)))
-                .andExpect(status().isBadRequest());
-        mvc.perform(post("/internal/messages").contentType(MediaType.APPLICATION_JSON).content("""
-                {"sessionKey":"session","participantId":"%s","sourceMessageId":"source","message":"hello"}
-                """.formatted(rejected)))
-                .andExpect(status().isBadRequest());
-        mvc.perform(post("/internal/messages").contentType(MediaType.APPLICATION_JSON).content("""
-                {"sessionKey":"session","participantId":"alice","sourceMessageId":"%s","message":"hello"}
-                """.formatted(rejected)))
-                .andExpect(status().isBadRequest());
+        mvc.perform(get("/internal/sessions/{sessionId}/messages", SESSION_ID))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$[0].type").value("USER"))
+                .andExpect(jsonPath("$[0].participantId").value("alice"))
+                .andExpect(jsonPath("$[0].toolName").doesNotExist())
+                .andExpect(jsonPath("$[1].sequence").value(2))
+                .andExpect(jsonPath("$[1].createdAt").exists())
+                .andExpect(jsonPath("$[1].type").value("TOOL"))
+                .andExpect(jsonPath("$[1].messageJobId").value(JOB_ID))
+                .andExpect(jsonPath("$[1].observationId").value("4455b5ba-7b93-44cf-bd76-0d756e325eb5"))
+                .andExpect(jsonPath("$[1].toolName").value("lookup"))
+                .andExpect(jsonPath("$[1].input").value("{}"))
+                .andExpect(jsonPath("$[1].output").value("plain output"))
+                .andExpect(jsonPath("$[1].resultId").doesNotExist())
+                .andExpect(jsonPath("$[1].toolVersion").doesNotExist())
+                .andExpect(jsonPath("$[1].repositoryId").doesNotExist())
+                .andExpect(jsonPath("$[1].revision").doesNotExist())
+                .andExpect(jsonPath("$[1].feedbackCode").doesNotExist())
+                .andExpect(jsonPath("$[1].terminal").doesNotExist())
+                .andExpect(jsonPath("$[1].rejectedArguments").doesNotExist())
+                .andExpect(jsonPath("$[2].type").value("ASSISTANT"))
+                .andExpect(jsonPath("$[2].message").value("answer"))
+                .andExpect(jsonPath("$[3].type").value("RUNTIME"))
+                .andExpect(jsonPath("$[3].code").value("MODEL_UNAVAILABLE"));
+        mvc.perform(get("/internal/message-jobs/{messageJobId}", JOB_ID))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.replySequence").doesNotExist());
     }
 
     @Test
-    void acceptsTheOriginalReceiptForAnExactDuplicateWithoutCallingTheModel() throws Exception {
-        MessageIntakePort intake = mock(MessageIntakePort.class);
-        ConversationQueryPort queries = mock(ConversationQueryPort.class);
-        MessageReceipt receipt = new MessageReceipt(new SessionId("a1d4cefe-d5b5-4f40-b9f6-beb41a6831af"),
-                new MessageJobId("f47bdb7e-75c3-4dbf-bdd4-1f8681705b62"));
-        when(intake.receive(any(IncomingMessage.class))).thenReturn(receipt);
-        MockMvc mvc = mvc(intake, queries);
-
-        String request = """
-                {"sessionKey":"thread-1","participantId":"alice","sourceMessageId":"source-1","message":"hello"}
-                """;
-        mvc.perform(post("/internal/messages").contentType(MediaType.APPLICATION_JSON).content(request))
-                .andExpect(status().isAccepted())
-                .andExpect(jsonPath("$.sessionId").value(receipt.sessionId().value()))
-                .andExpect(jsonPath("$.messageJobId").value(receipt.messageJobId().value()));
-        mvc.perform(post("/internal/messages").contentType(MediaType.APPLICATION_JSON).content(request))
-                .andExpect(status().isAccepted())
-                .andExpect(jsonPath("$.messageJobId").value(receipt.messageJobId().value()));
-
-        verify(intake, times(2)).receive(any(IncomingMessage.class));
-        assertThat(MessageController.class.getDeclaredConstructors()).singleElement().satisfies(constructor ->
-                assertThat(constructor.getParameterTypes()).containsExactly(MessageIntakePort.class, ConversationQueryPort.class));
-        verifyNoInteractions(queries);
-    }
-
-    @Test
-    void rejectsUnknownFieldsAndConflictingDuplicatesWithClosedResponses() throws Exception {
-        MessageIntakePort intake = mock(MessageIntakePort.class);
-        ConversationQueryPort queries = mock(ConversationQueryPort.class);
-        when(intake.receive(any(IncomingMessage.class))).thenThrow(new com.java.system.sessionagent.conversation.port.in.MessageConflictException());
-        MockMvc mvc = mvc(intake, queries);
-
-        mvc.perform(post("/internal/messages").contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"sessionKey\":\"thread\",\"participantId\":\"a\",\"sourceMessageId\":\"s\",\"message\":\"x\",\"extra\":true}"))
-                .andExpect(status().isBadRequest())
-                .andExpect(jsonPath("$.code").value("bad_request"));
-        mvc.perform(post("/internal/messages").contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"sessionKey\":\"thread\",\"participantId\":\"a\",\"sourceMessageId\":\"s\",\"message\":\"x\"}"))
-                .andExpect(status().isConflict())
-                .andExpect(jsonPath("$.code").value("message_conflict"));
-    }
-
-    @Test
-    void rejectsScalarCoercionAndTrailingJsonTokensForMessageIntake() throws Exception {
+    void has_no_result_lookup_endpoint() throws Exception {
         MessageIntakePort intake = mock(MessageIntakePort.class);
         ConversationQueryPort queries = mock(ConversationQueryPort.class);
         MockMvc mvc = mvc(intake, queries);
 
-        mvc.perform(post("/internal/messages").contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"sessionKey\":42,\"participantId\":\"a\",\"sourceMessageId\":\"s\",\"message\":\"x\"}"))
-                .andExpect(status().isBadRequest())
-                .andExpect(jsonPath("$.code").value("bad_request"));
-        mvc.perform(post("/internal/messages").contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"sessionKey\":\"thread\",\"participantId\":\"a\",\"sourceMessageId\":\"s\",\"message\":\"x\"} {}"))
-                .andExpect(status().isBadRequest())
-                .andExpect(jsonPath("$.code").value("bad_request"));
-
-        verifyNoInteractions(intake, queries);
-    }
-
-    @Test
-    void returnsSafeJobAndMessageProjections() throws Exception {
-        MessageIntakePort intake = mock(MessageIntakePort.class);
-        ConversationQueryPort queries = mock(ConversationQueryPort.class);
-        String jobId = "f47bdb7e-75c3-4dbf-bdd4-1f8681705b62";
-        String sessionId = "a1d4cefe-d5b5-4f40-b9f6-beb41a6831af";
-        when(queries.findJob(jobId)).thenReturn(Optional.of(new MessageJobView(jobId, sessionId,
-                com.java.system.sessionagent.conversation.domain.JobStatus.DONE, 1, 2, OptionalLong.of(4))));
-        when(queries.messages(sessionId)).thenReturn(Optional.of(List.of(
-                new com.java.system.sessionagent.conversation.domain.ToolMessage(
-                        new SessionId(sessionId), new com.java.system.sessionagent.conversation.domain.SessionSequence(2), Optional.of(new MessageJobId(jobId)),
-                        java.time.Instant.parse("2026-08-16T00:00:00Z"), com.java.system.sessionagent.conversation.domain.MessageRole.TOOL,
-                        new com.java.system.sessionagent.conversation.domain.ResultId("4455b5ba-7b93-44cf-bd76-0d756e325eb5"), "call", "dGVzdA==", "source", "v1",
-                        "{\"secret\":\"raw-argument\"}", Optional.of("repo-a"), Optional.of("rev-a"), "{\"secret\":\"raw-result\"}"),
-                new com.java.system.sessionagent.conversation.domain.FeedbackMessage(
-                        new SessionId(sessionId), new com.java.system.sessionagent.conversation.domain.SessionSequence(3), Optional.of(new MessageJobId(jobId)),
-                        java.time.Instant.parse("2026-08-16T00:00:01Z"), com.java.system.sessionagent.conversation.domain.MessageRole.FEEDBACK,
-                        "REVISION_OUTDATED", "{\"repositoryId\":\"payment-service\",\"requestedRevision\":\"R1\",\"currentRevision\":\"R2\"}", false,
-                        Optional.of("call"), Optional.of("codebase_search"), Optional.of("{\"repositoryId\":\"payment-service\",\"revision\":\"R1\"}"),
-                        Optional.of("sensitive-model-context")),
-                new AssistantMessage(new SessionId(sessionId), new SessionSequence(4), Optional.of(new MessageJobId(jobId)),
-                        java.time.Instant.parse("2026-08-16T00:00:02Z"), MessageRole.ASSISTANT, "opaque answer"))));
-        MockMvc mvc = mvc(intake, queries);
-
-        mvc.perform(get("/internal/message-jobs/{messageJobId}", jobId))
-                .andExpect(status().isOk()).andExpect(jsonPath("$.status").value("DONE"));
-        mvc.perform(get("/internal/sessions/{sessionId}/messages", sessionId))
-                .andExpect(status().isOk()).andExpect(jsonPath("$[0].resultId").value("4455b5ba-7b93-44cf-bd76-0d756e325eb5"))
-                .andExpect(jsonPath("$[0].resultJson").doesNotExist())
-                .andExpect(jsonPath("$[0].citeable").doesNotExist())
-                .andExpect(jsonPath("$[0].arguments").doesNotExist())
-                .andExpect(jsonPath("$[0].modelContext").doesNotExist())
-                .andExpect(jsonPath("$[1].toolName").value("codebase_search"))
-                .andExpect(jsonPath("$[1].feedbackCode").value("REVISION_OUTDATED"))
-                .andExpect(jsonPath("$[1].sequence").value(3))
-                .andExpect(jsonPath("$[1].terminal").value(false))
-                .andExpect(jsonPath("$[1].rejectedArguments").value("{\"repositoryId\":\"payment-service\",\"revision\":\"R1\"}"))
-                .andExpect(jsonPath("$[1].message").value("{\"repositoryId\":\"payment-service\",\"requestedRevision\":\"R1\",\"currentRevision\":\"R2\"}"))
-                .andExpect(jsonPath("$[1].modelContext").doesNotExist())
-                .andExpect(jsonPath("$[1].resultJson").doesNotExist())
-                .andExpect(jsonPath("$[2].message").value("opaque answer"))
-                .andExpect(jsonPath("$[2].citations").doesNotExist());
-    }
-
-    @Test
-    void returnsFullResultsAndClosedNotFoundOrMalformedReadErrors() throws Exception {
-        MessageIntakePort intake = mock(MessageIntakePort.class);
-        ConversationQueryPort queries = mock(ConversationQueryPort.class);
-        String resultId = "4455b5ba-7b93-44cf-bd76-0d756e325eb5";
-        String sessionId = "a1d4cefe-d5b5-4f40-b9f6-beb41a6831af";
-        when(queries.findResult(resultId)).thenReturn(Optional.of(new ConversationResultView(resultId, sessionId, "source", "v1",
-                "{\"safe\":true}", Optional.of("repo-a"), Optional.of("rev-a"), "{\"payload\":true}")));
-        when(queries.findJob("f47bdb7e-75c3-4dbf-bdd4-1f8681705b62")).thenReturn(Optional.empty());
-        when(queries.messages(sessionId)).thenReturn(Optional.empty());
-        when(queries.findResult("e148e1e1-d085-47fd-b81c-d4d807d7fc67")).thenReturn(Optional.empty());
-        MockMvc mvc = mvc(intake, queries);
-
-        mvc.perform(get("/internal/results/{resultId}", resultId)).andExpect(status().isOk())
-                .andExpect(jsonPath("$.resultJson").value("{\"payload\":true}"))
-                .andExpect(jsonPath("$.citeable").doesNotExist());
-        mvc.perform(get("/internal/message-jobs/{messageJobId}", "f47bdb7e-75c3-4dbf-bdd4-1f8681705b62"))
+        mvc.perform(get("/internal/results/{resultId}", "4455b5ba-7b93-44cf-bd76-0d756e325eb5"))
                 .andExpect(status().isNotFound());
-        mvc.perform(get("/internal/sessions/{sessionId}/messages", sessionId)).andExpect(status().isNotFound());
-        mvc.perform(get("/internal/results/{resultId}", "e148e1e1-d085-47fd-b81c-d4d807d7fc67")).andExpect(status().isNotFound());
-        mvc.perform(get("/internal/message-jobs/not-a-uuid")).andExpect(status().isBadRequest());
-        mvc.perform(get("/internal/sessions/not-a-uuid/messages")).andExpect(status().isBadRequest());
-        mvc.perform(get("/internal/results/not-a-uuid")).andExpect(status().isBadRequest());
+    }
+
+    @Test
+    void accepts_valid_inbound_messages() throws Exception {
+        MessageIntakePort intake = mock(MessageIntakePort.class);
+        ConversationQueryPort queries = mock(ConversationQueryPort.class);
+        when(intake.receive(any(IncomingMessage.class))).thenReturn(new MessageReceipt(new SessionId(SESSION_ID), new MessageJobId(JOB_ID)));
+
+        mvc(intake, queries).perform(post("/internal/messages").contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"sessionKey\":\"thread\",\"participantId\":\"alice\",\"sourceMessageId\":\"source\",\"message\":\"hello\"}"))
+                .andExpect(status().isAccepted()).andExpect(jsonPath("$.messageJobId").value(JOB_ID));
     }
 
     private static MockMvc mvc(MessageIntakePort intake, ConversationQueryPort queries) {

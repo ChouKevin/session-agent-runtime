@@ -1,22 +1,8 @@
 package com.java.system.sessionagent.bootstrap;
 
 import com.java.system.sessionagent.conversation.port.out.ConversationStore;
-import com.java.system.sessionagent.conversation.port.out.ModelCallRecorder;
-import com.java.system.sessionagent.conversation.domain.MessageRole;
-import com.java.system.sessionagent.conversation.domain.ModelDecision;
-import com.java.system.sessionagent.conversation.domain.ModelRequest;
-import com.java.system.sessionagent.conversation.domain.SessionId;
-import com.java.system.sessionagent.conversation.domain.SessionSequence;
-import com.java.system.sessionagent.conversation.domain.UserMessage;
-import com.java.system.sessionagent.model.GoogleConversationModel;
 import com.java.system.sessionagent.model.PromptResource;
-import com.java.system.sessionagent.storage.PostgresModelCallRecorder;
 import com.java.system.sessionagent.tool.application.DirectToolRegistry;
-import com.java.system.sessionagent.tool.application.ToolRegistration;
-import com.java.system.sessionagent.tool.domain.ToolDefinition;
-import com.java.system.sessionagent.tool.domain.ToolKind;
-import com.java.system.sessionagent.tool.domain.ToolName;
-import com.java.system.sessionagent.tool.domain.ToolResult;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import io.micrometer.observation.ObservationRegistry;
 import org.junit.jupiter.api.Test;
@@ -24,10 +10,6 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.Mockito;
 import org.springframework.ai.chat.model.ChatModel;
-import org.springframework.ai.chat.model.ChatResponse;
-import org.springframework.ai.chat.model.Generation;
-import org.springframework.ai.chat.messages.AssistantMessage;
-import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.ai.google.genai.GoogleGenAiChatModel;
 import org.springframework.ai.google.genai.GoogleGenAiChatOptions;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
@@ -40,10 +22,6 @@ import org.springframework.util.ClassUtils;
 
 import javax.sql.DataSource;
 
-import java.time.Instant;
-import java.util.List;
-import java.util.Map;
-import java.util.Optional;
 import java.util.concurrent.ScheduledExecutorService;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -71,8 +49,6 @@ class ApplicationStartupTest {
             assertThat(context.getBeansOfType(DirectToolRegistry.class)).hasSize(1);
             assertThat(context.getBean(DirectToolRegistry.class).snapshot().definitions()).hasSize(16);
             assertThat(context.getBeansOfType(ConversationStore.class)).hasSize(1);
-            assertThat(context).hasSingleBean(ModelCallRecorder.class);
-            assertThat(context.getBean(ModelCallRecorder.class)).isInstanceOf(PostgresModelCallRecorder.class);
             assertThat(context.getBeansOfType(com.java.system.sessionagent.model.SpringAiConversationModel.class)).hasSize(1);
             assertThat(context.getBeansOfType(com.java.system.sessionagent.conversation.application.MessageJobService.class)).hasSize(1);
             assertThat(context.getBeansOfType(com.java.system.sessionagent.worker.MessageJobWorker.class)).hasSize(1);

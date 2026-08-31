@@ -1,20 +1,15 @@
 package com.java.system.sessionagent.model;
 
-import com.java.system.sessionagent.conversation.domain.ModelCallContext;
 import com.java.system.sessionagent.conversation.domain.ModelReply;
 import com.java.system.sessionagent.conversation.domain.ModelRequest;
 import com.java.system.sessionagent.conversation.domain.ModelUsage;
-import com.java.system.sessionagent.conversation.domain.SessionId;
-import com.java.system.sessionagent.conversation.domain.MessageJobId;
 import com.java.system.sessionagent.conversation.port.out.ModelCallFailure;
 import com.java.system.sessionagent.conversation.domain.ToolRequest;
 import com.java.system.sessionagent.tool.application.DirectToolRegistry;
 import com.java.system.sessionagent.tool.application.ToolRegistration;
 import com.java.system.sessionagent.tool.application.ToolSnapshot;
 import com.java.system.sessionagent.tool.domain.ToolDefinition;
-import com.java.system.sessionagent.tool.domain.ToolKind;
 import com.java.system.sessionagent.tool.domain.ToolName;
-import com.java.system.sessionagent.tool.domain.ToolResult;
 import org.junit.jupiter.api.Test;
 import org.springframework.ai.chat.metadata.ChatResponseMetadata;
 import org.springframework.ai.chat.metadata.DefaultUsage;
@@ -138,14 +133,13 @@ class SpringAiConversationModelTest {
     }
 
     private static ModelRequest request() {
-        return new ModelRequest(List.of(), snapshot(), new ModelCallContext(
-                new SessionId("session-1"), new MessageJobId("job-1"), 1));
+        return new ModelRequest(List.of(), snapshot());
     }
 
     private static ToolSnapshot snapshot() {
-        ToolDefinition definition = new ToolDefinition(new ToolName("first"), "1", "First tool", "{\"type\":\"object\"}", ToolKind.CATALOG);
+        ToolDefinition definition = new ToolDefinition(new ToolName("first"), "First tool", "{\"type\":\"object\"}");
         ToolRegistration<String> registration = new ToolRegistration<>(definition, String.class,
-                ignored -> new ToolResult(Optional.empty(), Optional.empty(), "{}"));
+                ignored -> "{}");
         return new DirectToolRegistry(List.of(registration)).snapshot();
     }
 

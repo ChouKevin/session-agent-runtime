@@ -55,13 +55,6 @@ public final class MessageController {
                 .map(MessageResponses.SessionMessageResponse::from).toList();
     }
 
-    @GetMapping("/results/{resultId}")
-    public MessageResponses.ResultResponse result(@PathVariable String resultId) {
-        requireUuid(resultId);
-        return conversationQueryPort.findResult(resultId).map(MessageResponses.ResultResponse::from)
-                .orElseThrow(WebErrorHandler.NotFoundException::new);
-    }
-
     private static void requireUuid(String value) {
         try {
             UUID.fromString(value);

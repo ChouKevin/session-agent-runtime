@@ -11,5 +11,4 @@ public interface ConversationQueryPort {
 
     Optional<List<SessionMessage>> messages(String sessionId);
 
-    Optional<ConversationResultView> findResult(String resultId);
 }

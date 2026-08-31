@@ -1,8 +1,6 @@
 package com.java.system.sessionagent.tool.application;
 
-import com.java.system.sessionagent.tool.domain.ToolExecution;
 import com.java.system.sessionagent.tool.domain.ToolName;
-import com.java.system.sessionagent.tool.domain.ToolResult;
 import com.java.system.sessionagent.tool.json.JsonContractException;
 import com.java.system.sessionagent.tool.json.StrictJsonCodec;
 import org.springframework.util.Assert;
@@ -15,6 +13,8 @@ import java.util.Set;
 public final class DirectToolRegistry {
 
     private static final int MAX_INPUT_UTF8_BYTES = 65_536;
+    private static final String INVALID_INPUT = "TOOL_INPUT_INVALID";
+    private static final String INVALID_RESPONSE = "TOOL_RESPONSE_INVALID";
 
     private final List<ToolRegistration<?>> registrations;
     private final StrictJsonCodec jsonCodec;
@@ -35,59 +35,36 @@ public final class DirectToolRegistry {
         return new ToolSnapshot(registrations);
     }
 
-    /**
-     * Invokes a tool through the provider-neutral runtime boundary.
-     *
-     * <p>The rich execution record remains temporarily for pre-cutover callers and will be removed in Task 5.</p>
-     */
     public String invoke(ToolSnapshot snapshot, ToolName name, String input) {
-        return execute(snapshot, name, input).dataJson();
-    }
-
-    public ToolExecution execute(ToolSnapshot snapshot, ToolName name, String rawArguments) {
         Assert.notNull(snapshot, "Tool snapshot must not be null");
         Assert.notNull(name, "Tool name must not be null");
-        Assert.notNull(rawArguments, "Tool arguments must not be null");
-
+        Assert.notNull(input, "Tool input must not be null");
         ToolRegistration<?> registration = snapshot.registration(name)
-                .orElseThrow(ToolExecutionFailure::invalidInput);
-        return executeRegistration(registration, rawArguments);
+                .orElseThrow(() -> new ToolExecutionFailure(INVALID_INPUT, "The tool input is invalid."));
+        return invokeRegistration(registration, input);
     }
 
-    private <T> ToolExecution executeTyped(ToolRegistration<T> registration, String rawArguments) {
+    private <T> String invokeTyped(ToolRegistration<T> registration, String rawInput) {
         T input;
-        String canonicalArguments;
         try {
-            input = jsonCodec.decodeBounded(rawArguments, registration.inputType(), MAX_INPUT_UTF8_BYTES);
-            canonicalArguments = jsonCodec.canonicalize(input);
+            input = jsonCodec.decodeBounded(rawInput, registration.inputType(), MAX_INPUT_UTF8_BYTES);
         } catch (JsonContractException exception) {
-            if (exception.isInputTooLarge()) {
-                throw ToolExecutionFailure.inputTooLarge();
-            }
-            throw ToolExecutionFailure.invalidInput();
+            throw new ToolExecutionFailure(INVALID_INPUT, "The tool input is invalid.");
         } catch (RuntimeException exception) {
-            throw ToolExecutionFailure.invalidResponse();
+            throw new ToolExecutionFailure(INVALID_RESPONSE, "The tool response is invalid.");
         }
         try {
-            ToolResult result = Objects.requireNonNull(registration.executor().execute(input), "Tool result must not be null");
-            return new ToolExecution(
-                    registration.definition().name(),
-                    registration.definition().version(),
-                    registration.definition().kind(),
-                    canonicalArguments,
-                    result.repositoryId(),
-                    result.revision(),
-                    result.dataJson());
+            return Objects.requireNonNull(registration.executor().execute(input), "Tool output must not be null");
         } catch (ToolExecutionFailure exception) {
             throw exception;
         } catch (RuntimeException exception) {
-            throw ToolExecutionFailure.invalidResponse();
+            throw new ToolExecutionFailure(INVALID_RESPONSE, "The tool response is invalid.");
         }
     }
 
     @SuppressWarnings("unchecked")
-    private ToolExecution executeRegistration(ToolRegistration<?> registration, String rawArguments) {
-        return executeTyped((ToolRegistration<Object>) registration, rawArguments);
+    private String invokeRegistration(ToolRegistration<?> registration, String rawInput) {
+        return invokeTyped((ToolRegistration<Object>) registration, rawInput);
     }
 
     private static void ensureDistinctToolNames(List<ToolRegistration<?>> registrations) {

@@ -21,9 +21,7 @@ import com.java.system.sessionagent.semantic.tool.input.SuggestApiRouteInput;
 import com.java.system.sessionagent.tool.application.ToolRegistration;
 import com.java.system.sessionagent.tool.application.ToolExecutionFailure;
 import com.java.system.sessionagent.tool.domain.ToolDefinition;
-import com.java.system.sessionagent.tool.domain.ToolKind;
 import com.java.system.sessionagent.tool.domain.ToolName;
-import com.java.system.sessionagent.tool.domain.ToolResult;
 import com.java.system.sessionagent.tool.json.StrictJsonCodec;
 import com.java.system.sessionagent.tool.json.ToolSchemaFactory;
 import org.springframework.util.Assert;
@@ -35,7 +33,6 @@ import java.util.function.Function;
 public final class SemanticToolProvider {
 
     private static final ToolName LIST_REPOSITORIES = new ToolName("list_repositories");
-    private static final String VERSION = "v1";
 
     private final RepositoryCatalog repositoryCatalog;
     private final Optional<SemanticSourceClient> sourceClient;
@@ -67,12 +64,10 @@ public final class SemanticToolProvider {
     public List<ToolRegistration<?>> registrations() {
         ToolDefinition definition = new ToolDefinition(
                 LIST_REPOSITORIES,
-                VERSION,
                 "List available repositories and their current repositoryId/revision pairs. "
                         + "Use when a repository-specific query is useful and visible history has no reliable "
                         + "repositoryId/revision pair. The catalog identifies repositories; it does not describe source behavior.",
-                schemaFactory.schemaFor(ListRepositoriesInput.class),
-                ToolKind.CATALOG);
+                schemaFactory.schemaFor(ListRepositoriesInput.class));
         ToolRegistration<ListRepositoriesInput> registration = new ToolRegistration<>(
                 definition,
                 ListRepositoriesInput.class,
@@ -80,13 +75,13 @@ public final class SemanticToolProvider {
         return sourceClient.map(client -> sourceRegistrations(registration, client)).orElseGet(() -> List.of(registration));
     }
 
-    private ToolResult listRepositories() {
+    private String listRepositories() {
         List<RepositorySummary> repositories = repositoryCatalog.listRepositories();
         String dataJson = jsonCodec.canonicalize(ListRepositoriesResult.from(repositories));
-        return new ToolResult(Optional.empty(), Optional.empty(), dataJson);
+        return dataJson;
     }
 
-    private ToolResult executeCatalog() {
+    private String executeCatalog() {
         try {
             return listRepositories();
         } catch (com.java.system.sessionagent.semantic.SemanticFailure exception) {
@@ -150,12 +145,11 @@ public final class SemanticToolProvider {
             Class<I> inputType,
             Function<I, String> repositoryId,
             Function<I, SemanticSourceClient.SourceResult<T>> executor) {
-        ToolDefinition definition = new ToolDefinition(name.toolName(), VERSION, description,
-                schemaFactory.schemaFor(inputType), ToolKind.SOURCE);
+        ToolDefinition definition = new ToolDefinition(name.toolName(), description, schemaFactory.schemaFor(inputType));
         return new ToolRegistration<>(definition, inputType, input -> executeSource(repositoryId.apply(input), executor, input));
     }
 
-    private <I, T> ToolResult executeSource(String repositoryId, Function<I, SemanticSourceClient.SourceResult<T>> executor, I input) {
+    private <I, T> String executeSource(String repositoryId, Function<I, SemanticSourceClient.SourceResult<T>> executor, I input) {
         try {
             return sourceResult(repositoryId, executor.apply(input));
         } catch (com.java.system.sessionagent.semantic.SemanticFailure exception) {
@@ -165,26 +159,22 @@ public final class SemanticToolProvider {
 
     private static ToolExecutionFailure translate(com.java.system.sessionagent.semantic.SemanticFailure failure) {
         return switch (failure.kind()) {
-            case INVALID_ARGUMENT -> ToolExecutionFailure.invalidInput();
-            case REPOSITORY_NOT_FOUND -> ToolExecutionFailure.repositoryNotFound();
-            case REVISION_OUTDATED -> {
-                com.java.system.sessionagent.semantic.SemanticFailure.RevisionOutdatedDetails details = failure.revisionOutdated().orElseThrow();
-                yield ToolExecutionFailure.revisionOutdated(details.retryGuidance());
-            }
-            case INDEX_NOT_READY -> ToolExecutionFailure.indexNotReady();
-            case INDEX_CONTRACT_MISMATCH -> ToolExecutionFailure.indexContractMismatch();
-            case CODE_FACT_NOT_FOUND -> ToolExecutionFailure.codeFactNotFound();
-            case CODE_FACT_KIND_UNSUPPORTED -> ToolExecutionFailure.codeFactKindUnsupported();
-            case INVALID_QUERY -> ToolExecutionFailure.invalidQuery();
-            case SEMANTIC_INDEX_UNAVAILABLE -> ToolExecutionFailure.semanticIndexUnavailable(failure.retryAfter());
-            case FORBIDDEN -> ToolExecutionFailure.forbidden();
-            case INVALID_RESPONSE -> ToolExecutionFailure.invalidResponse();
+            case INVALID_ARGUMENT -> new ToolExecutionFailure("TOOL_INPUT_INVALID", "The tool input is invalid.");
+            case REPOSITORY_NOT_FOUND -> new ToolExecutionFailure("SEMANTIC_REPOSITORY_NOT_FOUND", "The requested repository was not found.");
+            case REVISION_OUTDATED -> new ToolExecutionFailure("SEMANTIC_REVISION_OUTDATED", "The requested repository revision is outdated.");
+            case INDEX_NOT_READY -> new ToolExecutionFailure("SEMANTIC_INDEX_NOT_READY", "The semantic index is not ready.");
+            case INDEX_CONTRACT_MISMATCH -> new ToolExecutionFailure("SEMANTIC_INDEX_CONTRACT_MISMATCH", "The semantic index contract does not match.");
+            case CODE_FACT_NOT_FOUND -> new ToolExecutionFailure("SEMANTIC_CODE_FACT_NOT_FOUND", "The requested code fact was not found.");
+            case CODE_FACT_KIND_UNSUPPORTED -> new ToolExecutionFailure("SEMANTIC_CODE_FACT_KIND_UNSUPPORTED", "The code fact kind is unsupported.");
+            case INVALID_QUERY -> new ToolExecutionFailure("SEMANTIC_QUERY_INVALID", "The semantic query is invalid.");
+            case SEMANTIC_INDEX_UNAVAILABLE -> new ToolExecutionFailure("SEMANTIC_INDEX_UNAVAILABLE", "The semantic index is unavailable.");
+            case FORBIDDEN -> new ToolExecutionFailure("SEMANTIC_FORBIDDEN", "Semantic access is forbidden.");
+            case INVALID_RESPONSE -> new ToolExecutionFailure("SEMANTIC_RESPONSE_INVALID", "The semantic response is invalid.");
         };
     }
 
-    private <T> ToolResult sourceResult(String repositoryId, SemanticSourceClient.SourceResult<T> sourceResult) {
-        return new ToolResult(Optional.of(repositoryId), Optional.of(sourceResult.revision().value()),
-                jsonCodec.canonicalize(new SourceObservation(repositoryId, sourceResult.revision().value(), sourceResult.response())));
+    private <T> String sourceResult(String repositoryId, SemanticSourceClient.SourceResult<T> sourceResult) {
+        return jsonCodec.canonicalize(new SourceObservation(repositoryId, sourceResult.revision().value(), sourceResult.response()));
     }
 
     private record ListRepositoriesResult(List<RepositorySummaryResult> repositories) {

@@ -3,7 +3,6 @@ package com.java.system.sessionagent.acceptance;
 import com.java.system.sessionagent.conversation.application.ConversationMessageService;
 import com.java.system.sessionagent.conversation.application.MessageJobService;
 import com.java.system.sessionagent.conversation.domain.AssistantMessage;
-import com.java.system.sessionagent.conversation.domain.FeedbackMessage;
 import com.java.system.sessionagent.conversation.domain.IncomingMessage;
 import com.java.system.sessionagent.conversation.domain.JobStatus;
 import com.java.system.sessionagent.conversation.domain.MessageJobId;
@@ -11,13 +10,11 @@ import com.java.system.sessionagent.conversation.domain.MessageReceipt;
 import com.java.system.sessionagent.conversation.domain.MessageRole;
 import com.java.system.sessionagent.conversation.domain.MessageWorkClaim;
 import com.java.system.sessionagent.conversation.domain.ModelRequest;
-import com.java.system.sessionagent.conversation.domain.ResultId;
 import com.java.system.sessionagent.conversation.domain.RuntimeMessage;
 import com.java.system.sessionagent.conversation.domain.SessionId;
 import com.java.system.sessionagent.conversation.domain.SessionMessage;
 import com.java.system.sessionagent.conversation.domain.SessionSequence;
 import com.java.system.sessionagent.conversation.domain.ToolObservation;
-import com.java.system.sessionagent.conversation.domain.ToolMessage;
 import com.java.system.sessionagent.conversation.domain.UserMessage;
 import com.java.system.sessionagent.conversation.port.out.ConversationStore;
 import com.java.system.sessionagent.semantic.domain.RepositoryId;
@@ -125,7 +122,7 @@ class ConversationAcceptanceTest {
             runtime.process(receipt);
 
             assertThat(runtime.store.toolObservations(receipt.messageJobId())).anySatisfy(message ->
-                    assertThat(message.output()).contains("Code: TOOL_REPOSITORY_NOT_FOUND"));
+                    assertThat(message.output()).contains("Code: SEMANTIC_REPOSITORY_NOT_FOUND"));
             assertThat(runtime.store.toolObservations(receipt.messageJobId())).filteredOn(message -> message.toolName().equals("list_repositories")).hasSize(2);
             assertThat(runtime.semantic.calls()).filteredOn(call -> call.path().equals("/v1/repositories")).hasSize(2);
             assertThat(runtime.semantic.calls()).anySatisfy(call -> assertThat(call.path()).isEqualTo("/v1/repositories/payment-service/entry-points"));
@@ -188,7 +185,6 @@ class ConversationAcceptanceTest {
         private final Map<String, SessionId> sessions = new LinkedHashMap<>();
         private final Map<SessionId, List<SessionMessage>> messages = new LinkedHashMap<>();
         private final Map<MessageJobId, Job> jobs = new LinkedHashMap<>();
-        private final Map<ResultId, ResultProjection> results = new LinkedHashMap<>();
         private long nextJob = 1;
 
         @Override
@@ -198,7 +194,7 @@ class ConversationAcceptanceTest {
             List<SessionMessage> history = messages.computeIfAbsent(sessionId, ignored -> new ArrayList<>());
             history.add(new UserMessage(sessionId, sequence(history), Optional.of(jobId), Instant.parse("2026-08-16T00:00:00Z"),
                     MessageRole.USER, incoming.participantId(), incoming.message()));
-            jobs.put(jobId, new Job(sessionId, JobStatus.PENDING, 0, 0, Optional.empty()));
+            jobs.put(jobId, new Job(sessionId, JobStatus.PENDING, 0, 0));
             return new MessageReceipt(sessionId, jobId);
         }
 
@@ -234,45 +230,14 @@ class ConversationAcceptanceTest {
         }
 
         @Override
-        public List<SessionMessage> loadHistory(SessionId sessionId, MessageJobId messageJobId) {
-            List<MessageJobId> visibleJobIds = new ArrayList<>();
-            for (Map.Entry<MessageJobId, Job> entry : jobs.entrySet()) {
-                if (entry.getKey().equals(messageJobId) || entry.getValue().status() == JobStatus.DONE) {
-                    visibleJobIds.add(entry.getKey());
-                }
-                if (entry.getKey().equals(messageJobId)) {
-                    break;
-                }
-            }
-            return messages(sessionId).stream()
-                    .filter(message -> message.messageJobId().filter(visibleJobIds::contains).isPresent())
-                    .toList();
-        }
-
-        @Override
-        public OptionalInt reserveModelCall(MessageWorkClaim claim, Instant now) {
+        public OptionalInt reserveModelCall(MessageWorkClaim claim, int maxModelCalls, Instant now) {
             Job job = jobs.get(claim.messageJobId());
+            if (job.modelCallCount() >= maxModelCalls) {
+                return OptionalInt.empty();
+            }
             Job reserved = job.withCalls(job.modelCallCount() + 1);
             jobs.put(claim.messageJobId(), reserved);
             return OptionalInt.of(reserved.modelCallCount());
-        }
-
-        @Override
-        public ToolMessage appendTool(
-                MessageWorkClaim claim,
-                ResultId resultId,
-                String modelCallId,
-                String modelContext,
-                ToolData data,
-                Instant createdAt) {
-            List<SessionMessage> history = messages.get(claim.sessionId());
-            ToolMessage message = new ToolMessage(claim.sessionId(), sequence(history), Optional.of(claim.messageJobId()), createdAt,
-                    MessageRole.TOOL, resultId, modelCallId, modelContext, data.toolName(), data.toolVersion(), data.canonicalArguments(), data.repositoryId(),
-                    data.revision(), data.resultJson());
-            history.add(message);
-            results.put(resultId, new ResultProjection(resultId, claim.sessionId(), data.toolName(), data.toolVersion(), data.canonicalArguments(),
-                    data.repositoryId(), data.revision(), data.resultJson()));
-            return message;
         }
 
         @Override
@@ -292,41 +257,14 @@ class ConversationAcceptanceTest {
             }
             if (batch.jobUpdate() == JobUpdate.COMPLETE) {
                 Job job = jobs.get(claim.messageJobId());
-                jobs.put(claim.messageJobId(), new Job(job.sessionId(), JobStatus.DONE, job.retryCount(), job.modelCallCount(),
-                        history.stream()
-                                .filter(AssistantMessage.class::isInstance)
-                                .filter(message -> message.messageJobId().filter(claim.messageJobId()::equals).isPresent())
-                                .map(SessionMessage::sequence)
-                                .reduce((first, second) -> second)));
+                jobs.put(claim.messageJobId(), new Job(job.sessionId(), JobStatus.DONE, job.retryCount(), job.modelCallCount()));
             }
-        }
-
-        @Override
-        public FeedbackMessage appendFeedback(MessageWorkClaim claim, String code, String message, boolean terminal, Optional<String> modelCallId,
-                                               Optional<String> toolName, Optional<String> rejectedArguments,
-                                               Optional<String> modelContext, Instant createdAt) {
-            List<SessionMessage> history = messages.get(claim.sessionId());
-            FeedbackMessage feedback = new FeedbackMessage(claim.sessionId(), sequence(history), Optional.of(claim.messageJobId()), createdAt,
-                    MessageRole.FEEDBACK, code, message, terminal, modelCallId, toolName, rejectedArguments, modelContext);
-            history.add(feedback);
-            return feedback;
-        }
-
-        @Override
-        public AssistantMessage appendAssistant(MessageWorkClaim claim, String message, Instant createdAt) {
-            List<SessionMessage> history = messages.get(claim.sessionId());
-            AssistantMessage assistant = new AssistantMessage(claim.sessionId(), sequence(history), Optional.of(claim.messageJobId()), createdAt,
-                    MessageRole.ASSISTANT, message);
-            history.add(assistant);
-            Job job = jobs.get(claim.messageJobId());
-            jobs.put(claim.messageJobId(), new Job(job.sessionId(), JobStatus.DONE, job.retryCount(), job.modelCallCount(), Optional.of(assistant.sequence())));
-            return assistant;
         }
 
         @Override
         public boolean scheduleRetry(MessageWorkClaim claim, java.time.Duration retryDelay) {
             Job job = jobs.get(claim.messageJobId());
-            jobs.put(claim.messageJobId(), new Job(job.sessionId(), JobStatus.RETRY, job.retryCount() + 1, job.modelCallCount(), job.replySequence()));
+            jobs.put(claim.messageJobId(), new Job(job.sessionId(), JobStatus.RETRY, job.retryCount() + 1, job.modelCallCount()));
             return true;
         }
 
@@ -334,26 +272,20 @@ class ConversationAcceptanceTest {
         public Optional<MessageJobProjection> readJob(MessageJobId messageJobId) {
             Job job = jobs.get(messageJobId);
             return Optional.ofNullable(job).map(value -> new MessageJobProjection(messageJobId, value.sessionId(), value.status(),
-                    value.retryCount(), value.modelCallCount(), value.replySequence()));
-        }
-
-        @Override
-        public Optional<ResultProjection> readResult(ResultId resultId) {
-            return Optional.ofNullable(results.get(resultId));
+                    value.retryCount(), value.modelCallCount()));
         }
 
         private static SessionSequence sequence(List<SessionMessage> history) {
             return new SessionSequence(history.size() + 1L);
         }
 
-        private record Job(SessionId sessionId, JobStatus status, int retryCount, int modelCallCount,
-                           Optional<SessionSequence> replySequence) {
+        private record Job(SessionId sessionId, JobStatus status, int retryCount, int modelCallCount) {
             private Job withStatus(JobStatus nextStatus) {
-                return new Job(sessionId, nextStatus, retryCount, modelCallCount, replySequence);
+                return new Job(sessionId, nextStatus, retryCount, modelCallCount);
             }
 
             private Job withCalls(int calls) {
-                return new Job(sessionId, status, retryCount, calls, replySequence);
+                return new Job(sessionId, status, retryCount, calls);
             }
         }
     }

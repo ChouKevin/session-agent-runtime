@@ -1,16 +1,14 @@
 package com.java.system.sessionagent.web;
 
+import com.fasterxml.jackson.annotation.JsonProperty;
 import com.java.system.sessionagent.conversation.domain.AssistantMessage;
-import com.java.system.sessionagent.conversation.domain.FeedbackMessage;
+import com.java.system.sessionagent.conversation.domain.RuntimeMessage;
 import com.java.system.sessionagent.conversation.domain.SessionMessage;
-import com.java.system.sessionagent.conversation.domain.ToolMessage;
+import com.java.system.sessionagent.conversation.domain.ToolObservation;
 import com.java.system.sessionagent.conversation.domain.UserMessage;
-import com.java.system.sessionagent.conversation.port.in.ConversationResultView;
 import com.java.system.sessionagent.conversation.port.in.MessageJobView;
 
 import java.time.Instant;
-import java.util.List;
-import java.util.Optional;
 
 public final class MessageResponses {
 
@@ -25,81 +23,59 @@ public final class MessageResponses {
             String sessionId,
             String status,
             int retryCount,
-            int modelCallCount,
-            Optional<Long> replySequence) {
+            int modelCallCount) {
         static MessageJobResponse from(MessageJobView view) {
             return new MessageJobResponse(view.messageJobId(), view.sessionId(), view.status().name(), view.retryCount(),
-                    view.modelCallCount(), view.replySequence().isPresent() ? Optional.of(view.replySequence().getAsLong()) : Optional.empty());
+                    view.modelCallCount());
         }
     }
 
-    public record SessionMessageResponse(
-            long sequence,
-            Instant createdAt,
-            String role,
-            Optional<String> messageJobId,
-            Optional<String> participantId,
-            Optional<String> message,
-            Optional<String> resultId,
-            Optional<String> toolName,
-            Optional<String> toolVersion,
-            Optional<String> repositoryId,
-            Optional<String> revision,
-            Optional<String> feedbackCode,
-            Optional<Boolean> terminal,
-            Optional<String> rejectedArguments) {
+    public sealed interface SessionMessageResponse permits UserResponse, ToolResponse, AssistantResponse, RuntimeResponse {
+
+        long sequence();
+
+        Instant createdAt();
+
+        @JsonProperty("type")
+        String type();
+
+        String messageJobId();
+
         static SessionMessageResponse from(SessionMessage message) {
+            String messageJobId = message.messageJobId().map(value -> value.value()).orElse(null);
             if (message instanceof UserMessage user) {
-                return base(message, Optional.of(user.participantId()), Optional.of(user.message()), Optional.empty(),
-                        Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(),
-                        Optional.empty());
+                return new UserResponse(user.sequence().value(), user.createdAt(), messageJobId, user.participantId(), user.message());
+            }
+            if (message instanceof ToolObservation tool) {
+                return new ToolResponse(tool.sequence().value(), tool.createdAt(), messageJobId, tool.observationId().value(),
+                        tool.toolName(), tool.input(), tool.output());
             }
             if (message instanceof AssistantMessage assistant) {
-                return base(message, Optional.empty(), Optional.of(assistant.message()), Optional.empty(), Optional.empty(),
-                        Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty());
+                return new AssistantResponse(assistant.sequence().value(), assistant.createdAt(), messageJobId, assistant.message());
             }
-            if (message instanceof ToolMessage tool) {
-                return base(message, Optional.empty(), Optional.empty(), Optional.of(tool.resultId().value()),
-                        Optional.of(tool.toolName()), Optional.of(tool.toolVersion()), tool.repositoryId(), tool.revision(),
-                        Optional.empty(), Optional.empty(), Optional.empty());
-            }
-            FeedbackMessage feedback = (FeedbackMessage) message;
-            return base(message, Optional.empty(), Optional.of(feedback.message()), Optional.empty(), feedback.toolName(),
-                    Optional.empty(), Optional.empty(), Optional.empty(), Optional.of(feedback.code()), Optional.of(feedback.terminal()),
-                    feedback.rejectedArguments());
-        }
-
-        private static SessionMessageResponse base(
-                SessionMessage message,
-                Optional<String> participantId,
-                Optional<String> content,
-                Optional<String> resultId,
-                Optional<String> toolName,
-                Optional<String> toolVersion,
-                Optional<String> repositoryId,
-                Optional<String> revision,
-                Optional<String> feedbackCode,
-                Optional<Boolean> terminal,
-                Optional<String> rejectedArguments) {
-            return new SessionMessageResponse(message.sequence().value(), message.createdAt(), message.role().name(),
-                    message.messageJobId().map(jobId -> jobId.value()), participantId, content, resultId, toolName, toolVersion,
-                    repositoryId, revision, feedbackCode, terminal, rejectedArguments);
+            RuntimeMessage runtime = (RuntimeMessage) message;
+            return new RuntimeResponse(runtime.sequence().value(), runtime.createdAt(), messageJobId, runtime.code(), runtime.message());
         }
     }
 
-    public record ResultResponse(
-            String resultId,
-            String sessionId,
-            String toolName,
-            String toolVersion,
-            String canonicalArguments,
-            Optional<String> repositoryId,
-            Optional<String> revision,
-            String resultJson) {
-        static ResultResponse from(ConversationResultView view) {
-            return new ResultResponse(view.resultId(), view.sessionId(), view.toolName(), view.toolVersion(), view.canonicalArguments(),
-                    view.repositoryId(), view.revision(), view.resultJson());
-        }
+    public record UserResponse(long sequence, Instant createdAt, String messageJobId, String participantId, String message)
+            implements SessionMessageResponse {
+        @Override public String type() { return "USER"; }
+    }
+
+    public record ToolResponse(long sequence, Instant createdAt, String messageJobId, String observationId, String toolName,
+                               String input, String output) implements SessionMessageResponse {
+        @Override public String type() { return "TOOL"; }
+    }
+
+    public record AssistantResponse(long sequence, Instant createdAt, String messageJobId, String message)
+            implements SessionMessageResponse {
+        @Override public String type() { return "ASSISTANT"; }
+    }
+
+    public record RuntimeResponse(long sequence, Instant createdAt, String messageJobId, String code, String message)
+            implements SessionMessageResponse {
+        @Override public String type() { return "RUNTIME"; }
     }
 
     public record ErrorResponse(String code) {

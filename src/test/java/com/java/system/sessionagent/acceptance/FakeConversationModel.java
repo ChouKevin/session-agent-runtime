@@ -48,7 +48,7 @@ final class FakeConversationModel implements ConversationModel {
         }
         String text = question.message().toLowerCase(java.util.Locale.ROOT);
         boolean invalidRepositoryFailure = toolObservations(jobHistory)
-                .anyMatch(tool -> tool.output().contains("Code: TOOL_REPOSITORY_NOT_FOUND"));
+                .anyMatch(tool -> tool.output().contains("Code: SEMANTIC_REPOSITORY_NOT_FOUND"));
         if (text.contains("invalid repository") && !invalidRepositoryFailure) {
             return tool(LIST_ENTRY_POINTS, "{\"repositoryId\":\"missing-service\",\"revision\":\"missing-revision\"}");
         }
