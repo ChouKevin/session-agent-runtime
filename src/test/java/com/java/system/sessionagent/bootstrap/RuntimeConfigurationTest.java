@@ -31,6 +31,9 @@ class RuntimeConfigurationTest {
 
         assertThat(configuration).contains("server:\n  address: 127.0.0.1");
         assertThat(configuration).contains("response-timeout: ${SEMANTIC_RESPONSE_TIMEOUT:120s}");
+        assertThat(configuration).contains("max-model-calls-per-message: ${SESSION_AGENT_MAX_MODEL_CALLS_PER_MESSAGE:12}");
+        assertThat(configuration).contains("max-attempts: 1");
+        assertThat(configuration).contains("include-thoughts: false");
     }
 
     @Test
@@ -40,15 +43,16 @@ class RuntimeConfigurationTest {
 
         WorkerProperties workerProperties = configuration.workerProperties(new RuntimeProperties(
                 semanticProperties("http://localhost:8080"),
-                new RuntimeProperties.Model("gemini-3.1-flash-lite"), worker));
+                new RuntimeProperties.Model(12), worker));
         MessageJobRetryPolicy retryPolicy = configuration.messageJobRetryPolicy(new RuntimeProperties(
                 semanticProperties("http://localhost:8080"),
-                new RuntimeProperties.Model("gemini-3.1-flash-lite"), worker));
+                new RuntimeProperties.Model(12), worker));
 
         assertThat(workerProperties.claimDuration()).isEqualTo(Duration.ofSeconds(30));
         assertThat(workerProperties.renewalInterval()).isEqualTo(Duration.ofSeconds(10));
         assertThat(retryPolicy.transientRetries()).isEqualTo(3);
         assertThat(retryPolicy.maximumBackoff()).isEqualTo(Duration.ofSeconds(60));
+        assertThat(new RuntimeProperties.Model(12).maxModelCallsPerMessage()).isEqualTo(12);
     }
 
     @Test
@@ -60,7 +64,7 @@ class RuntimeConfigurationTest {
             RuntimeConfiguration configuration = new RuntimeConfiguration();
             RuntimeProperties properties = new RuntimeProperties(
                     new RuntimeProperties.Semantic("http://127.0.0.1:" + server.getAddress().getPort(), "configured-token", Duration.ofSeconds(1), Duration.ofSeconds(1)),
-                    new RuntimeProperties.Model("gemini-3.1-flash-lite"),
+                    new RuntimeProperties.Model(12),
                     new RuntimeProperties.Worker(Duration.ofSeconds(1), Duration.ofSeconds(30), 3, Duration.ofSeconds(60)));
             RestClient client = configuration.semanticRestClient(properties, io.micrometer.observation.ObservationRegistry.NOOP);
 
@@ -101,7 +105,7 @@ class RuntimeConfigurationTest {
             RuntimeConfiguration configuration = new RuntimeConfiguration();
             RuntimeProperties properties = new RuntimeProperties(
                     new RuntimeProperties.Semantic("http://127.0.0.1:" + server.getAddress().getPort(), "configured-token", Duration.ofSeconds(1), Duration.ofMillis(50)),
-                    new RuntimeProperties.Model("gemini-3.1-flash-lite"),
+                    new RuntimeProperties.Model(12),
                     new RuntimeProperties.Worker(Duration.ofSeconds(1), Duration.ofSeconds(30), 3, Duration.ofSeconds(60)));
             RestClient restClient = configuration.semanticRestClient(
                     properties, io.micrometer.observation.ObservationRegistry.NOOP);

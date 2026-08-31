@@ -73,7 +73,7 @@ class ApplicationStartupTest {
             assertThat(context.getBeansOfType(ConversationStore.class)).hasSize(1);
             assertThat(context).hasSingleBean(ModelCallRecorder.class);
             assertThat(context.getBean(ModelCallRecorder.class)).isInstanceOf(PostgresModelCallRecorder.class);
-            assertThat(context.getBeansOfType(com.java.system.sessionagent.model.GoogleConversationModel.class)).hasSize(1);
+            assertThat(context.getBeansOfType(com.java.system.sessionagent.model.SpringAiConversationModel.class)).hasSize(1);
             assertThat(context.getBeansOfType(com.java.system.sessionagent.conversation.application.MessageJobService.class)).hasSize(1);
             assertThat(context.getBeansOfType(com.java.system.sessionagent.worker.MessageJobWorker.class)).hasSize(1);
         });
@@ -128,44 +128,13 @@ class ApplicationStartupTest {
         });
     }
 
-    @Test
-    void appliesTheBoundRuntimeModelNameToEachGoogleRequestWhilePreservingProviderOptions() {
-        contextRunner.withAllowBeanDefinitionOverriding(true)
-                .withUserConfiguration(RecordingGoogleChatModelDependency.class)
-                .withPropertyValues("session-agent.model.name=gemini-3.1-flash-lite")
-                .run(context -> {
-                    assertThat(context).hasNotFailed();
-                    GoogleConversationModel model = context.getBean(GoogleConversationModel.class);
-                    RecordingGoogleChatModel chatModel = context.getBean(RecordingGoogleChatModel.class);
-                    ToolDefinition definition = new ToolDefinition(new ToolName("catalog"), "v1", "catalog",
-                            "{\"type\":\"object\"}", ToolKind.CATALOG);
-                    DirectToolRegistry registry = new DirectToolRegistry(List.of(new ToolRegistration<>(definition, Object.class,
-                            ignored -> new ToolResult(Optional.empty(), Optional.empty(), "{}"))));
-
-                    ModelDecision decision = model.plan(new ModelRequest(List.of(new UserMessage(new SessionId("session-1"),
-                            new SessionSequence(1), Optional.empty(), Instant.parse("2026-08-16T00:00:00Z"), MessageRole.USER,
-                            "alice", "question")), registry.snapshot(), new com.java.system.sessionagent.conversation.domain.ModelCallContext(
-                                    new SessionId("session-1"), new com.java.system.sessionagent.conversation.domain.MessageJobId("job-1"), 1)), usage -> { });
-
-                    assertThat(decision).isInstanceOf(ModelDecision.UseTool.class);
-                    assertThat(chatModel.prompt.getOptions()).isInstanceOf(GoogleGenAiChatOptions.class);
-                    GoogleGenAiChatOptions options = (GoogleGenAiChatOptions) chatModel.prompt.getOptions();
-                    assertThat(options.getModel()).isEqualTo("gemini-3.1-flash-lite");
-                    assertThat(options.getMaxOutputTokens()).isEqualTo(19);
-                    assertThat(options.getIncludeThoughts()).isTrue();
-                    assertThat(options.getIncludeServerSideToolInvocations()).isFalse();
-                    assertThat(options.getToolCallbacks()).extracting(callback -> callback.getToolDefinition().name())
-                            .containsExactly("catalog");
-                });
-    }
-
     @ParameterizedTest
     @ValueSource(strings = {
             "session-agent.semantic.base-url= ",
             "session-agent.semantic.api-token= ",
             "session-agent.semantic.connect-timeout=0s",
             "session-agent.semantic.response-timeout=-1s",
-            "session-agent.model.name= ",
+            "session-agent.model.max-model-calls-per-message=0",
             "session-agent.worker.lock-duration=0s",
             "spring.datasource.url= ",
             "spring.datasource.password= "
@@ -231,34 +200,4 @@ class ApplicationStartupTest {
         }
     }
 
-    @Configuration(proxyBeanMethods = false)
-    static class RecordingGoogleChatModelDependency {
-        @Bean
-        RecordingGoogleChatModel chatModel() {
-            return new RecordingGoogleChatModel();
-        }
-    }
-
-    static final class RecordingGoogleChatModel implements ChatModel {
-        private Prompt prompt;
-
-        @Override
-        public ChatResponse call(Prompt prompt) {
-            this.prompt = prompt;
-            return new ChatResponse(List.of(new Generation(AssistantMessage.builder()
-                    .properties(Map.of("thoughtSignatures", List.of(new byte[]{1, 2, 3, 4})))
-                    .toolCalls(List.of(new AssistantMessage.ToolCall(
-                            "catalog-call", "function", "catalog", "{}")))
-                    .build())));
-        }
-
-        @Override
-        public GoogleGenAiChatOptions getOptions() {
-            return GoogleGenAiChatOptions.builder()
-                    .model(GoogleGenAiChatModel.ChatModel.GEMINI_2_5_FLASH)
-                    .maxOutputTokens(19)
-                    .includeServerSideToolInvocations(true)
-                    .build();
-        }
-    }
 }

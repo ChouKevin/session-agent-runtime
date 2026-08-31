@@ -6,11 +6,10 @@ import com.java.system.sessionagent.conversation.application.MessageJobRetryPoli
 import com.java.system.sessionagent.conversation.application.MessageJobService;
 import com.java.system.sessionagent.conversation.port.in.ConversationQueryPort;
 import com.java.system.sessionagent.conversation.port.in.MessageIntakePort;
-import com.java.system.sessionagent.conversation.port.out.ConversationModel;
 import com.java.system.sessionagent.conversation.port.out.ConversationStore;
 import com.java.system.sessionagent.conversation.port.out.ConversationTelemetry;
 import com.java.system.sessionagent.conversation.port.out.ModelCallRecorder;
-import com.java.system.sessionagent.model.GoogleConversationModel;
+import com.java.system.sessionagent.model.SpringAiConversationModel;
 import com.java.system.sessionagent.model.PromptResource;
 import com.java.system.sessionagent.semantic.http.SemanticRepositoryClient;
 import com.java.system.sessionagent.semantic.http.SemanticSourceClient;
@@ -99,15 +98,11 @@ public class RuntimeConfiguration {
     }
 
     @Bean
-    GoogleConversationModel conversationModel(
+    SpringAiConversationModel conversationModel(
             ChatModel chatModel,
             PromptResource promptResource,
-            ConversationTelemetry conversationTelemetry,
-            ModelCallRecorder modelCallRecorder,
-            Clock runtimeClock,
-            RuntimeProperties properties) {
-        return new GoogleConversationModel(chatModel, promptResource, conversationTelemetry, modelCallRecorder,
-                runtimeClock, properties.model().name());
+            ConversationTelemetry conversationTelemetry) {
+        return new SpringAiConversationModel(chatModel, promptResource, conversationTelemetry);
     }
 
     @Bean
@@ -143,13 +138,14 @@ public class RuntimeConfiguration {
     @Bean
     MessageJobService messageJobService(
             ConversationStore conversationStore,
-            ConversationModel conversationModel,
+            SpringAiConversationModel conversationModel,
             DirectToolRegistry directToolRegistry,
             Clock runtimeClock,
+            RuntimeProperties properties,
             MessageJobRetryPolicy messageJobRetryPolicy,
             ConversationTelemetry conversationTelemetry) {
-        return new MessageJobService(conversationStore, conversationModel, directToolRegistry,
-                runtimeClock, messageJobRetryPolicy, conversationTelemetry);
+        return new MessageJobService(conversationStore, conversationModel, directToolRegistry, runtimeClock,
+                properties.model().maxModelCallsPerMessage(), messageJobRetryPolicy, conversationTelemetry);
     }
 
     @Bean

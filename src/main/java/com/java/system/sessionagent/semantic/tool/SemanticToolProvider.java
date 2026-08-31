@@ -112,7 +112,8 @@ public final class SemanticToolProvider {
                         "Find callers of the flat packageName, className, sourceFile, methodName, and parameterTypes at depth 1 or 2.",
                         IncomingCallGraphInput.class, IncomingCallGraphInput::repositoryId, client::incomingCallGraph),
                 source(SemanticToolName.SEARCH_CODE_FACTS,
-                        "Search code-derived facts. Copy repositoryId and revision from prior evidence; omit unknown optional filters rather than guessing.",
+                        "Search code-derived facts. Copy repositoryId and revision from prior evidence; omit unknown optional filters rather than guessing. "
+                                + "An empty result supports a codebase-limited absence finding only when totalCount is 0, hasMore is false, and coverage.issues is empty.",
                         SearchCodeFactsInput.class, SearchCodeFactsInput::repositoryId, client::searchCodeFacts),
                 source(SemanticToolName.GET_CODE_FACT,
                         "Get one exact factId copied from a prior code-fact search, using the same repositoryId and revision from prior evidence.",

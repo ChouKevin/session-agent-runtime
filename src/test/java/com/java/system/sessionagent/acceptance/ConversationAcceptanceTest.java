@@ -11,8 +11,8 @@ import com.java.system.sessionagent.conversation.domain.MessageReceipt;
 import com.java.system.sessionagent.conversation.domain.MessageRole;
 import com.java.system.sessionagent.conversation.domain.MessageWorkClaim;
 import com.java.system.sessionagent.conversation.domain.ModelRequest;
-import com.java.system.sessionagent.conversation.domain.ReplyRequest;
 import com.java.system.sessionagent.conversation.domain.ResultId;
+import com.java.system.sessionagent.conversation.domain.RuntimeMessage;
 import com.java.system.sessionagent.conversation.domain.SessionId;
 import com.java.system.sessionagent.conversation.domain.SessionMessage;
 import com.java.system.sessionagent.conversation.domain.SessionSequence;
@@ -167,14 +167,6 @@ class ConversationAcceptanceTest {
             return model.requests();
         }
 
-        List<ModelRequest> planRequests() {
-            return model.planRequests();
-        }
-
-        List<ReplyRequest> replyRequests() {
-            return model.replyRequests();
-        }
-
         ToolObservation latestSourceTool(MessageReceipt receipt) {
             return store.toolObservations(receipt.messageJobId()).stream()
                     .filter(message -> message.toolName().startsWith("codebase_"))
@@ -290,7 +282,22 @@ class ConversationAcceptanceTest {
                 if (data instanceof ToolObservationData observation) {
                     history.add(new ToolObservation(claim.sessionId(), sequence(history), Optional.of(claim.messageJobId()), createdAt,
                             MessageRole.TOOL, observation.observationId(), observation.toolName(), observation.input(), observation.output()));
+                } else if (data instanceof AssistantData assistant) {
+                    history.add(new AssistantMessage(claim.sessionId(), sequence(history), Optional.of(claim.messageJobId()), createdAt,
+                            MessageRole.ASSISTANT, assistant.message()));
+                } else if (data instanceof RuntimeData runtime) {
+                    history.add(new RuntimeMessage(claim.sessionId(), sequence(history), Optional.of(claim.messageJobId()), createdAt,
+                            MessageRole.RUNTIME, runtime.code(), runtime.message()));
                 }
+            }
+            if (batch.jobUpdate() == JobUpdate.COMPLETE) {
+                Job job = jobs.get(claim.messageJobId());
+                jobs.put(claim.messageJobId(), new Job(job.sessionId(), JobStatus.DONE, job.retryCount(), job.modelCallCount(),
+                        history.stream()
+                                .filter(AssistantMessage.class::isInstance)
+                                .filter(message -> message.messageJobId().filter(claim.messageJobId()::equals).isPresent())
+                                .map(SessionMessage::sequence)
+                                .reduce((first, second) -> second)));
             }
         }
 

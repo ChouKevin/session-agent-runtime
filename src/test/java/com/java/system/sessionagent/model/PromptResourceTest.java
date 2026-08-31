@@ -19,24 +19,23 @@ class PromptResourceTest {
     }
 
     @Test
-    void defines_only_cross_tool_evidence_and_reply_rules() {
+    void defines_provider_neutral_multi_tool_execution_rules() {
         PromptResource promptResource = new PromptResource();
 
         assertThat(promptResource.content())
-                .contains("Follow each tool's")
+                .contains("Follow each tool")
                 .contains("description and input schema")
-                .contains("Make only one tool call")
-                .contains("available only at runtime")
-                .contains("totalCount:0")
-                .contains("hasMore:false")
-                .contains("coverage.issues")
-                .contains("codebase-limited absence finding")
-                .contains("Do not turn that result into a product decision")
-                .contains("Before making a cross-repository conclusion")
-                .contains("absence of a call in one method proves only the inspected code path")
-                .contains("downstream or runtime outcome")
+                .contains("one or more tools")
+                .contains("run sequentially in the order")
+                .contains("One tool failure does not cancel")
+                .contains("must be independent")
+                .contains("external-service values")
+                .doesNotContain("one tool call per")
+                .doesNotContainIgnoringCase("planning")
+                .doesNotContainIgnoringCase("final reply")
                 .doesNotContain("`list_repositories`")
                 .doesNotContain("`codebase_search_code_facts`")
+                .doesNotContain("totalCount:0")
                 .doesNotContain("REVISION_OUTDATED")
                 .doesNotContainIgnoringCase("citation")
                 .doesNotContainIgnoringCase("citeable")

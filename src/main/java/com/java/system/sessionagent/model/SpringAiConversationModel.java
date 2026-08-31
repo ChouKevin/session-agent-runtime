@@ -50,6 +50,13 @@ public final class SpringAiConversationModel implements ConversationModel {
                 new NoOpConversationTelemetry());
     }
 
+    public SpringAiConversationModel(
+            ChatModel chatModel,
+            PromptResource promptResource,
+            ConversationTelemetry telemetry) {
+        this(chatModel, promptResource, new SpringAiToolCallbackFactory(), new ConversationHistoryProjector(), telemetry);
+    }
+
     SpringAiConversationModel(
             ChatModel chatModel,
             PromptResource promptResource,

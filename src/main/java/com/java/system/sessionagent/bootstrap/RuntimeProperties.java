@@ -2,6 +2,7 @@ package com.java.system.sessionagent.bootstrap;
 
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.Positive;
 import jakarta.validation.constraints.PositiveOrZero;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.boot.context.properties.bind.DefaultValue;
@@ -38,10 +39,7 @@ public record RuntimeProperties(
         }
     }
 
-    public record Model(@NotBlank @DefaultValue("gemini-3.1-flash-lite") String name) {
-        public Model {
-            Assert.hasText(name, "Google model name must not be blank");
-        }
+    public record Model(@Positive @DefaultValue("12") int maxModelCallsPerMessage) {
     }
 
     public record Worker(

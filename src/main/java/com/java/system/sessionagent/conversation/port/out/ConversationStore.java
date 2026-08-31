@@ -36,6 +36,10 @@ public interface ConversationStore {
 
     OptionalInt reserveModelCall(MessageWorkClaim claim, Instant now);
 
+    default OptionalInt reserveModelCall(MessageWorkClaim claim, int maxModelCalls, Instant now) {
+        return reserveModelCall(claim, now);
+    }
+
     ToolMessage appendTool(
             MessageWorkClaim claim,
             ResultId resultId,

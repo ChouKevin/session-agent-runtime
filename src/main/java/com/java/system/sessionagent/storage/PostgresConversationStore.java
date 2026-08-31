@@ -373,7 +373,13 @@ public final class PostgresConversationStore implements ConversationStore {
 
     @Override
     public OptionalInt reserveModelCall(MessageWorkClaim claim, Instant now) {
+        return reserveModelCall(claim, Integer.MAX_VALUE, now);
+    }
+
+    @Override
+    public OptionalInt reserveModelCall(MessageWorkClaim claim, int maxModelCalls, Instant now) {
         MessageWorkClaim requiredClaim = Objects.requireNonNull(claim, "Message work claim must not be null");
+        Assert.isTrue(maxModelCalls > 0, "Maximum model calls must be positive");
         Objects.requireNonNull(now, "Current time must not be null");
         try {
             List<Integer> ordinals = jdbcTemplate.query("""
@@ -385,10 +391,10 @@ public final class PostgresConversationStore implements ConversationStore {
                       and worker_id = ?
                       and claim_number = ?
                       and locked_until > clock_timestamp()
-                      and model_calls < 12
+                      and model_calls < ?
                     returning model_calls
                     """, (resultSet, rowNumber) -> resultSet.getInt("model_calls"), messageJobId(requiredClaim),
-                    sessionId(requiredClaim), requiredClaim.workerId(), requiredClaim.claimNumber());
+                    sessionId(requiredClaim), requiredClaim.workerId(), requiredClaim.claimNumber(), maxModelCalls);
             return ordinals.stream().findFirst().map(OptionalInt::of).orElseGet(OptionalInt::empty);
         } catch (RuntimeException exception) {
             throw translate(exception);

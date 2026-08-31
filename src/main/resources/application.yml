@@ -7,7 +7,7 @@ session-agent:
     connect-timeout: ${SEMANTIC_CONNECT_TIMEOUT:2s}
     response-timeout: ${SEMANTIC_RESPONSE_TIMEOUT:120s}
   model:
-    name: ${GOOGLE_GENAI_MODEL:gemini-3.1-flash-lite}
+    max-model-calls-per-message: ${SESSION_AGENT_MAX_MODEL_CALLS_PER_MESSAGE:12}
   worker:
     poll-delay: 1s
     lock-duration: 30s
@@ -22,6 +22,8 @@ spring:
     username: ${SESSION_AGENT_DATASOURCE_USERNAME:session_agent}
     password: ${SESSION_AGENT_DATASOURCE_PASSWORD}
   ai:
+    retry:
+      max-attempts: 1
     chat:
       client:
         tool-calling:
@@ -31,3 +33,4 @@ spring:
         chat:
           options:
             model: ${GOOGLE_GENAI_MODEL:gemini-3.1-flash-lite}
+            include-thoughts: false

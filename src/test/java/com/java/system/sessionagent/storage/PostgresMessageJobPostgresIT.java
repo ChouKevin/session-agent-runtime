@@ -221,17 +221,17 @@ class PostgresMessageJobPostgresIT {
     }
 
     @Test
-    void reservesExactlyTwelveModelCallsUnderTheCurrentFence() {
+    void reservesConfiguredModelCallsUnderTheCurrentFence() {
         ConversationStore store = newStore();
         receive(store, "thread-1", "source-1");
         MessageWorkClaim claim = store.claimNext("worker-1", Duration.ofSeconds(30)).orElseThrow();
 
         List<Integer> reservations = java.util.stream.IntStream.range(0, 12)
-                .mapToObj(index -> store.reserveModelCall(claim, NOW.plusSeconds(index)).orElseThrow())
+                .mapToObj(index -> store.reserveModelCall(claim, 12, NOW.plusSeconds(index)).orElseThrow())
                 .toList();
 
         assertThat(reservations).containsExactly(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12);
-        assertThat(store.reserveModelCall(claim, NOW.plusSeconds(13))).isEqualTo(OptionalInt.empty());
+        assertThat(store.reserveModelCall(claim, 12, NOW.plusSeconds(13))).isEqualTo(OptionalInt.empty());
     }
 
     @Test
@@ -240,7 +240,7 @@ class PostgresMessageJobPostgresIT {
         MessageReceipt receipt = receive(store, "thread-1", "source-1");
         MessageWorkClaim claim = store.claimNext("worker-1", Duration.ofSeconds(30)).orElseThrow();
         for (int ordinal = 1; ordinal <= 11; ordinal++) {
-            store.reserveModelCall(claim, NOW).orElseThrow();
+            store.reserveModelCall(claim, 12, NOW).orElseThrow();
         }
         CountDownLatch ready = new CountDownLatch(2);
         CountDownLatch start = new CountDownLatch(1);
@@ -249,7 +249,7 @@ class PostgresMessageJobPostgresIT {
             Callable<OptionalInt> reserve = () -> {
                 ready.countDown();
                 start.await();
-                return store.reserveModelCall(claim, NOW);
+                return store.reserveModelCall(claim, 12, NOW);
             };
             Future<OptionalInt> firstReservation = executor.submit(reserve);
             Future<OptionalInt> secondReservation = executor.submit(reserve);

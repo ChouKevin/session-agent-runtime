@@ -1,7 +1,6 @@
 package com.java.system.sessionagent.model;
 
 import com.java.system.sessionagent.conversation.domain.AssistantMessage;
-import com.java.system.sessionagent.conversation.domain.FeedbackMessage;
 import com.java.system.sessionagent.conversation.domain.MessageJobId;
 import com.java.system.sessionagent.conversation.domain.MessageRole;
 import com.java.system.sessionagent.conversation.domain.ObservationId;
@@ -54,31 +53,6 @@ class ConversationHistoryProjectorTest {
                 Message: Return one tool call or one reply.
                 End runtime message
                 """);
-    }
-
-    @Test
-    void projects_nonterminal_legacy_feedback_until_the_google_runtime_cutover() {
-        ConversationHistoryProjector projector = new ConversationHistoryProjector();
-        FeedbackMessage feedback = new FeedbackMessage(
-                SESSION_ID,
-                new SessionSequence(1),
-                Optional.of(JOB_ID),
-                CREATED_AT,
-                MessageRole.FEEDBACK,
-                "MODEL_OUTPUT_INVALID",
-                "Return one tool call or one reply.",
-                false,
-                Optional.empty(),
-                Optional.empty(),
-                Optional.empty(),
-                Optional.empty());
-
-        List<Message> projected = projector.project(List.of(feedback));
-
-        assertThat(projected).singleElement()
-                .isInstanceOf(org.springframework.ai.chat.messages.UserMessage.class)
-                .extracting(Message::getText)
-                .isEqualTo("Runtime feedback [MODEL_OUTPUT_INVALID]: Return one tool call or one reply.");
     }
 
     private static List<SessionMessage> history() {

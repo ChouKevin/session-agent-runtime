@@ -8,11 +8,13 @@ import com.java.system.sessionagent.conversation.domain.ModelCallPhase;
 import com.java.system.sessionagent.conversation.domain.ModelCallRecord;
 import com.java.system.sessionagent.conversation.domain.ModelRequest;
 import com.java.system.sessionagent.conversation.domain.ModelUsage;
+import com.java.system.sessionagent.conversation.domain.ObservationId;
 import com.java.system.sessionagent.conversation.domain.ReplyRequest;
 import com.java.system.sessionagent.conversation.domain.ResultId;
 import com.java.system.sessionagent.conversation.domain.SessionMessage;
 import com.java.system.sessionagent.conversation.domain.SessionId;
 import com.java.system.sessionagent.conversation.domain.SessionSequence;
+import com.java.system.sessionagent.conversation.domain.ToolObservation;
 import com.java.system.sessionagent.conversation.domain.ToolMessage;
 import com.java.system.sessionagent.conversation.domain.UserMessage;
 import com.java.system.sessionagent.conversation.domain.MessageRole;
@@ -320,13 +322,11 @@ class GoogleConversationModelTest {
         List<SessionMessage> history = List.of(
                 new UserMessage(sessionId, new SessionSequence(1), Optional.of(jobId), createdAt,
                         MessageRole.USER, "Alice", "Question"),
-                new ToolMessage(sessionId, new SessionSequence(2), Optional.of(jobId), createdAt,
-                        MessageRole.TOOL, new ResultId("catalog-result"), "catalog-call", MODEL_CONTEXT,
-                        "list_repositories", "1", "{}", Optional.empty(), Optional.empty(),
+                new ToolObservation(sessionId, new SessionSequence(2), Optional.of(jobId), createdAt,
+                        MessageRole.TOOL, new ObservationId("catalog-observation"), "list_repositories", "{}",
                         "{\"resultId\":\"catalog-result\",\"data\":{\"secret\":\"catalog-payload\"}}"),
-                new ToolMessage(sessionId, new SessionSequence(3), Optional.of(jobId), createdAt,
-                        MessageRole.TOOL, new ResultId("source-result"), "source-call", MODEL_CONTEXT,
-                        "codebase_get_method_source", "1", "{}", Optional.of("payment-service"), Optional.of("revision-1"),
+                new ToolObservation(sessionId, new SessionSequence(3), Optional.of(jobId), createdAt,
+                        MessageRole.TOOL, new ObservationId("source-observation"), "codebase_get_method_source", "{}",
                         "{\"resultId\":\"source-result\",\"data\":{\"source\":\"private-source-payload\"}}"));
 
         model.reply(new ReplyRequest(history, new ModelCallContext(sessionId, jobId, 2)), usage -> { });

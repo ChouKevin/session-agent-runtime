@@ -135,7 +135,6 @@ class ConversationDomainTest {
         assertThatThrownBy(() -> modelRequest.history().add(catalog))
                 .isInstanceOf(UnsupportedOperationException.class);
         assertThatIllegalArgumentException().isThrownBy(() -> new ModelCallContext(SESSION_ID, JOB_ID, 0));
-        assertThatIllegalArgumentException().isThrownBy(() -> new ModelCallContext(SESSION_ID, JOB_ID, 13));
         assertThatIllegalArgumentException().isThrownBy(
                 () -> toolMessage(Optional.of("payment-service"), Optional.empty()));
         assertThatIllegalArgumentException().isThrownBy(

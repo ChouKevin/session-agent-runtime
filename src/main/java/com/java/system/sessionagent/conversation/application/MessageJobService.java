@@ -1,20 +1,20 @@
 package com.java.system.sessionagent.conversation.application;
 
-import com.java.system.sessionagent.conversation.domain.MessageJobId;
 import com.java.system.sessionagent.conversation.domain.MessageWorkClaim;
 import com.java.system.sessionagent.conversation.domain.ModelCallContext;
-import com.java.system.sessionagent.conversation.domain.ModelDecision;
+import com.java.system.sessionagent.conversation.domain.ModelReply;
 import com.java.system.sessionagent.conversation.domain.ModelRequest;
 import com.java.system.sessionagent.conversation.domain.ObservationId;
-import com.java.system.sessionagent.conversation.domain.ReplyRequest;
 import com.java.system.sessionagent.conversation.domain.SessionMessage;
+import com.java.system.sessionagent.conversation.domain.ToolRequest;
 import com.java.system.sessionagent.conversation.port.in.MessageJobPort;
 import com.java.system.sessionagent.conversation.port.in.WorkGuard;
 import com.java.system.sessionagent.conversation.port.out.ConversationModel;
 import com.java.system.sessionagent.conversation.port.out.ConversationStore;
-import com.java.system.sessionagent.conversation.port.out.ConversationTelemetry;
 import com.java.system.sessionagent.conversation.port.out.ConversationStoreFailure;
+import com.java.system.sessionagent.conversation.port.out.ConversationTelemetry;
 import com.java.system.sessionagent.conversation.port.out.ModelCallFailure;
+import com.java.system.sessionagent.conversation.port.out.NoOpConversationTelemetry;
 import com.java.system.sessionagent.conversation.port.out.StaleWorkClaimException;
 import com.java.system.sessionagent.tool.application.DirectToolRegistry;
 import com.java.system.sessionagent.tool.application.ToolExecutionFailure;
@@ -27,19 +27,26 @@ import org.springframework.util.Assert;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
-import java.util.Optional;
 import java.util.Objects;
+import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.UUID;
 
 public final class MessageJobService implements MessageJobPort {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(MessageJobService.class);
-    private static final int MAX_MODEL_CALLS = 12;
+    private static final String MODEL_CALL_LIMIT_REACHED = "MODEL_CALL_LIMIT_REACHED";
+    private static final String MODEL_OUTPUT_INVALID = "MODEL_OUTPUT_INVALID";
+    private static final String MODEL_UNAVAILABLE = "MODEL_UNAVAILABLE";
+    private static final String CONTEXT_TOO_LARGE = "CONTEXT_TOO_LARGE";
+
     private final ConversationStore conversationStore;
     private final ConversationModel conversationModel;
     private final DirectToolRegistry toolRegistry;
     private final Clock clock;
+    private final int maxModelCalls;
     private final MessageJobRetryPolicy retryPolicy;
     private final ConversationTelemetry telemetry;
 
@@ -48,8 +55,8 @@ public final class MessageJobService implements MessageJobPort {
             ConversationModel conversationModel,
             DirectToolRegistry toolRegistry,
             Clock clock) {
-        this(conversationStore, conversationModel, toolRegistry, clock,
-                new MessageJobRetryPolicy(3, Duration.ofSeconds(60)), new com.java.system.sessionagent.conversation.port.out.NoOpConversationTelemetry());
+        this(conversationStore, conversationModel, toolRegistry, clock, Integer.MAX_VALUE,
+                new MessageJobRetryPolicy(3, Duration.ofSeconds(60)), new NoOpConversationTelemetry());
     }
 
     public MessageJobService(
@@ -59,10 +66,23 @@ public final class MessageJobService implements MessageJobPort {
             Clock clock,
             MessageJobRetryPolicy retryPolicy,
             ConversationTelemetry telemetry) {
+        this(conversationStore, conversationModel, toolRegistry, clock, Integer.MAX_VALUE, retryPolicy, telemetry);
+    }
+
+    public MessageJobService(
+            ConversationStore conversationStore,
+            ConversationModel conversationModel,
+            DirectToolRegistry toolRegistry,
+            Clock clock,
+            int maxModelCalls,
+            MessageJobRetryPolicy retryPolicy,
+            ConversationTelemetry telemetry) {
         this.conversationStore = Objects.requireNonNull(conversationStore, "Conversation store must not be null");
         this.conversationModel = Objects.requireNonNull(conversationModel, "Conversation model must not be null");
         this.toolRegistry = Objects.requireNonNull(toolRegistry, "Tool registry must not be null");
         this.clock = Objects.requireNonNull(clock, "Clock must not be null");
+        Assert.isTrue(maxModelCalls > 0, "Maximum model calls must be positive");
+        this.maxModelCalls = maxModelCalls;
         this.retryPolicy = Objects.requireNonNull(retryPolicy, "Message job retry policy must not be null");
         this.telemetry = Objects.requireNonNull(telemetry, "Conversation telemetry must not be null");
     }
@@ -78,216 +98,195 @@ public final class MessageJobService implements MessageJobPort {
         }
     }
 
-    private void processClaim(MessageWorkClaim claim, WorkGuard workGuard) {
-        boolean finalReplyRequested = false;
-        while (workGuard.stillOwned()) {
+    private void processClaim(MessageWorkClaim claim, WorkGuard guard) {
+        while (guard.stillOwned()) {
             List<SessionMessage> history = conversationStore.loadHistory(claim.sessionId(), claim.messageJobId());
-            OptionalIntReservation reservation = reserve(claim, workGuard);
-            if (!reservation.reserved()) {
-                appendFeedback(claim, workGuard, FeedbackCode.CALL_LIMIT_REACHED, true, ToolFeedbackDetails.empty());
+            ToolSnapshot tools = toolRegistry.snapshot();
+            ReservationState reservation = new ReservationState();
+            ModelRequest request = new ModelRequest(history, tools,
+                    new ModelCallContext(claim.sessionId(), claim.messageJobId(), 1));
+            ModelReply reply;
+            try {
+                logModelCallStarted(claim, history.size(), tools.definitions().size());
+                reply = conversationModel.respond(request, () -> reserve(claim, guard, reservation),
+                        usage -> logModelCallUsage(claim, reservation.ordinal(), usage));
+            } catch (BudgetExhausted exception) {
+                appendRuntime(claim, guard, List.of(runtime(MODEL_CALL_LIMIT_REACHED)), ConversationStore.JobUpdate.COMPLETE);
+                return;
+            } catch (ModelCallFailure failure) {
+                handleModelFailure(claim, guard, reservation, failure);
                 return;
             }
-            ModelCallContext callContext = new ModelCallContext(claim.sessionId(), claim.messageJobId(), reservation.ordinal());
-            boolean finalCall = reservation.ordinal() == MAX_MODEL_CALLS;
-            if (finalReplyRequested || finalCall) {
-                boolean keepRunning = processFinalReply(claim, workGuard, history, callContext, finalCall);
-                if (!keepRunning) {
-                    return;
-                }
-                finalReplyRequested = false;
-                continue;
+            if (!guard.stillOwned()) {
+                return;
             }
-            ToolSnapshot snapshot = toolRegistry.snapshot();
-            logModelCallStarted(claim, reservation.ordinal(), "PLAN", history.size(), snapshot.definitions().size());
-            ModelDecision decision;
-            try {
-                decision = conversationModel.plan(new ModelRequest(history, snapshot, callContext),
-                        usage -> logModelCallUsage(claim, reservation.ordinal(), usage));
-            } catch (ModelCallFailure failure) {
-                logModelCallFailed(claim, reservation.ordinal(), "PLAN", failure.kind());
-                if (!handleFailure(claim, workGuard, ConversationFailurePolicy.model(failure), ToolFeedbackDetails.empty(), "MODEL")) { return; }
-                continue;
+            int ordinal = reservation.ordinal();
+            logModelCallDecision(claim, ordinal, reply);
+            if (reply instanceof ModelReply.Text text) {
+                appendRuntime(claim, guard, List.of(new ConversationStore.AssistantData(text.message())),
+                        ConversationStore.JobUpdate.COMPLETE);
+                return;
             }
-            logModelCallDecision(claim, reservation.ordinal(), "PLAN", decision);
-            if (!workGuard.stillOwned()) { return; }
-            if (decision instanceof ModelDecision.UseTool useTool) {
-                if (!executeTool(claim, workGuard, snapshot, useTool)) { return; }
-                continue;
+            ModelReply.UseTools useTools = (ModelReply.UseTools) reply;
+            if (ordinal == maxModelCalls) {
+                List<ConversationStore.MessageData> messages = new ArrayList<>();
+                useTools.message().ifPresent(text -> messages.add(new ConversationStore.AssistantData(text)));
+                messages.add(runtime(MODEL_CALL_LIMIT_REACHED));
+                appendRuntime(claim, guard, messages, ConversationStore.JobUpdate.COMPLETE);
+                return;
             }
-            finalReplyRequested = true;
+            List<ConversationStore.MessageData> messages = toolBatch(useTools, tools);
+            if (!guard.stillOwned()) {
+                return;
+            }
+            if (!appendRuntime(claim, guard, messages, ConversationStore.JobUpdate.KEEP_WORKING)) {
+                return;
+            }
         }
     }
 
-    private boolean processFinalReply(MessageWorkClaim claim, WorkGuard workGuard, List<SessionMessage> history,
-                                      ModelCallContext callContext, boolean finalCall) {
-        logModelCallStarted(claim, callContext.ordinal(), "FINAL_REPLY", history.size(), 0);
-        String reply;
-        try {
-            reply = conversationModel.reply(new ReplyRequest(history, callContext),
-                    usage -> logModelCallUsage(claim, callContext.ordinal(), usage));
-        } catch (ModelCallFailure failure) {
-            logModelCallFailed(claim, callContext.ordinal(), "FINAL_REPLY", failure.kind());
-            if (finalCall && failure.kind() == ModelCallFailure.Kind.TRANSIENT) {
-                appendFeedback(claim, workGuard, FeedbackCode.DEPENDENCY_UNAVAILABLE, true, ToolFeedbackDetails.empty());
-                return false;
-            }
-            if (finalCall && failure.kind() == ModelCallFailure.Kind.CORRECTABLE) {
-                appendFeedback(claim, workGuard, FeedbackCode.CALL_LIMIT_REACHED, true, ToolFeedbackDetails.empty());
-                return false;
-            }
-            return handleFailure(claim, workGuard, ConversationFailurePolicy.model(failure), ToolFeedbackDetails.empty(), "MODEL");
+    private int reserve(MessageWorkClaim claim, WorkGuard guard, ReservationState state) {
+        if (!guard.stillOwned()) {
+            throw new BudgetExhausted();
         }
-        logModelCallDecision(claim, callContext.ordinal(), "FINAL_REPLY", "ASSISTANT_TEXT");
-        if (!workGuard.stillOwned()) {
+        OptionalInt reserved = conversationStore.reserveModelCall(claim, maxModelCalls, clock.instant());
+        if (reserved.isEmpty()) {
+            throw new BudgetExhausted();
+        }
+        state.setOrdinal(reserved.getAsInt());
+        return reserved.getAsInt();
+    }
+
+    private List<ConversationStore.MessageData> toolBatch(ModelReply.UseTools reply, ToolSnapshot tools) {
+        List<ConversationStore.MessageData> messages = new ArrayList<>();
+        reply.message().ifPresent(text -> messages.add(new ConversationStore.AssistantData(text)));
+        for (ToolRequest request : reply.requests()) {
+            messages.add(executeTool(tools, request));
+        }
+        return List.copyOf(messages);
+    }
+
+    private ConversationStore.ToolObservationData executeTool(ToolSnapshot tools, ToolRequest request) {
+        String output;
+        try {
+            output = toolRegistry.invoke(tools, request.toolName(), request.input());
+            telemetry.tool(request.toolName().value(), "SUCCESS", Optional.empty(), Optional.empty());
+        } catch (IllegalArgumentException failure) {
+            output = ToolFailureOutput.format(ToolExecutionFailure.invalidInput());
+            telemetry.tool(request.toolName().value(), "INVALID_INPUT", Optional.empty(), Optional.empty());
+        } catch (ToolExecutionFailure failure) {
+            output = ToolFailureOutput.format(failure);
+            telemetry.tool(request.toolName().value(), failure.kind().name(), Optional.empty(), Optional.empty());
+        }
+        return new ConversationStore.ToolObservationData(new ObservationId(UUID.randomUUID().toString()),
+                request.toolName().value(), request.input(), output);
+    }
+
+    private void handleModelFailure(
+            MessageWorkClaim claim,
+            WorkGuard guard,
+            ReservationState reservation,
+            ModelCallFailure failure) {
+        int ordinal = reservation.ordinal();
+        logModelCallFailed(claim, ordinal, failure.kind());
+        if (failure.kind() == ModelCallFailure.Kind.CORRECTABLE) {
+            ConversationStore.JobUpdate update = ordinal < maxModelCalls
+                    ? ConversationStore.JobUpdate.KEEP_WORKING : ConversationStore.JobUpdate.COMPLETE;
+            boolean appended = appendRuntime(claim, guard, List.of(runtime(MODEL_OUTPUT_INVALID)), update);
+            if (appended && update == ConversationStore.JobUpdate.KEEP_WORKING) {
+                processClaim(claim, guard);
+            }
+            return;
+        }
+        if (failure.kind() == ModelCallFailure.Kind.CONTEXT_TOO_LARGE) {
+            appendRuntime(claim, guard, List.of(runtime(CONTEXT_TOO_LARGE)), ConversationStore.JobUpdate.COMPLETE);
+            return;
+        }
+        if (failure.kind() == ModelCallFailure.Kind.TRANSIENT && ordinal < maxModelCalls && scheduleRetry(claim, guard)) {
+            return;
+        }
+        appendRuntime(claim, guard, List.of(runtime(MODEL_UNAVAILABLE)), ConversationStore.JobUpdate.COMPLETE);
+    }
+
+    private boolean scheduleRetry(MessageWorkClaim claim, WorkGuard guard) {
+        if (!guard.stillOwned()) {
+            return false;
+        }
+        Optional<ConversationStore.MessageJobProjection> job = conversationStore.readJob(claim.messageJobId());
+        if (job.isEmpty() || job.orElseThrow().retryCount() >= retryPolicy.transientRetries()) {
+            return false;
+        }
+        Duration delay = retryDelay(job.orElseThrow().retryCount());
+        boolean scheduled = conversationStore.scheduleRetry(claim, delay);
+        if (scheduled) {
+            telemetry.retry("MODEL", delay);
+        }
+        return scheduled;
+    }
+
+    private Duration retryDelay(int retryCount) {
+        if (retryCount < 0 || retryCount >= Long.SIZE - 1) {
+            return retryPolicy.maximumBackoff();
+        }
+        Duration delay = Duration.ofSeconds(1L << retryCount);
+        return delay.compareTo(retryPolicy.maximumBackoff()) > 0 ? retryPolicy.maximumBackoff() : delay;
+    }
+
+    private boolean appendRuntime(
+            MessageWorkClaim claim,
+            WorkGuard guard,
+            List<ConversationStore.MessageData> messages,
+            ConversationStore.JobUpdate update) {
+        if (!guard.stillOwned()) {
             return false;
         }
         try {
-            conversationStore.appendAssistant(claim, reply, clock.instant());
+            conversationStore.append(claim, new ConversationStore.MessageBatch(messages, update), clock.instant());
+            for (ConversationStore.MessageData message : messages) {
+                if (message instanceof ConversationStore.RuntimeData runtime) {
+                    telemetry.feedback(runtime.code());
+                }
+            }
+            return guard.stillOwned();
         } catch (StaleWorkClaimException exception) {
             return false;
         }
-        return false;
     }
 
     private void recoverStorageFailure(MessageWorkClaim claim, WorkGuard guard, ConversationStoreFailure failure) {
         if (!guard.stillOwned()) {
             return;
         }
-        if (failure.kind() == ConversationStoreFailure.Kind.CONTRACT) {
-            appendStorageFeedback(claim, guard, FeedbackCode.DATABASE_CONTRACT_ERROR);
-            return;
-        }
         try {
             Optional<ConversationStore.MessageJobProjection> job = conversationStore.readJob(claim.messageJobId());
-            if (job.isPresent() && job.get().modelCallCount() >= MAX_MODEL_CALLS) {
-                appendStorageFeedback(claim, guard, FeedbackCode.DEPENDENCY_UNAVAILABLE);
-                return;
-            }
-            if (job.isPresent() && job.get().retryCount() < retryPolicy.transientRetries()) {
-                Duration delay = retryDelay(job.get().retryCount(), Optional.empty());
+            if (failure.kind() != ConversationStoreFailure.Kind.CONTRACT
+                    && job.isPresent()
+                    && job.orElseThrow().modelCallCount() < maxModelCalls
+                    && job.orElseThrow().retryCount() < retryPolicy.transientRetries()) {
+                Duration delay = retryDelay(job.orElseThrow().retryCount());
                 conversationStore.scheduleRetry(claim, delay);
                 telemetry.retry("STORAGE", delay);
                 return;
             }
-            appendStorageFeedback(claim, guard, FeedbackCode.DEPENDENCY_UNAVAILABLE);
+            appendRuntime(claim, guard, List.of(runtime(MODEL_UNAVAILABLE)), ConversationStore.JobUpdate.COMPLETE);
         } catch (RuntimeException ignored) {
             return;
         }
     }
 
-    private void appendStorageFeedback(MessageWorkClaim claim, WorkGuard guard, FeedbackCode code) {
-        if (!guard.stillOwned()) {
-            return;
-        }
-        try {
-            conversationStore.appendFeedback(claim, code.name(), safeMessage(code), true,
-                    Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(), clock.instant());
-            telemetry.feedback(code.name());
-        } catch (RuntimeException ignored) {
-            return;
-        }
+    private static ConversationStore.RuntimeData runtime(String code) {
+        return switch (code) {
+            case MODEL_CALL_LIMIT_REACHED -> new ConversationStore.RuntimeData(code, "Runtime model call limit reached.");
+            case MODEL_OUTPUT_INVALID -> new ConversationStore.RuntimeData(code, "Runtime model output is invalid.");
+            case MODEL_UNAVAILABLE -> new ConversationStore.RuntimeData(code, "Runtime model is unavailable.");
+            case CONTEXT_TOO_LARGE -> new ConversationStore.RuntimeData(code, "Runtime model context is too large.");
+            default -> throw new IllegalArgumentException("Unsupported runtime code");
+        };
     }
 
-    private OptionalIntReservation reserve(MessageWorkClaim claim, WorkGuard guard) {
-        if (!guard.stillOwned()) { return OptionalIntReservation.unavailable(); }
-        java.util.OptionalInt value = conversationStore.reserveModelCall(claim, clock.instant());
-        return value.isPresent() ? new OptionalIntReservation(true, value.getAsInt()) : OptionalIntReservation.unavailable();
-    }
-
-    private boolean executeTool(MessageWorkClaim claim, WorkGuard guard, ToolSnapshot snapshot, ModelDecision.UseTool toolCall) {
-        String output;
-        try {
-            output = toolRegistry.invoke(snapshot, toolCall.toolName(), toolCall.arguments());
-        } catch (IllegalArgumentException failure) {
-            telemetry.tool(toolCall.toolName().value(), "INVALID_INPUT", Optional.empty(), Optional.empty());
-            return appendToolObservation(claim, guard, toolCall, ToolFailureOutput.format(ToolExecutionFailure.invalidInput()));
-        } catch (ToolExecutionFailure failure) {
-            telemetry.tool(toolCall.toolName().value(), failure.kind().name(), Optional.empty(), Optional.empty());
-            return appendToolObservation(claim, guard, toolCall, ToolFailureOutput.format(failure));
-        }
-        if (!guard.stillOwned()) { return false; }
-        telemetry.tool(toolCall.toolName().value(), "SUCCESS", Optional.empty(), Optional.empty());
-        return appendToolObservation(claim, guard, toolCall, output);
-    }
-
-    private boolean appendToolObservation(MessageWorkClaim claim, WorkGuard guard, ModelDecision.UseTool toolCall, String output) {
-        if (!guard.stillOwned()) {
-            return false;
-        }
-        ConversationStore.MessageBatch batch = new ConversationStore.MessageBatch(List.of(
-                new ConversationStore.ToolObservationData(new ObservationId(UUID.randomUUID().toString()), toolCall.toolName().value(),
-                        toolCall.arguments(), output)), ConversationStore.JobUpdate.KEEP_WORKING);
-        try {
-            conversationStore.append(claim, batch, clock.instant());
-            return guard.stillOwned();
-        } catch (StaleWorkClaimException exception) {
-            telemetry.tool(toolCall.toolName().value(), "STALE", Optional.empty(), Optional.empty());
-            return false;
-        }
-    }
-
-    private boolean handleFailure(MessageWorkClaim claim, WorkGuard guard, ConversationFailurePolicy.Failure failure,
-                                  ToolFeedbackDetails toolDetails, String retryCategory) {
-        if (failure.action() == ConversationFailurePolicy.Action.CORRECTABLE) {
-            return appendFeedback(claim, guard, failure.code(), false, toolDetails);
-        }
-        if (failure.action() == ConversationFailurePolicy.Action.RETRY) {
-            scheduleRetry(claim, guard, failure.retryAfter(), toolDetails, retryCategory);
-            return false;
-        }
-        appendFeedback(claim, guard, failure.code(), true, toolDetails);
-        return false;
-    }
-
-    private void scheduleRetry(MessageWorkClaim claim, WorkGuard guard, Optional<Duration> retryAfter,
-                               ToolFeedbackDetails toolDetails, String retryCategory) {
-        if (!guard.stillOwned()) { return; }
-        Optional<ConversationStore.MessageJobProjection> job = conversationStore.readJob(claim.messageJobId());
-        if (job.isEmpty() || job.get().retryCount() >= retryPolicy.transientRetries()) {
-            appendFeedback(claim, guard, FeedbackCode.DEPENDENCY_UNAVAILABLE, true, toolDetails);
-            return;
-        }
-        Duration delay = retryDelay(job.get().retryCount(), retryAfter);
-        conversationStore.scheduleRetry(claim, delay);
-        telemetry.retry(retryCategory, delay);
-    }
-
-    private Duration retryDelay(int retryCount, Optional<Duration> retryAfter) {
-        Duration requested = retryAfter.orElseGet(() -> exponentialRetryDelay(retryCount));
-        if (requested.isNegative()) {
-            return Duration.ZERO;
-        }
-        return requested.compareTo(retryPolicy.maximumBackoff()) > 0 ? retryPolicy.maximumBackoff() : requested;
-    }
-
-    private Duration exponentialRetryDelay(int retryCount) {
-        if (retryCount < 0 || retryCount >= Long.SIZE - 1) {
-            return retryPolicy.maximumBackoff();
-        }
-        return Duration.ofSeconds(1L << retryCount);
-    }
-
-    private boolean appendFeedback(MessageWorkClaim claim, WorkGuard guard, FeedbackCode code, boolean terminal,
-                                   ToolFeedbackDetails toolDetails) {
-        if (!guard.stillOwned()) {
-            return false;
-        }
-        try {
-            conversationStore.appendFeedback(claim, code.name(), safeMessage(code), terminal,
-                    toolDetails.modelCallId(), toolDetails.toolName(), toolDetails.arguments(), toolDetails.modelContext(), clock.instant());
-            telemetry.feedback(code.name());
-            return guard.stillOwned();
-        } catch (StaleWorkClaimException exception) {
-            return false;
-        }
-    }
-
-    private static String safeMessage(FeedbackCode code) { return "Runtime feedback: " + code.name(); }
-
-    private static void logModelCallStarted(MessageWorkClaim claim, int ordinal, String phase, int historyCount,
-                                            int visibleToolCount) {
-        LOGGER.info("model_call_started sessionId={} messageJobId={} ordinal={} phase={} historyCount={} visibleToolCount={}",
-                claim.sessionId().value(), claim.messageJobId().value(), ordinal, phase, historyCount, visibleToolCount);
+    private static void logModelCallStarted(MessageWorkClaim claim, int historySize, int toolCount) {
+        LOGGER.info("model_call_started sessionId={} messageJobId={} historyCount={} visibleToolCount={}",
+                claim.sessionId().value(), claim.messageJobId().value(), historySize, toolCount);
     }
 
     private static void logModelCallUsage(MessageWorkClaim claim, int ordinal,
@@ -297,45 +296,29 @@ public final class MessageJobService implements MessageJobPort {
                 usage.completionTokens(), usage.totalTokens());
     }
 
-    private static void logModelCallDecision(MessageWorkClaim claim, int ordinal, String phase, ModelDecision decision) {
-        String category = decision instanceof ModelDecision.UseTool ? "USE_TOOL" : "ANSWER_READY";
-        logModelCallDecision(claim, ordinal, phase, category);
+    private static void logModelCallDecision(MessageWorkClaim claim, int ordinal, ModelReply reply) {
+        String category = reply instanceof ModelReply.Text ? "ASSISTANT_TEXT" : "USE_TOOLS";
+        LOGGER.info("model_call_decision sessionId={} messageJobId={} ordinal={} decisionCategory={}",
+                claim.sessionId().value(), claim.messageJobId().value(), ordinal, category);
     }
 
-    private static void logModelCallDecision(MessageWorkClaim claim, int ordinal, String phase, String category) {
-        LOGGER.info("model_call_decision sessionId={} messageJobId={} ordinal={} phase={} decisionCategory={}",
-                claim.sessionId().value(), claim.messageJobId().value(), ordinal, phase, category);
+    private static void logModelCallFailed(MessageWorkClaim claim, int ordinal, ModelCallFailure.Kind kind) {
+        LOGGER.info("model_call_failed sessionId={} messageJobId={} ordinal={} closedFailureKind={}",
+                claim.sessionId().value(), claim.messageJobId().value(), ordinal, kind);
     }
 
-    private static void logModelCallFailed(MessageWorkClaim claim, int ordinal, String phase, ModelCallFailure.Kind kind) {
-        LOGGER.info("model_call_failed sessionId={} messageJobId={} ordinal={} phase={} closedFailureKind={}",
-                claim.sessionId().value(), claim.messageJobId().value(), ordinal, phase, kind);
+    private static final class BudgetExhausted extends RuntimeException {
     }
 
-    private static ToolFeedbackDetails toolDetails(ModelDecision.UseTool toolCall) {
-        return new ToolFeedbackDetails(Optional.of(toolCall.callId()), Optional.of(toolCall.toolName().value()),
-                Optional.of(toolCall.arguments()), Optional.of(toolCall.modelContext()));
-    }
+    private static final class ReservationState {
+        private int ordinal;
 
-    private record ToolFeedbackDetails(
-            Optional<String> modelCallId,
-            Optional<String> toolName,
-            Optional<String> arguments,
-            Optional<String> modelContext) {
-        private ToolFeedbackDetails {
-            Objects.requireNonNull(modelCallId, "Model call ID must not be null");
-            Objects.requireNonNull(toolName, "Tool name must not be null");
-            Objects.requireNonNull(arguments, "Tool arguments must not be null");
-            Objects.requireNonNull(modelContext, "Model context must not be null");
+        private void setOrdinal(int ordinal) {
+            this.ordinal = ordinal;
         }
 
-        private static ToolFeedbackDetails empty() {
-            return new ToolFeedbackDetails(Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty());
+        private int ordinal() {
+            return ordinal;
         }
     }
-
-    private record OptionalIntReservation(boolean reserved, int ordinal) {
-        private static OptionalIntReservation unavailable() { return new OptionalIntReservation(false, 0); }
-    }
-
 }
