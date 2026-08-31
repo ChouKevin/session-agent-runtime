@@ -22,7 +22,7 @@ create table session_message (
     session_id uuid not null references conversation_session(session_id),
     sequence bigint not null check (sequence >= 1),
     message_job_id uuid,
-    role varchar(16) not null check (role in ('USER','TOOL','ASSISTANT','FEEDBACK')),
+    role varchar(16) not null check (role in ('USER','TOOL','ASSISTANT','FEEDBACK','RUNTIME')),
     created_at timestamptz not null,
     primary key (session_id, sequence),
     unique (session_id, sequence, role),
@@ -169,6 +169,31 @@ create table assistant_message (
         references session_message(session_id, sequence, role)
 );
 
+create table tool_observation (
+    session_id uuid not null,
+    sequence bigint not null,
+    role varchar(16) not null default 'TOOL' check (role = 'TOOL'),
+    observation_id varchar(256) not null,
+    tool_name varchar(128) not null,
+    input text not null,
+    output text not null,
+    primary key (session_id, sequence),
+    unique (observation_id),
+    foreign key (session_id, sequence, role)
+        references session_message(session_id, sequence, role)
+);
+
+create table runtime_message (
+    session_id uuid not null,
+    sequence bigint not null,
+    role varchar(16) not null default 'RUNTIME' check (role = 'RUNTIME'),
+    code varchar(64) not null check (length(code) > 0),
+    message text not null check (length(message) > 0),
+    primary key (session_id, sequence),
+    foreign key (session_id, sequence, role)
+        references session_message(session_id, sequence, role)
+);
+
 create table feedback_message (
     session_id uuid not null,
     sequence bigint not null,
@@ -240,6 +265,12 @@ create trigger tool_message_append_only
 create trigger assistant_message_append_only
     before update or delete on assistant_message
     for each row execute function reject_committed_row_change();
+create trigger tool_observation_append_only
+    before update or delete on tool_observation
+    for each row execute function reject_committed_row_change();
+create trigger runtime_message_append_only
+    before update or delete on runtime_message
+    for each row execute function reject_committed_row_change();
 create trigger feedback_message_append_only
     before update or delete on feedback_message
     for each row execute function reject_committed_row_change();
@@ -272,9 +303,13 @@ begin
             where session_id = new.session_id and sequence = new.sequence)
         when 'TOOL' then (select count(*) from tool_message
             where session_id = new.session_id and sequence = new.sequence)
+            + (select count(*) from tool_observation
+            where session_id = new.session_id and sequence = new.sequence)
         when 'ASSISTANT' then (select count(*) from assistant_message
             where session_id = new.session_id and sequence = new.sequence)
         when 'FEEDBACK' then (select count(*) from feedback_message
+            where session_id = new.session_id and sequence = new.sequence)
+        when 'RUNTIME' then (select count(*) from runtime_message
             where session_id = new.session_id and sequence = new.sequence)
     end into detail_count;
     if detail_count <> 1 then
@@ -329,6 +364,9 @@ begin
           where session_id = new.session_id and sequence = new.reply_sequence;
     end if;
     if reply_role = 'ASSISTANT' then
+        return new;
+    end if;
+    if reply_role = 'RUNTIME' then
         return new;
     end if;
     if reply_role = 'FEEDBACK' and coalesce(feedback_terminal, false) then

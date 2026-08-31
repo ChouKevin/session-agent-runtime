@@ -17,6 +17,10 @@ import com.java.system.sessionagent.conversation.domain.SessionId;
 import com.java.system.sessionagent.conversation.domain.SessionMessage;
 import com.java.system.sessionagent.conversation.domain.SessionSequence;
 import com.java.system.sessionagent.conversation.domain.ToolMessage;
+import com.java.system.sessionagent.conversation.domain.ToolObservation;
+import com.java.system.sessionagent.conversation.domain.ObservationId;
+import com.java.system.sessionagent.conversation.domain.RuntimeMessage;
+import com.java.system.sessionagent.conversation.domain.RuntimeMessageCode;
 import com.java.system.sessionagent.conversation.domain.UserMessage;
 import com.java.system.sessionagent.tool.application.DirectToolRegistry;
 import com.java.system.sessionagent.tool.application.ToolSnapshot;
@@ -51,6 +55,27 @@ class ConversationDomainTest {
         assertThat(new MessageJobId(" job-1 ").value()).isEqualTo(" job-1 ");
         assertThat(new ResultId(" result-1 ").value()).isEqualTo(" result-1 ");
         assertThat(new SessionSequence(7).value()).isEqualTo(7);
+    }
+
+    @Test
+    void represents_opaque_tool_observations_without_semantic_or_provider_fields() {
+        ToolObservation observation = new ToolObservation(
+                SESSION_ID, new SessionSequence(2), Optional.of(JOB_ID), CREATED_AT,
+                MessageRole.TOOL, new ObservationId("observation-1"),
+                "lookup", "", "plain text output");
+
+        assertThat(observation.input()).isEmpty();
+        assertThat(observation.output()).isEqualTo("plain text output");
+    }
+
+    @Test
+    void represents_runtime_messages_without_terminal_or_tool_context() {
+        RuntimeMessage message = new RuntimeMessage(
+                SESSION_ID, new SessionSequence(3), Optional.of(JOB_ID), CREATED_AT,
+                MessageRole.RUNTIME, RuntimeMessageCode.MODEL_OUTPUT_INVALID.name(),
+                "The model returned no usable output.");
+
+        assertThat(message.code()).isEqualTo("MODEL_OUTPUT_INVALID");
     }
 
     @ParameterizedTest

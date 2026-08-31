@@ -8,11 +8,14 @@ import com.java.system.sessionagent.conversation.domain.MessageJobId;
 import com.java.system.sessionagent.conversation.domain.MessageRole;
 import com.java.system.sessionagent.conversation.domain.MessageReceipt;
 import com.java.system.sessionagent.conversation.domain.MessageWorkClaim;
+import com.java.system.sessionagent.conversation.domain.ObservationId;
 import com.java.system.sessionagent.conversation.domain.ResultId;
+import com.java.system.sessionagent.conversation.domain.RuntimeMessage;
 import com.java.system.sessionagent.conversation.domain.SessionId;
 import com.java.system.sessionagent.conversation.domain.SessionMessage;
 import com.java.system.sessionagent.conversation.domain.SessionSequence;
 import com.java.system.sessionagent.conversation.domain.ToolMessage;
+import com.java.system.sessionagent.conversation.domain.ToolObservation;
 import com.java.system.sessionagent.conversation.port.in.MessageConflictException;
 import com.java.system.sessionagent.conversation.port.out.ConversationStore;
 import com.java.system.sessionagent.conversation.port.out.ConversationStoreFailure;
@@ -313,8 +316,10 @@ public final class PostgresConversationStore implements ConversationStore {
             List<SessionMessage> messages = new java.util.ArrayList<>();
             UUID id = UUID.fromString(requiredSessionId.value());
             messages.addAll(loadToolMessages(id));
+            messages.addAll(loadToolObservations(id));
             messages.addAll(loadAssistantMessages(id));
             messages.addAll(loadFeedbackMessages(id));
+            messages.addAll(loadRuntimeMessages(id));
             messages.addAll(loadUserMessages(id));
             messages.sort(java.util.Comparator.comparingLong(message -> message.sequence().value()));
             return List.copyOf(messages);
@@ -466,6 +471,42 @@ public final class PostgresConversationStore implements ConversationStore {
     }
 
     @Override
+    public void append(MessageWorkClaim claim, MessageBatch batch, Instant createdAt) {
+        MessageWorkClaim requiredClaim = Objects.requireNonNull(claim, "Message work claim must not be null");
+        MessageBatch requiredBatch = Objects.requireNonNull(batch, "Message batch must not be null");
+        Instant requiredCreatedAt = Objects.requireNonNull(createdAt, "Message creation time must not be null");
+        inTransaction(() -> {
+            requireLiveClaim(requiredClaim);
+            UUID sessionId = sessionId(requiredClaim);
+            long finalSequence = 0;
+            for (MessageData message : requiredBatch.messages()) {
+                long sequence = allocateSequence(sessionId);
+                if (message instanceof AssistantData assistant) {
+                    insertSessionMessage(sessionId, sequence, messageJobId(requiredClaim), "ASSISTANT", requiredCreatedAt);
+                    jdbcTemplate.update("insert into assistant_message(session_id, sequence, message) values (?, ?, ?)",
+                            sessionId, sequence, assistant.message());
+                } else if (message instanceof ToolObservationData observation) {
+                    insertSessionMessage(sessionId, sequence, messageJobId(requiredClaim), "TOOL", requiredCreatedAt);
+                    jdbcTemplate.update("""
+                            insert into tool_observation(session_id, sequence, observation_id, tool_name, input, output)
+                            values (?, ?, ?, ?, ?, ?)
+                            """, sessionId, sequence, observation.observationId().value(), observation.toolName(), observation.input(),
+                            observation.output());
+                } else if (message instanceof RuntimeData runtime) {
+                    insertSessionMessage(sessionId, sequence, messageJobId(requiredClaim), "RUNTIME", requiredCreatedAt);
+                    jdbcTemplate.update("insert into runtime_message(session_id, sequence, code, message) values (?, ?, ?, ?)",
+                            sessionId, sequence, runtime.code(), runtime.message());
+                }
+                finalSequence = sequence;
+            }
+            if (requiredBatch.jobUpdate() == JobUpdate.COMPLETE) {
+                completeJob(requiredClaim, finalSequence, clock.instant());
+            }
+            return Boolean.TRUE;
+        });
+    }
+
+    @Override
     public boolean scheduleRetry(MessageWorkClaim claim, Duration retryDelay) {
         MessageWorkClaim requiredClaim = Objects.requireNonNull(claim, "Message work claim must not be null");
         Duration requiredRetryDelay = Objects.requireNonNull(retryDelay, "Retry delay must not be null");
@@ -520,16 +561,11 @@ public final class PostgresConversationStore implements ConversationStore {
         if (sessions.isEmpty()) {
             throw new StaleWorkClaimException();
         }
-        jdbcTemplate.query("""
-                select message_job_id from message_job
-                where message_job_id = ? and session_id = ?
-                for update
-                """, (resultSet, rowNumber) -> resultSet.getObject("message_job_id", UUID.class),
-                messageJobId(claim), sessionId(claim));
         List<UUID> liveJobs = jdbcTemplate.query("""
                 select message_job_id from message_job
                 where message_job_id = ? and session_id = ? and status = 'WORKING'
                   and worker_id = ? and claim_number = ? and locked_until > clock_timestamp()
+                for update
                 """, (resultSet, rowNumber) -> resultSet.getObject("message_job_id", UUID.class),
                 messageJobId(claim), sessionId(claim), claim.workerId(), claim.claimNumber());
         if (liveJobs.isEmpty()) {
@@ -578,6 +614,21 @@ public final class PostgresConversationStore implements ConversationStore {
                 Optional.ofNullable(resultSet.getString("revision")), resultSet.getString("result_json")), sessionId);
     }
 
+    private List<SessionMessage> loadToolObservations(UUID sessionId) {
+        return jdbcTemplate.query("""
+                select message.sequence, message.message_job_id, message.created_at, detail.observation_id, detail.tool_name, detail.input,
+                       detail.output
+                from session_message message join tool_observation detail
+                    on detail.session_id = message.session_id and detail.sequence = message.sequence
+                where message.session_id = ?
+                """, (resultSet, rowNumber) -> new ToolObservation(new SessionId(sessionId.toString()),
+                new SessionSequence(resultSet.getLong("sequence")),
+                Optional.of(new MessageJobId(resultSet.getObject("message_job_id", UUID.class).toString())),
+                resultSet.getObject("created_at", OffsetDateTime.class).toInstant(), MessageRole.TOOL,
+                new ObservationId(resultSet.getString("observation_id")), resultSet.getString("tool_name"),
+                resultSet.getString("input"), resultSet.getString("output")), sessionId);
+    }
+
     private List<SessionMessage> loadFeedbackMessages(UUID sessionId) {
         return jdbcTemplate.query("""
                 select message.sequence, message.message_job_id, message.created_at, detail.code, detail.message, detail.terminal,
@@ -602,6 +653,19 @@ public final class PostgresConversationStore implements ConversationStore {
                     Optional.of(new MessageJobId(resultSet.getObject("message_job_id", UUID.class).toString())),
                     resultSet.getObject("created_at", OffsetDateTime.class).toInstant(), MessageRole.ASSISTANT,
                     resultSet.getString("message")), sessionId);
+    }
+
+    private List<SessionMessage> loadRuntimeMessages(UUID sessionId) {
+        return jdbcTemplate.query("""
+                select message.sequence, message.message_job_id, message.created_at, detail.code, detail.message
+                from session_message message join runtime_message detail
+                    on detail.session_id = message.session_id and detail.sequence = message.sequence
+                where message.session_id = ?
+                """, (resultSet, rowNumber) -> new RuntimeMessage(new SessionId(sessionId.toString()),
+                new SessionSequence(resultSet.getLong("sequence")),
+                Optional.of(new MessageJobId(resultSet.getObject("message_job_id", UUID.class).toString())),
+                resultSet.getObject("created_at", OffsetDateTime.class).toInstant(), MessageRole.RUNTIME,
+                resultSet.getString("code"), resultSet.getString("message")), sessionId);
     }
 
     @Override

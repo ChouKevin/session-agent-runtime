@@ -4,5 +4,6 @@ public enum MessageRole {
     USER,
     TOOL,
     ASSISTANT,
-    FEEDBACK
+    FEEDBACK,
+    RUNTIME
 }

@@ -4,6 +4,7 @@ import com.java.system.sessionagent.conversation.domain.FeedbackMessage;
 import com.java.system.sessionagent.conversation.domain.IncomingMessage;
 import com.java.system.sessionagent.conversation.domain.MessageReceipt;
 import com.java.system.sessionagent.conversation.domain.MessageWorkClaim;
+import com.java.system.sessionagent.conversation.domain.ObservationId;
 import com.java.system.sessionagent.conversation.domain.ResultId;
 import com.java.system.sessionagent.conversation.domain.SessionMessage;
 import com.java.system.sessionagent.conversation.domain.ToolMessage;
@@ -30,6 +31,7 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
@@ -93,6 +95,49 @@ class PostgresConversationCommitPostgresIT {
         AssistantMessage assistant = (AssistantMessage) history.get(2);
         assertThat(tool.resultJson()).isEqualTo("{}");
         assertThat(assistant.message()).isEqualTo("done");
+    }
+
+    @Test
+    void appends_a_contiguous_working_batch_in_request_order() {
+        ConversationStore store = newStore();
+        MessageReceipt receipt = store.receive(new IncomingMessage("thread-1", "alice", "source-1", "hello"));
+        MessageWorkClaim claim = store.claimNext("worker-1", Duration.ofSeconds(30)).orElseThrow();
+
+        store.append(claim, new ConversationStore.MessageBatch(List.of(
+                new ConversationStore.AssistantData("I will inspect both independent sources."),
+                new ConversationStore.ToolObservationData(new ObservationId("observation-1"), "first", "{}", "one"),
+                new ConversationStore.ToolObservationData(new ObservationId("observation-2"), "second", "{}", "two")),
+                ConversationStore.JobUpdate.KEEP_WORKING), NOW);
+
+        assertThat(store.loadHistory(receipt.sessionId()))
+                .extracting(message -> message.sequence().value())
+                .containsExactly(1L, 2L, 3L, 4L);
+        assertThat(jdbcTemplate.queryForObject("select status from message_job where message_job_id = ?", String.class, id(receipt)))
+                .isEqualTo("WORKING");
+        assertThat(jdbcTemplate.queryForObject("select count(*) from tool_observation", Integer.class)).isEqualTo(2);
+    }
+
+    @Test
+    void rolls_back_every_message_when_a_later_batch_detail_violates_a_constraint() {
+        ConversationStore store = newStore();
+        MessageReceipt receipt = store.receive(new IncomingMessage("thread-1", "alice", "source-1", "hello"));
+        MessageWorkClaim claim = store.claimNext("worker-1", Duration.ofSeconds(30)).orElseThrow();
+
+        assertThatThrownBy(() -> store.append(claim, new ConversationStore.MessageBatch(List.of(
+                new ConversationStore.AssistantData("I will inspect both independent sources."),
+                new ConversationStore.ToolObservationData(new ObservationId("duplicate-observation"), "first", "{}", "one"),
+                new ConversationStore.ToolObservationData(new ObservationId("duplicate-observation"), "second", "{}", "two")),
+                ConversationStore.JobUpdate.KEEP_WORKING), NOW))
+                .isInstanceOf(ConversationStoreFailure.class)
+                .extracting(exception -> ((ConversationStoreFailure) exception).kind())
+                .isEqualTo(ConversationStoreFailure.Kind.CONTRACT);
+
+        assertThat(jdbcTemplate.queryForObject("select count(*) from session_message", Integer.class)).isEqualTo(1);
+        assertThat(jdbcTemplate.queryForObject("select count(*) from assistant_message", Integer.class)).isZero();
+        assertThat(jdbcTemplate.queryForObject("select count(*) from tool_observation", Integer.class)).isZero();
+        assertThat(jdbcTemplate.queryForObject("select next_sequence from conversation_session", Long.class)).isEqualTo(2L);
+        assertThat(jdbcTemplate.queryForObject("select status from message_job where message_job_id = ?", String.class, id(receipt)))
+                .isEqualTo("WORKING");
     }
 
     @Test

@@ -1,8 +1,11 @@
 package com.java.system.sessionagent.storage;
 
 import com.java.system.sessionagent.conversation.domain.IncomingMessage;
+import com.java.system.sessionagent.conversation.domain.JobStatus;
 import com.java.system.sessionagent.conversation.domain.MessageReceipt;
 import com.java.system.sessionagent.conversation.domain.MessageWorkClaim;
+import com.java.system.sessionagent.conversation.domain.RuntimeMessage;
+import com.java.system.sessionagent.conversation.domain.SessionSequence;
 import com.java.system.sessionagent.conversation.port.out.ConversationStore;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.AfterEach;
@@ -273,6 +276,25 @@ class PostgresMessageJobPostgresIT {
         assertThat(store.scheduleRetry(claim, Duration.ofSeconds(45))).isTrue();
         assertThat(jdbcTemplate.queryForObject("select status from message_job", String.class)).isEqualTo("RETRY");
         assertThat(store.extendClaim(claim, Duration.ofSeconds(30))).isFalse();
+    }
+
+    @Test
+    void completes_a_job_with_a_terminal_runtime_batch_without_an_assistant_reply() {
+        ConversationStore store = newStore();
+        MessageReceipt receipt = receive(store, "thread-1", "source-1");
+        MessageWorkClaim claim = store.claimNext("worker-1", Duration.ofSeconds(30)).orElseThrow();
+
+        store.append(claim, new ConversationStore.MessageBatch(List.of(
+                new ConversationStore.RuntimeData("MODEL_OUTPUT_INVALID", "The model returned no usable output.")),
+                ConversationStore.JobUpdate.COMPLETE), NOW);
+
+        assertThat(store.readJob(receipt.messageJobId()))
+                .hasValueSatisfying(job -> {
+                    assertThat(job.status()).isEqualTo(JobStatus.DONE);
+                    assertThat(job.replySequence()).hasValue(new SessionSequence(2));
+                });
+        assertThat(store.loadHistory(receipt.sessionId()).getLast()).isInstanceOf(RuntimeMessage.class);
+        assertThat(jdbcTemplate.queryForObject("select count(*) from assistant_message", Integer.class)).isZero();
     }
 
     private Flyway flyway() {
