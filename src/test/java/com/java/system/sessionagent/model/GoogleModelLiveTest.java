@@ -1,7 +1,7 @@
 package com.java.system.sessionagent.model;
 
-import com.java.system.sessionagent.conversation.domain.MessageRole;
 import com.java.system.sessionagent.conversation.domain.MessageJobId;
+import com.java.system.sessionagent.conversation.domain.MessageRole;
 import com.java.system.sessionagent.conversation.domain.ModelReply;
 import com.java.system.sessionagent.conversation.domain.ModelRequest;
 import com.java.system.sessionagent.conversation.domain.SessionId;
@@ -11,6 +11,10 @@ import com.java.system.sessionagent.tool.application.DirectToolRegistry;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import org.springframework.ai.chat.model.ChatModel;
+import org.springframework.ai.chat.model.ChatResponse;
+import org.springframework.ai.chat.prompt.ChatOptions;
+import org.springframework.ai.chat.prompt.Prompt;
+import org.springframework.ai.retry.autoconfigure.SpringAiRetryProperties;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.SpringBootConfiguration;
 import org.springframework.boot.autoconfigure.EnableAutoConfiguration;
@@ -23,35 +27,65 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-@SpringBootTest(classes = GoogleNoToolLiveTest.LiveApplication.class, properties = "spring.flyway.enabled=false")
-@EnabledIfEnvironmentVariable(named = "GOOGLE_NO_TOOL_LIVE", matches = "true")
-class GoogleNoToolLiveTest {
+@SpringBootTest(classes = GoogleModelLiveTest.LiveApplication.class, properties = "spring.flyway.enabled=false")
+@EnabledIfEnvironmentVariable(named = "GOOGLE_MODEL_LIVE", matches = "true")
+class GoogleModelLiveTest {
 
     private final ChatModel provider;
+    private final SpringAiRetryProperties retryProperties;
 
     @Autowired
-    GoogleNoToolLiveTest(ChatModel provider) {
+    GoogleModelLiveTest(ChatModel provider, SpringAiRetryProperties retryProperties) {
         this.provider = provider;
+        this.retryProperties = retryProperties;
     }
 
     @Test
-    void calls_the_real_google_provider_through_the_final_respond_contract() {
+    void makes_one_provider_neutral_real_model_call() {
         UserMessage question = new UserMessage(new SessionId("google-live"), new SessionSequence(1),
                 Optional.of(new MessageJobId("google-live-job")), Instant.parse("2026-08-31T00:00:00Z"),
                 MessageRole.USER, "tester", "Reply with a short greeting and do not call tools.");
         AtomicInteger reservations = new AtomicInteger();
-        SpringAiConversationModel model = new SpringAiConversationModel(provider, new PromptResource());
+        CountingChatModel countingModel = new CountingChatModel(provider);
+        SpringAiConversationModel model = new SpringAiConversationModel(countingModel, new PromptResource());
 
         ModelReply reply = model.respond(new ModelRequest(List.of(question), new DirectToolRegistry(List.of()).snapshot()),
                 reservations::incrementAndGet, usage -> { });
 
+        assertThat(retryProperties.getMaxAttempts()).isEqualTo(1);
         assertThat(reply).isInstanceOf(ModelReply.Text.class);
+        assertThat(countingModel.calls()).isEqualTo(1);
+        assertThat(reservations.get()).isEqualTo(1);
         assertThat(((ModelReply.Text) reply).message()).isNotBlank();
-        assertThat(reservations).hasValue(1);
     }
 
     @SpringBootConfiguration(proxyBeanMethods = false)
     @EnableAutoConfiguration
     static class LiveApplication {
+    }
+
+    private static final class CountingChatModel implements ChatModel {
+
+        private final ChatModel delegate;
+        private int callCount;
+
+        private CountingChatModel(ChatModel delegate) {
+            this.delegate = delegate;
+        }
+
+        @Override
+        public ChatResponse call(Prompt prompt) {
+            callCount++;
+            return delegate.call(prompt);
+        }
+
+        @Override
+        public ChatOptions getOptions() {
+            return delegate.getOptions();
+        }
+
+        private int calls() {
+            return callCount;
+        }
     }
 }

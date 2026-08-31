@@ -41,6 +41,15 @@ if (
     exit 1
 fi
 
+[[ -f "${runtime_root}/src/test/java/com/java/system/sessionagent/model/GoogleModelLiveTest.java" ]] || {
+    printf 'missing renamed Google model live smoke test\n' >&2
+    exit 1
+}
+[[ ! -e "${runtime_root}/src/test/java/com/java/system/sessionagent/model/GoogleNoToolLiveTest.java" ]] || {
+    printf 'obsolete Google no-tool live smoke test remains\n' >&2
+    exit 1
+}
+
 workflow="${runtime_root}/.github/workflows/ci.yml"
 for command in \
     'mvn -q test' \

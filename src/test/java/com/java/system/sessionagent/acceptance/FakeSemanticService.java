@@ -89,10 +89,10 @@ final class FakeSemanticService implements AutoCloseable {
         }
         if (suffix.endsWith("/entry-points")) {
             if (!hasRevision(requestUri, revision(repositoryId))) {
-                respond(exchange, 409, "{}");
+                respond(exchange, 409, revisionOutdated(repositoryId, requestedRevision(requestUri)));
                 return;
             }
-                respond(exchange, 200, envelope(repositoryId, revision(repositoryId), entryPoints(repositoryId)));
+            respond(exchange, 200, envelope(repositoryId, revision(repositoryId), entryPoints(repositoryId)));
             return;
         }
         respond(exchange, 200, repository(repositoryId));
@@ -114,6 +114,11 @@ final class FakeSemanticService implements AutoCloseable {
         return """
                 {"code":"REPOSITORY_NOT_FOUND","message":"repository is not configured"}
                 """;
+    }
+
+    private static String revisionOutdated(String repositoryId, String requestedRevision) {
+        return "{\"code\":\"REVISION_OUTDATED\",\"repositoryId\":\"%s\",\"requestedRevision\":\"%s\",\"currentRevision\":\"%s\",\"retryGuidance\":\"Retry with currentRevision.\"}"
+                .formatted(repositoryId, requestedRevision, revision(repositoryId));
     }
 
     private static String entryPoints(String repositoryId) {
@@ -157,6 +162,14 @@ final class FakeSemanticService implements AutoCloseable {
         return Optional.ofNullable(requestUri.getQuery()).stream()
                 .flatMap(query -> Arrays.stream(query.split("&")))
                 .anyMatch(parameter -> parameter.equals("revision=" + revision));
+    }
+
+    private static String requestedRevision(URI requestUri) {
+        return Optional.ofNullable(requestUri.getQuery()).stream()
+                .flatMap(query -> Arrays.stream(query.split("&")))
+                .filter(parameter -> parameter.startsWith("revision="))
+                .map(parameter -> parameter.substring("revision=".length()))
+                .findFirst().orElse("missing-revision");
     }
 
     private static void respond(HttpExchange exchange, int status, String response) throws IOException {

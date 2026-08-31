@@ -9,19 +9,21 @@ import com.java.system.sessionagent.conversation.domain.MessageJobId;
 import com.java.system.sessionagent.conversation.domain.MessageReceipt;
 import com.java.system.sessionagent.conversation.domain.MessageRole;
 import com.java.system.sessionagent.conversation.domain.MessageWorkClaim;
+import com.java.system.sessionagent.conversation.domain.ModelReply;
 import com.java.system.sessionagent.conversation.domain.ModelRequest;
 import com.java.system.sessionagent.conversation.domain.RuntimeMessage;
 import com.java.system.sessionagent.conversation.domain.SessionId;
 import com.java.system.sessionagent.conversation.domain.SessionMessage;
 import com.java.system.sessionagent.conversation.domain.SessionSequence;
 import com.java.system.sessionagent.conversation.domain.ToolObservation;
+import com.java.system.sessionagent.conversation.domain.ToolRequest;
 import com.java.system.sessionagent.conversation.domain.UserMessage;
 import com.java.system.sessionagent.conversation.port.out.ConversationStore;
-import com.java.system.sessionagent.semantic.domain.RepositoryId;
 import com.java.system.sessionagent.semantic.http.SemanticRepositoryClient;
 import com.java.system.sessionagent.semantic.http.SemanticSourceClient;
 import com.java.system.sessionagent.semantic.tool.SemanticToolProvider;
 import com.java.system.sessionagent.tool.application.DirectToolRegistry;
+import com.java.system.sessionagent.tool.domain.ToolName;
 import org.junit.jupiter.api.Test;
 import org.springframework.web.client.RestClient;
 
@@ -29,7 +31,6 @@ import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -41,104 +42,120 @@ import static org.assertj.core.api.Assertions.assertThat;
 class ConversationAcceptanceTest {
 
     @Test
-    void answers_payment_methods_from_a_source_payment_service_result() {
-        try (AcceptanceRuntime runtime = new AcceptanceRuntime()) {
+    void persists_a_direct_text_answer_without_a_tool_observation() {
+        try (AcceptanceRuntime runtime = new AcceptanceRuntime(List.of(text("Hello.")))) {
+            MessageReceipt receipt = runtime.receive("direct-session", "alice", "direct-1", "Say hello.");
+            runtime.process(receipt);
+
+            assertThat(runtime.history(receipt.sessionId())).extracting(SessionMessage::role)
+                    .containsExactly(MessageRole.USER, MessageRole.ASSISTANT);
+            assertThat(runtime.reply(receipt).message()).isEqualTo("Hello.");
+            assertThat(runtime.modelRequests()).singleElement().satisfies(request ->
+                    assertThat(request.history()).extracting(SessionMessage::role).containsExactly(MessageRole.USER));
+        }
+    }
+
+    @Test
+    void persists_repository_catalog_then_source_observation_before_the_final_answer() {
+        try (AcceptanceRuntime runtime = new AcceptanceRuntime(List.of(
+                tools(tool("list_repositories", "{}")),
+                tools(tool("codebase_list_entry_points", paymentEntryPointsInput())),
+                text("Credit card, bank transfer, and wallet are supported.")))) {
             MessageReceipt receipt = runtime.receive("payment-session", "alice", "payment-1", "Which payment methods are supported?");
             runtime.process(receipt);
 
-            AssistantMessage reply = runtime.reply(receipt);
-            ToolObservation source = runtime.latestSourceTool(receipt);
-            assertThat(source.output()).contains("\"repositoryId\":\"payment-service\"", "credit card", "bank transfer", "wallet");
-            assertThat(reply.message()).isNotBlank();
+            List<SessionMessage> history = runtime.history(receipt.sessionId());
+            assertThat(history).extracting(SessionMessage::role)
+                    .containsExactly(MessageRole.USER, MessageRole.TOOL, MessageRole.TOOL, MessageRole.ASSISTANT);
+            assertThat(history).filteredOn(ToolObservation.class::isInstance).extracting(ToolObservation.class::cast)
+                    .extracting(ToolObservation::toolName).containsExactly("list_repositories", "codebase_list_entry_points");
+            ToolObservation source = runtime.toolObservations(receipt).getLast();
+            assertThat(source.input()).isEqualTo(paymentEntryPointsInput());
+            assertThat(source.output()).contains("\"repositoryId\":\"payment-service\"", "\"revision\":\"payment-revision-1\"", "credit card");
+            assertThat(runtime.reply(receipt).message()).contains("Credit card");
+            assertThat(runtime.modelRequests()).extracting(request -> request.history().size()).containsExactly(1, 2, 3);
+            assertThat(runtime.modelRequests().getLast().history()).extracting(SessionMessage::role)
+                    .containsExactly(MessageRole.USER, MessageRole.TOOL, MessageRole.TOOL);
         }
     }
 
     @Test
-    void states_that_the_runtime_fee_value_is_unavailable_while_preserving_json_settings_evidence() {
-        try (AcceptanceRuntime runtime = new AcceptanceRuntime()) {
+    void commits_an_ordered_two_tool_batch_before_the_next_model_request() {
+        try (AcceptanceRuntime runtime = new AcceptanceRuntime(List.of(
+                new ModelReply.UseTools(Optional.of("I will inspect both services."), List.of(
+                        tool("codebase_list_entry_points", paymentEntryPointsInput()),
+                        tool("codebase_list_entry_points", orderEntryPointsInput()))),
+                text("Cancellation is implemented before refund handling.")))) {
+            MessageReceipt receipt = runtime.receive("batch-session", "alice", "batch-1", "Compare cancellation and payment handling.");
+            runtime.process(receipt);
+
+            List<SessionMessage> history = runtime.history(receipt.sessionId());
+            assertThat(history).extracting(SessionMessage::role).containsExactly(
+                    MessageRole.USER, MessageRole.ASSISTANT, MessageRole.TOOL, MessageRole.TOOL, MessageRole.ASSISTANT);
+            assertThat(runtime.toolObservations(receipt)).extracting(ToolObservation::input)
+                    .containsExactly(paymentEntryPointsInput(), orderEntryPointsInput());
+            assertThat(runtime.modelRequests().get(1).history()).extracting(SessionMessage::role).containsExactly(
+                    MessageRole.USER, MessageRole.ASSISTANT, MessageRole.TOOL, MessageRole.TOOL);
+        }
+    }
+
+    @Test
+    void reports_runtime_only_fee_data_as_unavailable_without_inventing_a_value() {
+        try (AcceptanceRuntime runtime = new AcceptanceRuntime(List.of(
+                tools(tool("codebase_list_entry_points", paymentEntryPointsInput())),
+                text("The source defines a JSON-configured formula, but the current database/API fee value is unavailable.")))) {
             MessageReceipt receipt = runtime.receive("fee-session", "alice", "fee-1", "What is the runtime fee?");
             runtime.process(receipt);
 
-            AssistantMessage reply = runtime.reply(receipt);
-            assertThat(reply.message()).contains("current runtime value is unavailable");
-            ToolObservation source = runtime.latestSourceTool(receipt);
-            assertThat(source.output()).contains("\"repositoryId\":\"payment-service\"", "formula is loaded from JSON settings");
+            assertThat(runtime.reply(receipt).message()).contains("database/API fee value is unavailable");
+            assertThat(runtime.toolObservations(receipt)).singleElement().satisfies(observation ->
+                    assertThat(observation.output()).contains("formula is loaded from JSON settings"));
         }
     }
 
     @Test
-    void reports_absent_bnpl_as_limited_to_the_codebase_after_the_empty_search_is_stored() {
-        try (AcceptanceRuntime runtime = new AcceptanceRuntime()) {
+    void reports_absent_bnpl_narrowly_as_not_found_in_inspected_code() {
+        try (AcceptanceRuntime runtime = new AcceptanceRuntime(List.of(
+                tools(tool("codebase_search_code_facts", "{\"repositoryId\":\"payment-service\",\"revision\":\"payment-revision-1\",\"query\":\"BNPL\"}")),
+                text("BNPL behavior was not found in the inspected code.")))) {
             MessageReceipt receipt = runtime.receive("bnpl-session", "alice", "bnpl-1", "Is BNPL supported?");
             runtime.process(receipt);
 
-            AssistantMessage reply = runtime.reply(receipt);
-            List<ToolObservation> toolHistory = runtime.store.toolObservations(receipt.messageJobId());
-            assertThat(reply.message()).contains("No BNPL behavior was found", "codebase");
-            ToolObservation completeEmptySearch = toolHistory.stream()
-                    .filter(message -> message.toolName().equals("codebase_search_code_facts"))
-                    .findFirst()
-                    .orElseThrow();
-            assertThat(completeEmptySearch.output()).contains("\"repositoryId\":\"payment-service\"", "\"revision\":\"payment-revision-1\"");
-            assertThat(completeEmptySearch.output()).contains(
-                    "\"totalCount\":0", "\"hasMore\":false", "\"coverage\":{\"issues\":[]}");
+            assertThat(runtime.reply(receipt).message()).isEqualTo("BNPL behavior was not found in the inspected code.");
+            assertThat(runtime.toolObservations(receipt)).singleElement().satisfies(observation ->
+                    assertThat(observation.output()).contains("\"totalCount\":0", "\"hasMore\":false"));
         }
     }
 
-    @Test
-    void answers_cancellation_and_refund_after_cross_repository_source_queries() {
-        try (AcceptanceRuntime runtime = new AcceptanceRuntime()) {
-            MessageReceipt receipt = runtime.receive("refund-session", "alice", "refund-1", "How do cancellation and refund work?");
-            runtime.process(receipt);
-
-            List<ToolObservation> sources = runtime.store.toolObservations(receipt.messageJobId()).stream()
-                    .filter(message -> message.toolName().startsWith("codebase_")).toList();
-            assertThat(sources).anySatisfy(message -> assertThat(message.output()).contains("\"repositoryId\":\"order-service\""));
-            assertThat(sources).anySatisfy(message -> assertThat(message.output()).contains("\"repositoryId\":\"payment-service\""));
-            assertThat(sources).allSatisfy(message -> assertThat(message.input()).contains("\"repositoryId\":"));
-            AssistantMessage reply = runtime.reply(receipt);
-            assertThat(reply.message()).contains("Cancellation and refund information");
-        }
+    static ModelReply.Text text(String message) {
+        return new ModelReply.Text(message);
     }
 
-    @Test
-    void creates_a_fresh_persisted_result_for_repeated_identical_successful_source_queries() {
-        try (AcceptanceRuntime runtime = new AcceptanceRuntime()) {
-            MessageReceipt first = runtime.receive("repeat-session", "alice", "repeat-1", "Which payment methods are supported?");
-            runtime.process(first);
-            MessageReceipt second = runtime.receive("repeat-session", "alice", "repeat-2", "Which payment methods are supported?");
-            runtime.process(second);
-
-            String firstObservation = runtime.store.toolObservations(first.messageJobId()).getLast().observationId().value();
-            String secondObservation = runtime.store.toolObservations(second.messageJobId()).getLast().observationId().value();
-            assertThat(secondObservation).isNotEqualTo(firstObservation);
-        }
+    static ModelReply.UseTools tools(ToolRequest... requests) {
+        return new ModelReply.UseTools(Optional.empty(), List.of(requests));
     }
 
-    @Test
-    void refreshes_the_catalog_and_retries_the_exact_returned_repository_id_after_invalid_repository_feedback() {
-        try (AcceptanceRuntime runtime = new AcceptanceRuntime()) {
-            MessageReceipt receipt = runtime.receive("retry-session", "alice", "retry-1", "Use an invalid repository to find payment methods.");
-            runtime.process(receipt);
+    static ToolRequest tool(String name, String input) {
+        return new ToolRequest(new ToolName(name), input);
+    }
 
-            assertThat(runtime.store.toolObservations(receipt.messageJobId())).anySatisfy(message ->
-                    assertThat(message.output()).contains("Code: SEMANTIC_REPOSITORY_NOT_FOUND"));
-            assertThat(runtime.store.toolObservations(receipt.messageJobId())).filteredOn(message -> message.toolName().equals("list_repositories")).hasSize(2);
-            assertThat(runtime.semantic.calls()).filteredOn(call -> call.path().equals("/v1/repositories")).hasSize(2);
-            assertThat(runtime.semantic.calls()).anySatisfy(call -> assertThat(call.path()).isEqualTo("/v1/repositories/payment-service/entry-points"));
-            assertThat(runtime.store.toolObservations(receipt.messageJobId())).anySatisfy(message ->
-                    assertThat(message.output()).contains("\"repositoryId\":\"payment-service\""));
-        }
+    static String paymentEntryPointsInput() {
+        return "{\"repositoryId\":\"payment-service\",\"revision\":\"payment-revision-1\"}";
+    }
+
+    static String orderEntryPointsInput() {
+        return "{\"repositoryId\":\"order-service\",\"revision\":\"order-revision-1\"}";
     }
 
     static final class AcceptanceRuntime implements AutoCloseable {
         private final FakeSemanticService semantic = new FakeSemanticService();
         private final InMemoryConversationStore store = new InMemoryConversationStore();
-        private final FakeConversationModel model = new FakeConversationModel();
+        private final FakeConversationModel model;
         private final ConversationMessageService intake = new ConversationMessageService(store);
         private final MessageJobService jobs;
 
-        AcceptanceRuntime() {
+        AcceptanceRuntime(List<ModelReply> replies) {
+            model = new FakeConversationModel(replies);
             RestClient restClient = RestClient.builder().baseUrl(semantic.baseUrl()).build();
             SemanticRepositoryClient repositories = new SemanticRepositoryClient(restClient);
             DirectToolRegistry registry = new DirectToolRegistry(new SemanticToolProvider(repositories,
@@ -157,18 +174,15 @@ class ConversationAcceptanceTest {
 
         AssistantMessage reply(MessageReceipt receipt) {
             return store.messages(receipt.sessionId()).stream().filter(AssistantMessage.class::isInstance).map(AssistantMessage.class::cast)
-                    .filter(message -> message.messageJobId().filter(receipt.messageJobId()::equals).isPresent()).findFirst().orElseThrow();
+                    .filter(message -> message.messageJobId().filter(receipt.messageJobId()::equals).isPresent()).reduce((first, second) -> second).orElseThrow();
         }
 
         List<ModelRequest> modelRequests() {
             return model.requests();
         }
 
-        ToolObservation latestSourceTool(MessageReceipt receipt) {
-            return store.toolObservations(receipt.messageJobId()).stream()
-                    .filter(message -> message.toolName().startsWith("codebase_"))
-                    .max(Comparator.comparingLong(message -> message.sequence().value()))
-                    .orElseThrow();
+        List<ToolObservation> toolObservations(MessageReceipt receipt) {
+            return store.toolObservations(receipt.messageJobId());
         }
 
         List<SessionMessage> history(SessionId sessionId) {

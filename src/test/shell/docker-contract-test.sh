@@ -94,6 +94,29 @@ grep -Fq 'System.getenv("SESSION_AGENT_BASE_URL")' "${live_junit_test}" || {
     printf 'SessionAgentLiveIT must read the live runner base URL\n' >&2
     exit 1
 }
+grep -Fq 'SESSION_AGENT_LIVE' "${live_junit_test}" || {
+    printf 'SessionAgentLiveIT must remain explicitly opt-in\n' >&2
+    exit 1
+}
+grep -Fq 'SESSION_HISTORY_LIVE_ACCEPTANCE complete' "${live_test}" || {
+    printf 'live runner must complete through HTTP history acceptance\n' >&2
+    exit 1
+}
+if rg -n 'model_call_record|ANSWER_READY|FINAL_REPLY|/internal/results' "${live_test}" "${live_junit_test}" >/dev/null; then
+    printf 'live acceptance must not use removed diagnostics or result lookup\n' >&2
+    exit 1
+fi
+
+google_live_test="${runtime_root}/src/test/java/com/java/system/sessionagent/model/GoogleModelLiveTest.java"
+[[ -f "${google_live_test}" ]] || { printf 'missing GoogleModelLiveTest\n' >&2; exit 1; }
+grep -Fq 'GOOGLE_MODEL_LIVE' "${google_live_test}" || {
+    printf 'Google model smoke test must remain explicitly opt-in\n' >&2
+    exit 1
+}
+if [[ -e "${runtime_root}/src/test/java/com/java/system/sessionagent/model/GoogleNoToolLiveTest.java" ]]; then
+    printf 'obsolete GoogleNoToolLiveTest must not remain\n' >&2
+    exit 1
+fi
 
 for required_input in SEMANTIC_BASE_URL SEMANTIC_API_TOKEN GOOGLE_API_KEY GOOGLE_GENAI_MODEL; do
     grep -Fq "${required_input}" "${compose_file}" || {
