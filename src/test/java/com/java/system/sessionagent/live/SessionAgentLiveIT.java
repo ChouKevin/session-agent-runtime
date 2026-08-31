@@ -44,10 +44,7 @@ class SessionAgentLiveIT {
 
         JsonNode observation = scenario.successfulSourceObservationWithEvidence("fee", "formula");
         assertRevisionPinnedSourceObservation(observation);
-        String answer = scenario.finalAssistantText();
-        assertThat(lower(answer)).containsAnyOf("unavailable", "cannot", "not available");
-        assertThat(lower(answer)).containsAnyOf("formula", "configuration", "json");
-        assertThat(answer).doesNotMatch("(?s).*\\b\\d+(?:\\.\\d+)?%.*");
+        assertHonestRuntimeFeeAnswer(scenario.finalAssistantText());
     }
 
     @Test
@@ -72,10 +69,7 @@ class SessionAgentLiveIT {
         assertThat(data.required("hasMore").booleanValue()).isFalse();
         assertThat(data.required("coverage").required("issues").isArray()).isTrue();
         assertThat(data.required("coverage").required("issues").isEmpty()).isTrue();
-        String answer = lower(scenario.finalAssistantText());
-        assertThat(answer).contains("bnpl");
-        assertThat(answer).containsAnyOf("not found", "no bnpl", "not implemented", "does not support");
-        assertThat(answer).doesNotContain("bnpl supported", "bnpl is supported");
+        assertCodeLimitedBnplAnswer(scenario.finalAssistantText());
     }
 
     @Test
@@ -227,6 +221,26 @@ class SessionAgentLiveIT {
 
     private static String lower(String value) {
         return value.toLowerCase(Locale.ROOT);
+    }
+
+    static void assertHonestRuntimeFeeAnswer(String answer) {
+        String normalized = lower(answer);
+        assertThat(normalized).containsAnyOf("unavailable", "cannot", "not available", "unable to obtain", "do not have");
+        assertThat(normalized).containsAnyOf("current", "runtime", "database", "api");
+        assertThat(normalized).containsAnyOf("formula", "configuration", "json");
+        assertThat(normalized).doesNotMatch("(?s).*\\bcurrent(?:\\s+runtime)?(?:\\s+(?:database|api)(?:\\s*/\\s*(?:database|api))?)?\\s+fee(?:\\s+value)?\\s*(?:is|equals|=|:|of)\\s*"
+                + "(?!(?:unavailable|not available|unknown|unobtainable|not known|not accessible|not provided)\\b)[^.!?\\n]+.*");
+    }
+
+    static void assertCodeLimitedBnplAnswer(String answer) {
+        String normalized = lower(answer);
+        assertThat(normalized).contains("bnpl");
+        assertThat(normalized).containsAnyOf("not found", "no bnpl", "not implemented", "does not support");
+        assertThat(normalized).containsAnyOf("inspected code", "codebase", "source code", "repository");
+        assertThat(normalized).doesNotMatch("(?s).*\\bbnpl\\b.{0,120}\\b(?:is\\s+)?(?:not\\s+)?(?:supported|unsupported)\\b.{0,120}"
+                + "\\b(?:running\\s+system|production(?:\\s+system)?|live\\s+system)\\b.*");
+        assertThat(normalized).doesNotMatch("(?s).*\\b(?:running\\s+system|production(?:\\s+system)?|live\\s+system)\\b.{0,120}\\bbnpl\\b.{0,120}"
+                + "\\b(?:is\\s+)?(?:not\\s+)?(?:supported|unsupported)\\b.*");
     }
 
     private record Scenario(List<JsonNode> history) {

@@ -76,6 +76,9 @@ class ConversationAcceptanceTest {
             assertObservation(observations.get(1), 3, "codebase_list_entry_points", paymentEntryPointsInput(), paymentEntryPointsOutput());
             assertThat(runtime.reply(receipt).message()).contains("Credit card");
             assertThat(runtime.modelRequests()).extracting(request -> request.history().size()).containsExactly(1, 2, 3);
+            List<SessionMessage> catalogRequest = runtime.modelRequests().get(1).history();
+            assertUser(catalogRequest.get(0), 1, "alice", "Which payment methods are supported?");
+            assertObservation((ToolObservation) catalogRequest.get(1), 2, "list_repositories", "{}", repositoryCatalogOutput());
             List<SessionMessage> laterRequest = runtime.modelRequests().getLast().history();
             assertUser(laterRequest.get(0), 1, "alice", "Which payment methods are supported?");
             assertObservation((ToolObservation) laterRequest.get(1), 2, "list_repositories", "{}", repositoryCatalogOutput());
