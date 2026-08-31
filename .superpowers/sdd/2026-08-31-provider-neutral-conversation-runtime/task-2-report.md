@@ -51,6 +51,10 @@ git diff --check
 # clean
 ```
 
+## Commit
+
+Implementation commit: `b1815d58a962f2fe36212fcc261e19ca02d7d3fe`
+
 ## Self-review and Risks
 
 No Critical or Important findings. The legacy `execute`, `ToolMessage` projection, and rich
