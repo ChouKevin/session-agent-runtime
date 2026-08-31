@@ -2,6 +2,7 @@ package com.java.system.sessionagent.tool;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.java.system.sessionagent.tool.application.DirectToolRegistry;
+import com.java.system.sessionagent.tool.application.ToolFailureOutput;
 import com.java.system.sessionagent.tool.application.ToolRegistration;
 import com.java.system.sessionagent.tool.application.ToolExecutionFailure;
 import com.java.system.sessionagent.tool.application.ToolSnapshot;
@@ -36,6 +37,34 @@ import static com.tngtech.archunit.lang.syntax.ArchRuleDefinition.noClasses;
 import static org.assertj.core.api.Assertions.assertThat;
 
 class DirectToolRegistryTest {
+
+    @Test
+    void returns_the_adapter_data_string_unchanged_after_decoding_typed_input() {
+        AtomicInteger invocations = new AtomicInteger();
+        DirectToolRegistry registry = new DirectToolRegistry(List.of(registration(CATALOG_TOOL, ToolKind.CATALOG, invocations)));
+
+        String output = registry.invoke(registry.snapshot(), CATALOG_TOOL, "{\"repositoryId\":\"repo-a\",\"limit\":2}");
+
+        assertThat(output).isEqualTo("{\"items\":[\"repo-a:2\"]}");
+        assertThat(invocations).hasValue(1);
+    }
+
+    @Test
+    void renders_unknown_tools_and_invalid_json_as_generic_failures_without_repository_fields() {
+        DirectToolRegistry registry = new DirectToolRegistry(List.of(registration(CATALOG_TOOL, ToolKind.CATALOG, new AtomicInteger())));
+
+        ToolExecutionFailure unknownTool = assertThrows(ToolExecutionFailure.class,
+                () -> registry.invoke(registry.snapshot(), new ToolName("unknown"), "{}"));
+        ToolExecutionFailure invalidJson = assertThrows(ToolExecutionFailure.class,
+                () -> registry.invoke(registry.snapshot(), CATALOG_TOOL, "not-json"));
+
+        assertThat(ToolFailureOutput.format(unknownTool))
+                .isEqualTo("Tool execution failed.\nCode: TOOL_INPUT_INVALID\nMessage: The tool input is invalid.")
+                .doesNotContain("repositoryId", "revision");
+        assertThat(ToolFailureOutput.format(invalidJson))
+                .isEqualTo("Tool execution failed.\nCode: TOOL_INPUT_INVALID\nMessage: The tool input is invalid.")
+                .doesNotContain("repositoryId", "revision");
+    }
 
     @Test
     void sanitizes_an_unexpected_executor_failure_as_invalid_response() {

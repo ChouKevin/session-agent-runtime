@@ -11,6 +11,8 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.springframework.util.StringUtils;
+import org.springframework.http.MediaType;
+import org.springframework.test.web.client.MockRestServiceServer;
 import org.springframework.web.client.RestClient;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.json.JsonMapper;
@@ -21,10 +23,35 @@ import java.util.Set;
 import java.util.stream.Stream;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.springframework.test.web.client.ExpectedCount.once;
+import static org.springframework.test.web.client.match.MockRestRequestMatchers.requestTo;
+import static org.springframework.test.web.client.response.MockRestResponseCreators.withSuccess;
 
 class SemanticToolContractTest {
 
     private static final JsonMapper JSON = JsonMapper.builder().build();
+
+    @Test
+    void encloses_source_results_with_repository_and_revision_inside_semantic_output() throws Exception {
+        RestClient.Builder builder = RestClient.builder().baseUrl("https://semantic.test");
+        MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+        server.expect(once(), requestTo("https://semantic.test/v1/code-facts/search"))
+                .andRespond(withSuccess("""
+                        {"repositoryId":"payment-service","revision":"1111111111111111111111111111111111111111","result":{"fact":"ok"}}
+                        """, MediaType.APPLICATION_JSON));
+        DirectToolRegistry registry = new DirectToolRegistry(new SemanticToolProvider(List::of,
+                new SemanticSourceClient(builder.build())).registrations());
+
+        String output = registry.invoke(registry.snapshot(), new ToolName("codebase_search_code_facts"), """
+                {"repositoryId":"payment-service","revision":"1111111111111111111111111111111111111111","query":"payment"}
+                """);
+        JsonNode observation = JSON.readTree(output);
+
+        assertThat(observation.required("repositoryId").textValue()).isEqualTo("payment-service");
+        assertThat(observation.required("revision").textValue()).isEqualTo("1111111111111111111111111111111111111111");
+        assertThat(observation.required("data").required("fact").textValue()).isEqualTo("ok");
+        server.verify();
+    }
 
     @Test
     void exposes_the_exact_query_tool_set_without_removed_concept_tools() {

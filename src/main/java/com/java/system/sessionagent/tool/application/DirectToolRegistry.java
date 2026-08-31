@@ -35,6 +35,15 @@ public final class DirectToolRegistry {
         return new ToolSnapshot(registrations);
     }
 
+    /**
+     * Invokes a tool through the provider-neutral runtime boundary.
+     *
+     * <p>The rich execution record remains temporarily for pre-cutover callers and will be removed in Task 5.</p>
+     */
+    public String invoke(ToolSnapshot snapshot, ToolName name, String input) {
+        return execute(snapshot, name, input).dataJson();
+    }
+
     public ToolExecution execute(ToolSnapshot snapshot, ToolName name, String rawArguments) {
         Assert.notNull(snapshot, "Tool snapshot must not be null");
         Assert.notNull(name, "Tool name must not be null");

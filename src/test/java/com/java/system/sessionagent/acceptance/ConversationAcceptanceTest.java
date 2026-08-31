@@ -16,6 +16,7 @@ import com.java.system.sessionagent.conversation.domain.ResultId;
 import com.java.system.sessionagent.conversation.domain.SessionId;
 import com.java.system.sessionagent.conversation.domain.SessionMessage;
 import com.java.system.sessionagent.conversation.domain.SessionSequence;
+import com.java.system.sessionagent.conversation.domain.ToolObservation;
 import com.java.system.sessionagent.conversation.domain.ToolMessage;
 import com.java.system.sessionagent.conversation.domain.UserMessage;
 import com.java.system.sessionagent.conversation.port.out.ConversationStore;
@@ -49,9 +50,8 @@ class ConversationAcceptanceTest {
             runtime.process(receipt);
 
             AssistantMessage reply = runtime.reply(receipt);
-            ToolMessage source = runtime.latestSourceTool(receipt);
-            assertThat(source.repositoryId()).contains("payment-service");
-            assertThat(source.resultJson()).contains("credit card", "bank transfer", "wallet");
+            ToolObservation source = runtime.latestSourceTool(receipt);
+            assertThat(source.output()).contains("\"repositoryId\":\"payment-service\"", "credit card", "bank transfer", "wallet");
             assertThat(reply.message()).isNotBlank();
         }
     }
@@ -64,9 +64,8 @@ class ConversationAcceptanceTest {
 
             AssistantMessage reply = runtime.reply(receipt);
             assertThat(reply.message()).contains("current runtime value is unavailable");
-            ToolMessage source = runtime.latestSourceTool(receipt);
-            assertThat(source.repositoryId()).contains("payment-service");
-            assertThat(source.resultJson()).contains("formula is loaded from JSON settings");
+            ToolObservation source = runtime.latestSourceTool(receipt);
+            assertThat(source.output()).contains("\"repositoryId\":\"payment-service\"", "formula is loaded from JSON settings");
         }
     }
 
@@ -77,15 +76,14 @@ class ConversationAcceptanceTest {
             runtime.process(receipt);
 
             AssistantMessage reply = runtime.reply(receipt);
-            List<ToolMessage> toolHistory = runtime.store.toolMessages(receipt.messageJobId());
+            List<ToolObservation> toolHistory = runtime.store.toolObservations(receipt.messageJobId());
             assertThat(reply.message()).contains("No BNPL behavior was found", "codebase");
-            ToolMessage completeEmptySearch = toolHistory.stream()
+            ToolObservation completeEmptySearch = toolHistory.stream()
                     .filter(message -> message.toolName().equals("codebase_search_code_facts"))
                     .findFirst()
                     .orElseThrow();
-            assertThat(completeEmptySearch.repositoryId()).contains("payment-service");
-            assertThat(completeEmptySearch.revision()).contains("payment-revision-1");
-            assertThat(completeEmptySearch.resultJson()).contains(
+            assertThat(completeEmptySearch.output()).contains("\"repositoryId\":\"payment-service\"", "\"revision\":\"payment-revision-1\"");
+            assertThat(completeEmptySearch.output()).contains(
                     "\"totalCount\":0", "\"hasMore\":false", "\"coverage\":{\"issues\":[]}");
         }
     }
@@ -96,10 +94,11 @@ class ConversationAcceptanceTest {
             MessageReceipt receipt = runtime.receive("refund-session", "alice", "refund-1", "How do cancellation and refund work?");
             runtime.process(receipt);
 
-            List<ToolMessage> sources = runtime.store.toolMessages(receipt.messageJobId()).stream()
-                    .filter(message -> message.repositoryId().isPresent()).toList();
-            assertThat(sources).extracting(message -> message.repositoryId().orElseThrow()).containsExactlyInAnyOrder("order-service", "payment-service");
-            assertThat(sources).allSatisfy(message -> assertThat(message.arguments()).contains("\"repositoryId\":\"" + message.repositoryId().orElseThrow() + "\""));
+            List<ToolObservation> sources = runtime.store.toolObservations(receipt.messageJobId()).stream()
+                    .filter(message -> message.toolName().startsWith("codebase_")).toList();
+            assertThat(sources).anySatisfy(message -> assertThat(message.output()).contains("\"repositoryId\":\"order-service\""));
+            assertThat(sources).anySatisfy(message -> assertThat(message.output()).contains("\"repositoryId\":\"payment-service\""));
+            assertThat(sources).allSatisfy(message -> assertThat(message.input()).contains("\"repositoryId\":"));
             AssistantMessage reply = runtime.reply(receipt);
             assertThat(reply.message()).contains("Cancellation and refund information");
         }
@@ -113,9 +112,9 @@ class ConversationAcceptanceTest {
             MessageReceipt second = runtime.receive("repeat-session", "alice", "repeat-2", "Which payment methods are supported?");
             runtime.process(second);
 
-            ResultId firstResult = runtime.store.toolMessages(first.messageJobId()).getLast().resultId();
-            ResultId secondResult = runtime.store.toolMessages(second.messageJobId()).getLast().resultId();
-            assertThat(secondResult).isNotEqualTo(firstResult);
+            String firstObservation = runtime.store.toolObservations(first.messageJobId()).getLast().observationId().value();
+            String secondObservation = runtime.store.toolObservations(second.messageJobId()).getLast().observationId().value();
+            assertThat(secondObservation).isNotEqualTo(firstObservation);
         }
     }
 
@@ -125,12 +124,13 @@ class ConversationAcceptanceTest {
             MessageReceipt receipt = runtime.receive("retry-session", "alice", "retry-1", "Use an invalid repository to find payment methods.");
             runtime.process(receipt);
 
-            assertThat(runtime.store.feedbackMessages(receipt.messageJobId())).extracting(FeedbackMessage::code).contains("UNKNOWN_REPOSITORY");
-            assertThat(runtime.store.toolMessages(receipt.messageJobId())).filteredOn(message -> message.toolName().equals("list_repositories")).hasSize(2);
+            assertThat(runtime.store.toolObservations(receipt.messageJobId())).anySatisfy(message ->
+                    assertThat(message.output()).contains("Code: TOOL_REPOSITORY_NOT_FOUND"));
+            assertThat(runtime.store.toolObservations(receipt.messageJobId())).filteredOn(message -> message.toolName().equals("list_repositories")).hasSize(2);
             assertThat(runtime.semantic.calls()).filteredOn(call -> call.path().equals("/v1/repositories")).hasSize(2);
             assertThat(runtime.semantic.calls()).anySatisfy(call -> assertThat(call.path()).isEqualTo("/v1/repositories/payment-service/entry-points"));
-            assertThat(runtime.store.toolMessages(receipt.messageJobId())).anySatisfy(message ->
-                    assertThat(message.repositoryId()).contains("payment-service"));
+            assertThat(runtime.store.toolObservations(receipt.messageJobId())).anySatisfy(message ->
+                    assertThat(message.output()).contains("\"repositoryId\":\"payment-service\""));
         }
     }
 
@@ -175,9 +175,9 @@ class ConversationAcceptanceTest {
             return model.replyRequests();
         }
 
-        ToolMessage latestSourceTool(MessageReceipt receipt) {
-            return store.toolMessages(receipt.messageJobId()).stream()
-                    .filter(message -> message.repositoryId().isPresent())
+        ToolObservation latestSourceTool(MessageReceipt receipt) {
+            return store.toolObservations(receipt.messageJobId()).stream()
+                    .filter(message -> message.toolName().startsWith("codebase_"))
                     .max(Comparator.comparingLong(message -> message.sequence().value()))
                     .orElseThrow();
         }
@@ -221,13 +221,8 @@ class ConversationAcceptanceTest {
             return List.copyOf(messages.getOrDefault(sessionId, List.of()));
         }
 
-        List<ToolMessage> toolMessages(MessageJobId jobId) {
-            return messages.values().stream().flatMap(List::stream).filter(ToolMessage.class::isInstance).map(ToolMessage.class::cast)
-                    .filter(message -> message.messageJobId().filter(jobId::equals).isPresent()).toList();
-        }
-
-        List<FeedbackMessage> feedbackMessages(MessageJobId jobId) {
-            return messages.values().stream().flatMap(List::stream).filter(FeedbackMessage.class::isInstance).map(FeedbackMessage.class::cast)
+        List<ToolObservation> toolObservations(MessageJobId jobId) {
+            return messages.values().stream().flatMap(List::stream).filter(ToolObservation.class::isInstance).map(ToolObservation.class::cast)
                     .filter(message -> message.messageJobId().filter(jobId::equals).isPresent()).toList();
         }
 
@@ -286,6 +281,17 @@ class ConversationAcceptanceTest {
             results.put(resultId, new ResultProjection(resultId, claim.sessionId(), data.toolName(), data.toolVersion(), data.canonicalArguments(),
                     data.repositoryId(), data.revision(), data.resultJson()));
             return message;
+        }
+
+        @Override
+        public void append(MessageWorkClaim claim, MessageBatch batch, Instant createdAt) {
+            List<SessionMessage> history = messages.get(claim.sessionId());
+            for (MessageData data : batch.messages()) {
+                if (data instanceof ToolObservationData observation) {
+                    history.add(new ToolObservation(claim.sessionId(), sequence(history), Optional.of(claim.messageJobId()), createdAt,
+                            MessageRole.TOOL, observation.observationId(), observation.toolName(), observation.input(), observation.output()));
+                }
+            }
         }
 
         @Override

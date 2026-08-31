@@ -26,17 +26,25 @@ public final class ToolExecutionFailure extends RuntimeException {
     private final Kind kind;
     private final Optional<Duration> retryAfter;
     private final Optional<RevisionOutdatedDetails> revisionOutdated;
+    private final String safeMessage;
 
     private ToolExecutionFailure(Kind kind, Optional<Duration> retryAfter, Throwable cause) {
-        this(kind, retryAfter, Optional.empty(), cause);
+        this(kind, retryAfter, Optional.empty(), messageFor(kind), cause);
     }
 
     private ToolExecutionFailure(Kind kind, Optional<Duration> retryAfter, Optional<RevisionOutdatedDetails> revisionOutdated,
                                  Throwable cause) {
-        super(messageFor(kind), cause);
+        this(kind, retryAfter, revisionOutdated, messageFor(kind), cause);
+    }
+
+    private ToolExecutionFailure(Kind kind, Optional<Duration> retryAfter, Optional<RevisionOutdatedDetails> revisionOutdated,
+                                 String safeMessage, Throwable cause) {
+        super(safeMessage, cause);
         this.kind = Objects.requireNonNull(kind, "Tool execution failure kind must not be null");
         this.retryAfter = Objects.requireNonNull(retryAfter, "Retry-after must not be null");
         this.revisionOutdated = Objects.requireNonNull(revisionOutdated, "Revision-outdated details must not be null");
+        Assert.hasText(safeMessage, "Tool failure message must not be blank");
+        this.safeMessage = safeMessage;
         Assert.isTrue(kind == Kind.SEMANTIC_INDEX_UNAVAILABLE || retryAfter.isEmpty(),
                 "Only unavailable failures may carry retry-after");
         retryAfter.ifPresent(duration -> Assert.isTrue(!duration.isNegative(),
@@ -46,9 +54,22 @@ public final class ToolExecutionFailure extends RuntimeException {
     public static ToolExecutionFailure repositoryNotFound() { return failure(Kind.REPOSITORY_NOT_FOUND); }
     public static ToolExecutionFailure invalidInput() { return failure(Kind.INVALID_INPUT); }
     public static ToolExecutionFailure inputTooLarge() { return failure(Kind.INPUT_TOO_LARGE); }
+    public static ToolExecutionFailure revisionOutdated(String retryGuidance) {
+        Assert.hasText(retryGuidance, "Revision-outdated retry guidance must not be blank");
+        return new ToolExecutionFailure(Kind.REVISION_OUTDATED, Optional.empty(), Optional.empty(),
+                "Tool repository revision is outdated. " + retryGuidance, null);
+    }
+
+    /**
+     * Temporary compatibility overload for callers that still use the legacy rich failure ABI.
+     *
+     * @deprecated Task 5 removes revision details from the common runtime failure contract.
+     */
+    @Deprecated(since = "Task 2", forRemoval = true)
     public static ToolExecutionFailure revisionOutdated(String repositoryId, String requestedRevision, String currentRevision, String retryGuidance) {
         return new ToolExecutionFailure(Kind.REVISION_OUTDATED, Optional.empty(), Optional.of(
-                new RevisionOutdatedDetails(repositoryId, requestedRevision, currentRevision, retryGuidance)), null);
+                new RevisionOutdatedDetails(repositoryId, requestedRevision, currentRevision, retryGuidance)),
+                "Tool repository revision is outdated. " + retryGuidance, null);
     }
     public static ToolExecutionFailure indexNotReady() { return failure(Kind.INDEX_NOT_READY); }
     public static ToolExecutionFailure indexContractMismatch() { return failure(Kind.INDEX_CONTRACT_MISMATCH); }
@@ -67,6 +88,10 @@ public final class ToolExecutionFailure extends RuntimeException {
     public Optional<Duration> retryAfter() { return retryAfter; }
     public Optional<RevisionOutdatedDetails> revisionOutdated() {
         return revisionOutdated;
+    }
+
+    public String safeMessage() {
+        return safeMessage;
     }
 
     private static String messageFor(Kind kind) {

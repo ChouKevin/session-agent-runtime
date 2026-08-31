@@ -4,6 +4,7 @@ import com.java.system.sessionagent.conversation.domain.AssistantMessage;
 import com.java.system.sessionagent.conversation.domain.FeedbackMessage;
 import com.java.system.sessionagent.conversation.domain.SessionMessage;
 import com.java.system.sessionagent.conversation.domain.ToolMessage;
+import com.java.system.sessionagent.conversation.domain.ToolObservation;
 import com.java.system.sessionagent.conversation.domain.UserMessage;
 import com.java.system.sessionagent.tool.json.StrictJsonCodec;
 import org.springframework.ai.chat.messages.Message;
@@ -44,6 +45,10 @@ public final class ConversationHistoryProjector {
         if (message instanceof ToolMessage toolMessage) {
             addToolProjection(projected, toolMessage.modelCallId(), toolMessage.modelContext(), toolMessage.toolName(),
                     toolMessage.arguments(), toolMessage.resultJson());
+            return;
+        }
+        if (message instanceof ToolObservation observation) {
+            projected.add(new org.springframework.ai.chat.messages.UserMessage(toolObservationText(observation)));
             return;
         }
         if (message instanceof FeedbackMessage feedbackMessage) {
@@ -87,6 +92,18 @@ public final class ConversationHistoryProjector {
                 .build();
         projected.add(toolRequest);
         projected.add(toolResponse);
+    }
+
+    private static String toolObservationText(ToolObservation observation) {
+        return """
+                Runtime tool observation
+                Tool: %s
+                Input:
+                %s
+                Output:
+                %s
+                End runtime tool observation
+                """.formatted(observation.toolName(), observation.input(), observation.output());
     }
 
     private record RejectedToolResponse(String code, String message, String status) {

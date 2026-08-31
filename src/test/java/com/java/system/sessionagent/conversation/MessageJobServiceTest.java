@@ -5,6 +5,7 @@ import com.java.system.sessionagent.conversation.domain.MessageWorkClaim;
 import com.java.system.sessionagent.conversation.domain.FeedbackMessage;
 import com.java.system.sessionagent.conversation.domain.ModelDecision;
 import com.java.system.sessionagent.conversation.domain.ResultId;
+import com.java.system.sessionagent.conversation.domain.ObservationId;
 import com.java.system.sessionagent.conversation.domain.SessionId;
 import com.java.system.sessionagent.conversation.domain.SessionSequence;
 import com.java.system.sessionagent.conversation.domain.UserMessage;
@@ -48,10 +49,59 @@ import static org.mockito.Mockito.verify;
 
 class MessageJobServiceTest {
 
+    @Test
+    void persists_a_successful_tool_call_as_an_opaque_observation() {
+        RecordingStore store = new RecordingStore();
+        ScriptedModel model = new ScriptedModel(store,
+                new ModelDecision.UseTool("provider-call", new ToolName("echo"), "{\"value\":\"x\"}", MODEL_CONTEXT),
+                new ModelDecision.AnswerReady());
+        MessageJobService service = new MessageJobService(store, model, new DirectToolRegistry(List.of(
+                registration("echo", ToolKind.CATALOG, Optional.empty(), Optional.empty(), "{\"value\":\"x\"}"))),
+                Clock.fixed(Instant.parse("2026-08-16T00:00:00Z"), ZoneOffset.UTC));
+
+        service.process(store.claim, () -> true);
+
+        assertThat(store.messageBatches).singleElement().satisfies(batch -> {
+            assertThat(batch.jobUpdate()).isEqualTo(ConversationStore.JobUpdate.KEEP_WORKING);
+            assertThat(batch.messages()).singleElement().isInstanceOf(ConversationStore.ToolObservationData.class);
+            ConversationStore.ToolObservationData observation = (ConversationStore.ToolObservationData) batch.messages().getFirst();
+            assertThat(observation.toolName()).isEqualTo("echo");
+            assertThat(observation.input()).isEqualTo("{\"value\":\"x\"}");
+            assertThat(observation.output()).isEqualTo("{\"value\":\"x\"}");
+            assertThat(observation.observationId().value())
+                    .isNotBlank();
+        });
+        assertThat(store.toolMessages).isEmpty();
+    }
+
+    @Test
+    void persists_an_ordinary_tool_failure_as_an_observation_and_continues() {
+        RecordingStore store = new RecordingStore();
+        ScriptedModel model = new ScriptedModel(store,
+                new ModelDecision.UseTool("provider-call", new ToolName("unknown"), "{not-json}", MODEL_CONTEXT),
+                new ModelDecision.AnswerReady());
+        MessageJobService service = new MessageJobService(store, model, new DirectToolRegistry(List.of()),
+                Clock.fixed(Instant.parse("2026-08-16T00:00:00Z"), ZoneOffset.UTC));
+
+        service.process(store.claim, () -> true);
+
+        assertThat(store.messageBatches).singleElement().satisfies(batch -> {
+            assertThat(batch.jobUpdate()).isEqualTo(ConversationStore.JobUpdate.KEEP_WORKING);
+            assertThat(batch.messages()).singleElement().isInstanceOf(ConversationStore.ToolObservationData.class);
+            ConversationStore.ToolObservationData observation = (ConversationStore.ToolObservationData) batch.messages().getFirst();
+            assertThat(observation.toolName()).isEqualTo("unknown");
+            assertThat(observation.input()).isEqualTo("{not-json}");
+            assertThat(observation.output()).isEqualTo(
+                    "Tool execution failed.\nCode: TOOL_INPUT_INVALID\nMessage: The tool input is invalid.");
+        });
+        assertThat(store.storedReplyText).isEqualTo("Answer");
+        assertThat(store.feedbackMessages).isEmpty();
+    }
+
     private static final String MODEL_CONTEXT = "dGVzdA==";
 
     @Test
-    void issues_catalog_then_full_snapshot_and_commits_the_valid_cited_reply() {
+    void persists_each_catalog_and_source_result_as_an_opaque_observation() {
         RecordingStore store = new RecordingStore();
         ScriptedModel model = new ScriptedModel(store,
                 new ModelDecision.UseTool("catalog-call", new ToolName("list_repositories"), "{}", MODEL_CONTEXT),
@@ -66,13 +116,14 @@ class MessageJobServiceTest {
         service.process(store.claim, () -> true);
 
         assertThat(model.snapshots).containsExactly(List.of("list_repositories", "source"), List.of("list_repositories", "source"), List.of("list_repositories", "source"));
-        assertThat(store.toolMessages).hasSize(2);
-        assertThat(store.toolMessages.get(1).arguments()).isEqualTo("{\"repositoryId\":\"payment-service\"}");
+        assertThat(store.messageBatches).hasSize(2);
+        assertThat(observation(store.messageBatches.get(0)).toolName()).isEqualTo("list_repositories");
+        assertThat(observation(store.messageBatches.get(1)).input()).isEqualTo("{\"repositoryId\":\"payment-service\"}");
         assertThat(store.storedReplyText).isEqualTo("Answer");
     }
 
     @Test
-    void treats_a_not_issued_tool_as_safe_correctable_feedback_and_continues() {
+    void treats_a_not_issued_tool_as_a_safe_observation_and_continues() {
         RecordingStore store = new RecordingStore();
         store.seedCatalog();
         ScriptedModel model = new ScriptedModel(store,
@@ -89,11 +140,11 @@ class MessageJobServiceTest {
 
         service.process(store.claim, () -> true);
 
-        assertThat(store.feedbackCodes).containsExactly("INVALID_TOOL_INPUT");
-        assertThat(store.toolMessages).hasSize(2);
+        assertThat(store.feedbackCodes).isEmpty();
+        assertThat(store.messageBatches).hasSize(2);
+        assertThat(observation(store.messageBatches.getFirst()).output()).contains("Code: TOOL_INPUT_INVALID");
         assertThat(store.storedReplyText).isEqualTo("Answer");
         verify(telemetry).tool("not-issued", "INVALID_INPUT", Optional.empty(), Optional.empty());
-        verify(telemetry).feedback("INVALID_TOOL_INPUT");
     }
 
     @Test
@@ -249,7 +300,7 @@ class MessageJobServiceTest {
     }
 
     @Test
-    void preserves_the_original_rejected_tool_request_for_history_reconstruction() {
+    void persists_the_original_rejected_tool_request_as_a_neutral_observation() {
         RecordingStore store = new RecordingStore();
         store.seedSource();
         AtomicInteger sourceExecutions = new AtomicInteger();
@@ -265,18 +316,11 @@ class MessageJobServiceTest {
 
         service.process(store.claim, () -> true);
 
-        assertThat(store.feedbackMessages).singleElement().satisfies(feedback -> {
-            assertThat(feedback.code()).isEqualTo("INVALID_TOOL_INPUT");
-            assertThat(feedback.modelCallId()).contains("source-before-catalog");
-            assertThat(feedback.toolName()).contains("source");
-            assertThat(feedback.rejectedArguments()).contains("{not-json}");
-            assertThat(feedback.message()).doesNotContain("{not-json}");
-        });
-        List<org.springframework.ai.chat.messages.Message> history = new ConversationHistoryProjector().project(store.loadHistory(store.claim.sessionId()));
-        org.springframework.ai.chat.messages.AssistantMessage request = (org.springframework.ai.chat.messages.AssistantMessage) history.get(2);
-        org.springframework.ai.chat.messages.ToolResponseMessage response = (org.springframework.ai.chat.messages.ToolResponseMessage) history.get(3);
-        assertThat(request.getToolCalls().getFirst().arguments()).isEqualTo("{not-json}");
-        assertThat(response.getResponses().getFirst().responseData()).contains("INVALID_TOOL_INPUT");
+        ConversationStore.ToolObservationData observation = observation(store.messageBatches.getFirst());
+        assertThat(observation.toolName()).isEqualTo("source");
+        assertThat(observation.input()).isEqualTo("{not-json}");
+        assertThat(observation.output()).contains("Code: TOOL_INPUT_INVALID")
+                .doesNotContain("source-before-catalog", MODEL_CONTEXT);
         assertThat(sourceExecutions).hasValue(0);
     }
 
@@ -385,20 +429,17 @@ class MessageJobServiceTest {
         MessageJobService service = new MessageJobService(store, model, registry,
                 Clock.fixed(Instant.parse("2026-08-16T00:00:00Z"), ZoneOffset.UTC));
 
-        service.process(store.claim, () -> store.feedbackMessages.isEmpty());
+        service.process(store.claim, () -> store.messageBatches.isEmpty());
 
-        assertThat(store.feedbackMessages).singleElement().satisfies(feedback -> {
-            assertThat(feedback.code()).isEqualTo(expectedCode);
-            assertThat(feedback.modelCallId()).contains("catalog-call");
-            assertThat(feedback.toolName()).contains("list_repositories");
-            assertThat(feedback.rejectedArguments()).contains(arguments);
-            assertThat(feedback.message()).doesNotContain(arguments);
-        });
+        ConversationStore.ToolObservationData observation = observation(store.messageBatches.getFirst());
+        assertThat(observation.toolName()).isEqualTo("list_repositories");
+        assertThat(observation.input()).isEqualTo(arguments);
+        assertThat(observation.output()).contains("Code: " + expectedCode);
         assertThat(executions).hasValue(0);
     }
 
     @Test
-    void clamps_tool_retry_after_without_appending_history() {
+    void persists_unavailable_tool_failures_without_scheduling_a_retry() {
         RecordingStore store = new RecordingStore();
         store.job = Optional.of(new ConversationStore.MessageJobProjection(store.claim.messageJobId(), store.claim.sessionId(),
                 com.java.system.sessionagent.conversation.domain.JobStatus.WORKING, 0, 0, Optional.empty()));
@@ -416,11 +457,11 @@ class MessageJobServiceTest {
 
         service.process(store.claim, () -> true);
 
-        assertThat(store.scheduledAt).contains(now.plusSeconds(60));
+        assertThat(store.scheduledAt).isEmpty();
         assertThat(store.feedbackMessages).isEmpty();
         assertThat(store.toolMessages).isEmpty();
+        assertThat(observation(store.messageBatches.getFirst()).output()).contains("Code: TOOL_DEPENDENCY_UNAVAILABLE");
         verify(telemetry).tool("list_repositories", "SEMANTIC_INDEX_UNAVAILABLE", Optional.empty(), Optional.empty());
-        verify(telemetry).retry("TOOL", java.time.Duration.ofSeconds(60));
     }
 
     @Test
@@ -441,7 +482,7 @@ class MessageJobServiceTest {
     }
 
     @Test
-    void preserves_tool_details_when_transient_tool_retries_are_exhausted() {
+    void persists_unavailable_tool_failures_after_retry_budget_as_observations() {
         RecordingStore store = new RecordingStore();
         store.job = Optional.of(new ConversationStore.MessageJobProjection(store.claim.messageJobId(), store.claim.sessionId(),
                 com.java.system.sessionagent.conversation.domain.JobStatus.WORKING, 3, 0, Optional.empty()));
@@ -456,13 +497,9 @@ class MessageJobServiceTest {
 
         service.process(store.claim, () -> true);
 
-        assertThat(store.feedbackMessages).singleElement().satisfies(feedback -> {
-            assertThat(feedback.code()).isEqualTo("DEPENDENCY_UNAVAILABLE");
-            assertThat(feedback.terminal()).isTrue();
-            assertThat(feedback.modelCallId()).contains("tool-call");
-            assertThat(feedback.toolName()).contains("list_repositories");
-            assertThat(feedback.rejectedArguments()).contains("{\"repositoryId\":\"payment-service\"}");
-        });
+        assertThat(store.feedbackMessages).isEmpty();
+        assertThat(observation(store.messageBatches.getFirst()).input()).isEqualTo("{\"repositoryId\":\"payment-service\"}");
+        assertThat(observation(store.messageBatches.getFirst()).output()).contains("Code: TOOL_DEPENDENCY_UNAVAILABLE");
         assertThat(store.scheduledAt).isEmpty();
     }
 
@@ -550,7 +587,7 @@ class MessageJobServiceTest {
     }
 
     @Test
-    void sanitizes_an_unexpected_tool_executor_failure_into_terminal_feedback() {
+    void sanitizes_an_unexpected_tool_executor_failure_into_an_observation() {
         RecordingStore store = new RecordingStore();
         store.seedCatalog();
         ScriptedModel model = new ScriptedModel(store,
@@ -563,16 +600,15 @@ class MessageJobServiceTest {
 
         service.process(store.claim, () -> true);
 
-        assertThat(store.feedbackMessages).singleElement().satisfies(feedback -> {
-            assertThat(feedback.code()).isEqualTo("DEPENDENCY_INVALID_RESPONSE");
-            assertThat(feedback.terminal()).isTrue();
-            assertThat(feedback.message()).doesNotContain("provider secret");
-        });
-        assertThat(store.terminalFeedbackWritten).isTrue();
+        assertThat(store.feedbackMessages).isEmpty();
+        assertThat(observation(store.messageBatches.getFirst()).output())
+                .contains("Code: TOOL_DEPENDENCY_INVALID_RESPONSE")
+                .doesNotContain("provider secret");
+        assertThat(store.terminalFeedbackWritten).isFalse();
     }
 
     @Test
-    void emitsAnInvalidResponseToolOutcomeWhenEnvelopeValidationRejectsToolData() {
+    void persists_adapter_output_without_reinterpreting_it_as_a_result_envelope() {
         RecordingStore store = new RecordingStore();
         ScriptedModel model = new ScriptedModel(store,
                 new ModelDecision.UseTool("catalog-call", new ToolName("list_repositories"), "{}", MODEL_CONTEXT));
@@ -585,9 +621,9 @@ class MessageJobServiceTest {
 
         service.process(store.claim, () -> true);
 
-        assertThat(store.feedbackCodes).containsExactly("DEPENDENCY_INVALID_RESPONSE");
-        verify(telemetry).tool("list_repositories", "INVALID_RESPONSE", Optional.empty(), Optional.empty());
-        verify(telemetry).feedback("DEPENDENCY_INVALID_RESPONSE");
+        assertThat(store.feedbackCodes).isEmpty();
+        assertThat(observation(store.messageBatches.getFirst()).output()).isEqualTo("not-json");
+        verify(telemetry).tool("list_repositories", "SUCCESS", Optional.empty(), Optional.empty());
     }
 
     @Test
@@ -632,8 +668,12 @@ class MessageJobServiceTest {
 
     private static Stream<org.junit.jupiter.params.provider.Arguments> rejectedCatalogArguments() {
         return Stream.of(
-                org.junit.jupiter.params.provider.Arguments.of("{not-json}", "INVALID_TOOL_INPUT"),
+                org.junit.jupiter.params.provider.Arguments.of("{not-json}", "TOOL_INPUT_INVALID"),
                 org.junit.jupiter.params.provider.Arguments.of("{\"repositoryId\":\"" + "界".repeat(22_000) + "\"}", "TOOL_INPUT_TOO_LARGE"));
+    }
+
+    private static ConversationStore.ToolObservationData observation(ConversationStore.MessageBatch batch) {
+        return (ConversationStore.ToolObservationData) batch.messages().getFirst();
     }
 
     private static ListAppender<ILoggingEvent> attachAppender(Class<?> type) {
@@ -731,6 +771,7 @@ class MessageJobServiceTest {
         private final MessageWorkClaim claim = new MessageWorkClaim(new com.java.system.sessionagent.conversation.domain.MessageJobId("job-1"), new SessionId("session-1"), "worker", 1,
                 Instant.parse("2026-08-16T00:00:00Z"), Instant.parse("2026-08-16T00:01:00Z"));
         private final List<com.java.system.sessionagent.conversation.domain.ToolMessage> toolMessages = new java.util.ArrayList<>();
+        private final List<ConversationStore.MessageBatch> messageBatches = new java.util.ArrayList<>();
         private final List<String> feedbackCodes = new java.util.ArrayList<>();
         private final List<FeedbackMessage> feedbackMessages = new java.util.ArrayList<>();
         private String storedReplyText;
@@ -748,6 +789,7 @@ class MessageJobServiceTest {
             com.java.system.sessionagent.conversation.domain.ToolMessage message = new com.java.system.sessionagent.conversation.domain.ToolMessage(claim.sessionId(), new SessionSequence(toolMessages.size() + 1), Optional.of(claim.messageJobId()), now, MessageRole.TOOL, resultId, modelCallId, modelContext, data.toolName(), data.toolVersion(), data.canonicalArguments(), data.repositoryId(), data.revision(), data.resultJson());
             toolMessages.add(message); return message;
         }
+        @Override public void append(MessageWorkClaim ignored, ConversationStore.MessageBatch batch, Instant now) { messageBatches.add(batch); }
         private void seedCatalog() {
             toolMessages.add(new com.java.system.sessionagent.conversation.domain.ToolMessage(claim.sessionId(), new SessionSequence(1), Optional.of(claim.messageJobId()), claim.claimedAt(), MessageRole.TOOL,
                     new ResultId("catalog-result"), "catalog-call", MODEL_CONTEXT, "list_repositories", "v1", "{}", Optional.empty(), Optional.empty(), "{\"resultId\":\"catalog-result\",\"toolName\":\"list_repositories\",\"data\":{}}"));

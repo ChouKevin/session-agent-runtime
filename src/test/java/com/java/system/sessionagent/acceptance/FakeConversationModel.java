@@ -1,11 +1,10 @@
 package com.java.system.sessionagent.acceptance;
 
-import com.java.system.sessionagent.conversation.domain.FeedbackMessage;
 import com.java.system.sessionagent.conversation.domain.ModelDecision;
 import com.java.system.sessionagent.conversation.domain.ModelRequest;
 import com.java.system.sessionagent.conversation.domain.ReplyRequest;
 import com.java.system.sessionagent.conversation.domain.SessionMessage;
-import com.java.system.sessionagent.conversation.domain.ToolMessage;
+import com.java.system.sessionagent.conversation.domain.ToolObservation;
 import com.java.system.sessionagent.conversation.domain.UserMessage;
 import com.java.system.sessionagent.conversation.port.out.ConversationModel;
 import com.java.system.sessionagent.tool.domain.ToolName;
@@ -43,43 +42,39 @@ final class FakeConversationModel implements ConversationModel {
                 .max(Comparator.comparingLong(message -> message.sequence().value())).orElseThrow();
         List<SessionMessage> jobHistory = request.history().stream()
                 .filter(message -> message.messageJobId().equals(question.messageJobId())).toList();
-        if (jobHistory.stream().noneMatch(message -> message instanceof ToolMessage tool && tool.toolName().equals("list_repositories"))) {
+        if (toolObservations(jobHistory).noneMatch(tool -> tool.toolName().equals("list_repositories"))) {
             return tool("catalog-" + question.sequence().value(), LIST_REPOSITORIES, "{}");
         }
         String text = question.message().toLowerCase(java.util.Locale.ROOT);
-        boolean invalidRepositoryFeedback = jobHistory.stream().filter(FeedbackMessage.class::isInstance).map(FeedbackMessage.class::cast)
-                .anyMatch(message -> message.code().equals("UNKNOWN_REPOSITORY"));
-        if (text.contains("invalid repository") && !invalidRepositoryFeedback) {
+        boolean invalidRepositoryFailure = toolObservations(jobHistory)
+                .anyMatch(tool -> tool.output().contains("Code: TOOL_REPOSITORY_NOT_FOUND"));
+        if (text.contains("invalid repository") && !invalidRepositoryFailure) {
             return tool("invalid-source-" + question.sequence().value(), LIST_ENTRY_POINTS, "{\"repositoryId\":\"missing-service\",\"revision\":\"missing-revision\"}");
         }
-        if (text.contains("invalid repository") && jobHistory.stream().filter(ToolMessage.class::isInstance).map(ToolMessage.class::cast)
-                .filter(message -> message.toolName().equals("list_repositories")).count() < 2) {
+        if (text.contains("invalid repository") && toolObservations(jobHistory)
+                .filter(tool -> tool.toolName().equals("list_repositories")).count() < 2) {
             return tool("refresh-catalog-" + question.sequence().value(), LIST_REPOSITORIES, "{}");
         }
-        if (text.contains("bnpl") && jobHistory.stream().filter(ToolMessage.class::isInstance).map(ToolMessage.class::cast)
-                .noneMatch(message -> message.repositoryId().isPresent())) {
+        if (text.contains("bnpl") && !hasSourceObservation(jobHistory, "payment-service")) {
             return tool("bnpl-source-" + question.sequence().value(), LIST_ENTRY_POINTS, "{\"repositoryId\":\"payment-service\",\"revision\":\"payment-revision-1\"}");
         }
-        if (text.contains("bnpl") && jobHistory.stream().filter(ToolMessage.class::isInstance).map(ToolMessage.class::cast)
-                .noneMatch(message -> message.toolName().equals(LOOKUP_API_ROUTE.value()))) {
+        if (text.contains("bnpl") && toolObservations(jobHistory)
+                .noneMatch(tool -> tool.toolName().equals(LOOKUP_API_ROUTE.value()))) {
             return tool("bnpl-route-" + question.sequence().value(), LOOKUP_API_ROUTE,
                     "{\"repositoryId\":\"payment-service\",\"revision\":\"payment-revision-1\",\"path\":\"/bnpl\",\"httpMethod\":\"GET\"}");
         }
-        if (text.contains("bnpl") && jobHistory.stream().filter(ToolMessage.class::isInstance).map(ToolMessage.class::cast)
-                .noneMatch(message -> message.toolName().equals(SEARCH_CODE_FACTS.value()))) {
+        if (text.contains("bnpl") && toolObservations(jobHistory)
+                .noneMatch(tool -> tool.toolName().equals(SEARCH_CODE_FACTS.value()))) {
             return tool("bnpl-search-" + question.sequence().value(), SEARCH_CODE_FACTS,
                     "{\"repositoryId\":\"payment-service\",\"revision\":\"payment-revision-1\",\"query\":\"BNPL\"}");
         }
-        if (text.contains("cancellation") && jobHistory.stream().filter(ToolMessage.class::isInstance).map(ToolMessage.class::cast)
-                .noneMatch(message -> message.repositoryId().filter("order-service"::equals).isPresent())) {
+        if (text.contains("cancellation") && !hasSourceObservation(jobHistory, "order-service")) {
             return tool("order-cancellation-" + question.sequence().value(), LIST_ENTRY_POINTS, "{\"repositoryId\":\"order-service\",\"revision\":\"order-revision-1\"}");
         }
-        if (text.contains("cancellation") && jobHistory.stream().filter(ToolMessage.class::isInstance).map(ToolMessage.class::cast)
-                .noneMatch(message -> message.repositoryId().filter("payment-service"::equals).isPresent())) {
+        if (text.contains("cancellation") && !hasSourceObservation(jobHistory, "payment-service")) {
             return tool("payment-refund-" + question.sequence().value(), LIST_ENTRY_POINTS, "{\"repositoryId\":\"payment-service\",\"revision\":\"payment-revision-1\"}");
         }
-        if (jobHistory.stream().filter(ToolMessage.class::isInstance).map(ToolMessage.class::cast)
-                .noneMatch(message -> message.repositoryId().isPresent())) {
+        if (toolObservations(jobHistory).noneMatch(FakeConversationModel::isSourceObservation)) {
             return tool("payment-source-" + question.sequence().value(), LIST_ENTRY_POINTS, "{\"repositoryId\":\"payment-service\",\"revision\":\"payment-revision-1\"}");
         }
         return new ModelDecision.AnswerReady();
@@ -100,5 +95,18 @@ final class FakeConversationModel implements ConversationModel {
 
     private static ModelDecision.UseTool tool(String callId, ToolName toolName, String arguments) {
         return new ModelDecision.UseTool(callId, toolName, arguments, "dGVzdA==");
+    }
+
+    private static java.util.stream.Stream<ToolObservation> toolObservations(List<SessionMessage> history) {
+        return history.stream().filter(ToolObservation.class::isInstance).map(ToolObservation.class::cast);
+    }
+
+    private static boolean hasSourceObservation(List<SessionMessage> history, String repositoryId) {
+        return toolObservations(history)
+                .anyMatch(tool -> isSourceObservation(tool) && tool.output().contains("\"repositoryId\":\"" + repositoryId + "\""));
+    }
+
+    private static boolean isSourceObservation(ToolObservation observation) {
+        return observation.toolName().startsWith("codebase_") && observation.output().contains("\"repositoryId\":");
     }
 }

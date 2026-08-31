@@ -168,7 +168,7 @@ public final class SemanticToolProvider {
             case REPOSITORY_NOT_FOUND -> ToolExecutionFailure.repositoryNotFound();
             case REVISION_OUTDATED -> {
                 com.java.system.sessionagent.semantic.SemanticFailure.RevisionOutdatedDetails details = failure.revisionOutdated().orElseThrow();
-                yield ToolExecutionFailure.revisionOutdated(details.repositoryId(), details.requestedRevision(), details.currentRevision(), details.retryGuidance());
+                yield ToolExecutionFailure.revisionOutdated(details.retryGuidance());
             }
             case INDEX_NOT_READY -> ToolExecutionFailure.indexNotReady();
             case INDEX_CONTRACT_MISMATCH -> ToolExecutionFailure.indexContractMismatch();
@@ -183,7 +183,7 @@ public final class SemanticToolProvider {
 
     private <T> ToolResult sourceResult(String repositoryId, SemanticSourceClient.SourceResult<T> sourceResult) {
         return new ToolResult(Optional.of(repositoryId), Optional.of(sourceResult.revision().value()),
-                jsonCodec.canonicalize(sourceResult.response()));
+                jsonCodec.canonicalize(new SourceObservation(repositoryId, sourceResult.revision().value(), sourceResult.response())));
     }
 
     private record ListRepositoriesResult(List<RepositorySummaryResult> repositories) {
@@ -196,5 +196,8 @@ public final class SemanticToolProvider {
     }
 
     private record RepositorySummaryResult(String repositoryId, String revision) {
+    }
+
+    private record SourceObservation(String repositoryId, String revision, Object data) {
     }
 }

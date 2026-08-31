@@ -9,6 +9,8 @@ import com.java.system.sessionagent.conversation.domain.SessionId;
 import com.java.system.sessionagent.conversation.domain.SessionMessage;
 import com.java.system.sessionagent.conversation.domain.SessionSequence;
 import com.java.system.sessionagent.conversation.domain.ToolMessage;
+import com.java.system.sessionagent.conversation.domain.ToolObservation;
+import com.java.system.sessionagent.conversation.domain.ObservationId;
 import com.java.system.sessionagent.conversation.domain.UserMessage;
 import com.java.system.sessionagent.tool.json.StrictJsonCodec;
 import org.junit.jupiter.api.Test;
@@ -29,6 +31,24 @@ class ConversationHistoryProjectorTest {
     private static final Instant CREATED_AT = Instant.parse("2026-08-15T10:15:30Z");
     private static final byte[] THOUGHT_SIGNATURE = new byte[]{1, 2, 3, 4};
     private static final String MODEL_CONTEXT = Base64.getEncoder().encodeToString(THOUGHT_SIGNATURE);
+
+    @Test
+    void projects_a_tool_observation_as_one_provider_neutral_user_message() {
+        ConversationHistoryProjector projector = new ConversationHistoryProjector();
+        ToolObservation observation = new ToolObservation(SESSION_ID, new SessionSequence(1), Optional.of(JOB_ID), CREATED_AT,
+                MessageRole.TOOL, new ObservationId("observation-1"), "echo", "{}", "plain output");
+
+        List<Message> projected = projector.project(List.of(observation));
+
+        assertThat(projected).singleElement().isInstanceOf(org.springframework.ai.chat.messages.UserMessage.class);
+        assertThat(projected.getFirst().getText())
+                .contains("Runtime tool observation")
+                .contains("Tool: echo")
+                .contains("Input:\n{}")
+                .contains("Output:\nplain output")
+                .contains("End runtime tool observation")
+                .doesNotContain("ToolResponseMessage", "call-", MODEL_CONTEXT, "System");
+    }
 
     @Test
     void projects_the_entire_ordered_history_without_summarizing_or_filtering() {
