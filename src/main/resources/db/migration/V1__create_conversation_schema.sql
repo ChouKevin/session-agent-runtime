@@ -173,8 +173,8 @@ create table tool_observation (
     session_id uuid not null,
     sequence bigint not null,
     role varchar(16) not null default 'TOOL' check (role = 'TOOL'),
-    observation_id varchar(256) not null,
-    tool_name varchar(128) not null,
+    observation_id varchar(256) not null check (length(regexp_replace(observation_id, '[[:space:]]', '', 'g')) > 0),
+    tool_name varchar(128) not null check (length(regexp_replace(tool_name, '[[:space:]]', '', 'g')) > 0),
     input text not null,
     output text not null,
     primary key (session_id, sequence),
@@ -187,8 +187,8 @@ create table runtime_message (
     session_id uuid not null,
     sequence bigint not null,
     role varchar(16) not null default 'RUNTIME' check (role = 'RUNTIME'),
-    code varchar(64) not null check (length(code) > 0),
-    message text not null check (length(message) > 0),
+    code varchar(64) not null check (length(regexp_replace(code, '[[:space:]]', '', 'g')) > 0),
+    message text not null check (length(regexp_replace(message, '[[:space:]]', '', 'g')) > 0),
     primary key (session_id, sequence),
     foreign key (session_id, sequence, role)
         references session_message(session_id, sequence, role)
@@ -321,6 +321,16 @@ $$;
 
 create constraint trigger session_message_requires_detail
     after insert on session_message
+    deferrable initially deferred
+    for each row execute function require_message_detail();
+
+create constraint trigger tool_message_requires_one_detail
+    after insert on tool_message
+    deferrable initially deferred
+    for each row execute function require_message_detail();
+
+create constraint trigger tool_observation_requires_one_detail
+    after insert on tool_observation
     deferrable initially deferred
     for each row execute function require_message_detail();
 

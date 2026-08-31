@@ -23,10 +23,17 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.AbstractDataSource;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import javax.sql.DataSource;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.lang.reflect.Proxy;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.SQLException;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -35,6 +42,7 @@ import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -138,6 +146,57 @@ class PostgresConversationCommitPostgresIT {
         assertThat(jdbcTemplate.queryForObject("select next_sequence from conversation_session", Long.class)).isEqualTo(2L);
         assertThat(jdbcTemplate.queryForObject("select status from message_job where message_job_id = ?", String.class, id(receipt)))
                 .isEqualTo("WORKING");
+    }
+
+    @Test
+    void rejects_a_second_tool_detail_after_a_legacy_tool_message_has_committed() {
+        ConversationStore store = newStore();
+        MessageReceipt receipt = store.receive(new IncomingMessage("thread-1", "alice", "source-1", "hello"));
+        MessageWorkClaim claim = store.claimNext("worker-1", Duration.ofSeconds(30)).orElseThrow();
+        appendSource(store, claim);
+
+        assertThatThrownBy(() -> jdbcTemplate.update("""
+                insert into tool_observation(session_id, sequence, observation_id, tool_name, input, output)
+                values (?, ?, ?, ?, ?, ?)
+                """, UUID.fromString(receipt.sessionId().value()), 2L, "observation-duplicate-detail", "source", "{}", "one"))
+                .isInstanceOf(RuntimeException.class);
+
+        assertThat(jdbcTemplate.queryForObject("select count(*) from tool_message", Integer.class)).isEqualTo(1);
+        assertThat(jdbcTemplate.queryForObject("select count(*) from tool_observation", Integer.class)).isZero();
+    }
+
+    @Test
+    void rejects_whitespace_only_observation_and_runtime_values_at_the_database_boundary() throws Exception {
+        assertWhitespaceToolObservationIsRejected(" ", "source");
+        assertWhitespaceToolObservationIsRejected("observation", " ");
+        assertWhitespaceRuntimeMessageIsRejected(" ", "message");
+        assertWhitespaceRuntimeMessageIsRejected("RUNTIME_CODE", " ");
+    }
+
+    @Test
+    void loads_a_single_history_snapshot_when_an_atomic_batch_commits_between_detail_queries() throws Exception {
+        ConversationStore writer = newStore();
+        MessageReceipt receipt = writer.receive(new IncomingMessage("thread-1", "alice", "source-1", "hello"));
+        MessageWorkClaim claim = writer.claimNext("worker-1", Duration.ofSeconds(30)).orElseThrow();
+        BlockingDataSource blockedDataSource = new BlockingDataSource(dataSource(), "join tool_observation detail");
+        ConversationStore reader = new PostgresConversationStore(blockedDataSource, Clock.fixed(NOW, ZoneOffset.UTC));
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        try {
+            Future<List<SessionMessage>> history = executor.submit(() -> reader.loadHistory(receipt.sessionId()));
+
+            assertThat(blockedDataSource.awaitBlocked()).isTrue();
+            writer.append(claim, new ConversationStore.MessageBatch(List.of(
+                    new ConversationStore.ToolObservationData(new ObservationId("snapshot-observation"), "source", "{}", "one"),
+                    new ConversationStore.AssistantData("complete batch")), ConversationStore.JobUpdate.KEEP_WORKING), NOW);
+            blockedDataSource.release();
+
+            assertThat(history.get(2, TimeUnit.SECONDS))
+                    .extracting(message -> message.sequence().value())
+                    .containsExactly(1L);
+        } finally {
+            blockedDataSource.release();
+            executor.shutdownNow();
+        }
     }
 
     @Test
@@ -375,5 +434,134 @@ class PostgresConversationCommitPostgresIT {
             Thread.sleep(10);
         }
         throw new AssertionError("append did not wait for the session lock");
+    }
+
+    private void assertWhitespaceToolObservationIsRejected(String observationId, String toolName) throws Exception {
+        ConversationStore store = newStore();
+        MessageReceipt receipt = store.receive(new IncomingMessage(UUID.randomUUID().toString(), "alice", UUID.randomUUID().toString(), "hello"));
+        UUID sessionId = UUID.fromString(receipt.sessionId().value());
+        UUID messageJobId = id(receipt);
+        try (Connection connection = dataSource().getConnection();
+             PreparedStatement parent = connection.prepareStatement("""
+                     insert into session_message(session_id, sequence, message_job_id, role, created_at)
+                     values (?, ?, ?, 'TOOL', ?)
+                     """);
+             PreparedStatement detail = connection.prepareStatement("""
+                     insert into tool_observation(session_id, sequence, observation_id, tool_name, input, output)
+                     values (?, ?, ?, ?, ?, ?)
+                     """)) {
+            connection.setAutoCommit(false);
+            parent.setObject(1, sessionId);
+            parent.setLong(2, 2L);
+            parent.setObject(3, messageJobId);
+            parent.setObject(4, java.time.OffsetDateTime.ofInstant(NOW, ZoneOffset.UTC));
+            parent.executeUpdate();
+            detail.setObject(1, sessionId);
+            detail.setLong(2, 2L);
+            detail.setString(3, observationId);
+            detail.setString(4, toolName);
+            detail.setString(5, "{}");
+            detail.setString(6, "one");
+
+            assertThatThrownBy(detail::executeUpdate).isInstanceOf(SQLException.class);
+            connection.rollback();
+        }
+    }
+
+    private void assertWhitespaceRuntimeMessageIsRejected(String code, String message) throws Exception {
+        ConversationStore store = newStore();
+        MessageReceipt receipt = store.receive(new IncomingMessage(UUID.randomUUID().toString(), "alice", UUID.randomUUID().toString(), "hello"));
+        UUID sessionId = UUID.fromString(receipt.sessionId().value());
+        UUID messageJobId = id(receipt);
+        try (Connection connection = dataSource().getConnection();
+             PreparedStatement parent = connection.prepareStatement("""
+                     insert into session_message(session_id, sequence, message_job_id, role, created_at)
+                     values (?, ?, ?, 'RUNTIME', ?)
+                     """);
+             PreparedStatement detail = connection.prepareStatement("""
+                     insert into runtime_message(session_id, sequence, code, message)
+                     values (?, ?, ?, ?)
+                     """)) {
+            connection.setAutoCommit(false);
+            parent.setObject(1, sessionId);
+            parent.setLong(2, 2L);
+            parent.setObject(3, messageJobId);
+            parent.setObject(4, java.time.OffsetDateTime.ofInstant(NOW, ZoneOffset.UTC));
+            parent.executeUpdate();
+            detail.setObject(1, sessionId);
+            detail.setLong(2, 2L);
+            detail.setString(3, code);
+            detail.setString(4, message);
+
+            assertThatThrownBy(detail::executeUpdate).isInstanceOf(SQLException.class);
+            connection.rollback();
+        }
+    }
+
+    private static final class BlockingDataSource extends AbstractDataSource {
+
+        private final DataSource delegate;
+        private final String blockedSqlFragment;
+        private final CountDownLatch blocked = new CountDownLatch(1);
+        private final CountDownLatch released = new CountDownLatch(1);
+
+        private BlockingDataSource(DataSource delegate, String blockedSqlFragment) {
+            this.delegate = Objects.requireNonNull(delegate, "Delegate data source must not be null");
+            this.blockedSqlFragment = Objects.requireNonNull(blockedSqlFragment, "Blocked SQL fragment must not be null");
+        }
+
+        @Override
+        public Connection getConnection() throws SQLException {
+            return connection(delegate.getConnection());
+        }
+
+        @Override
+        public Connection getConnection(String username, String password) throws SQLException {
+            return connection(delegate.getConnection(username, password));
+        }
+
+        private Connection connection(Connection delegateConnection) {
+            return (Connection) Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{Connection.class},
+                    (proxy, method, arguments) -> {
+                        Object result = invoke(method, delegateConnection, arguments);
+                        if (method.getName().equals("prepareStatement") && result instanceof PreparedStatement statement) {
+                            Object[] requiredArguments = Objects.requireNonNull(arguments, "Prepared statement arguments must not be null");
+                            if (requiredArguments[0] instanceof String sql && sql.contains(blockedSqlFragment)) {
+                                return preparedStatement(statement);
+                            }
+                        }
+                        return result;
+                    });
+        }
+
+        private PreparedStatement preparedStatement(PreparedStatement delegateStatement) {
+            return (PreparedStatement) Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{PreparedStatement.class},
+                    (proxy, method, arguments) -> {
+                        Object result = invoke(method, delegateStatement, arguments);
+                        if (method.getName().equals("executeQuery")) {
+                            blocked.countDown();
+                            if (!released.await(2, TimeUnit.SECONDS)) {
+                                throw new AssertionError("history load did not resume");
+                            }
+                        }
+                        return result;
+                    });
+        }
+
+        private boolean awaitBlocked() throws InterruptedException {
+            return blocked.await(2, TimeUnit.SECONDS);
+        }
+
+        private void release() {
+            released.countDown();
+        }
+
+        private Object invoke(Method method, Object target, Object[] arguments) throws Throwable {
+            try {
+                return method.invoke(target, arguments);
+            } catch (InvocationTargetException exception) {
+                throw exception.getCause();
+            }
+        }
     }
 }

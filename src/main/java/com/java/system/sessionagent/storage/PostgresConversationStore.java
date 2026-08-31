@@ -57,6 +57,7 @@ public final class PostgresConversationStore implements ConversationStore {
 
     private final JdbcTemplate jdbcTemplate;
     private final TransactionTemplate transactionTemplate;
+    private final TransactionTemplate historyTransactionTemplate;
     private final Clock clock;
 
     private record JobVisibility(UUID messageJobId, long userMessageSequence, JobStatus status) { }
@@ -67,6 +68,10 @@ public final class PostgresConversationStore implements ConversationStore {
         DataSourceTransactionManager transactionManager = new DataSourceTransactionManager(requiredDataSource);
         this.transactionTemplate = new TransactionTemplate(transactionManager);
         this.transactionTemplate.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+        this.historyTransactionTemplate = new TransactionTemplate(transactionManager);
+        this.historyTransactionTemplate.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+        this.historyTransactionTemplate.setIsolationLevel(TransactionDefinition.ISOLATION_REPEATABLE_READ);
+        this.historyTransactionTemplate.setReadOnly(true);
         this.clock = Objects.requireNonNull(clock, "Clock must not be null");
     }
 
@@ -313,19 +318,25 @@ public final class PostgresConversationStore implements ConversationStore {
     public List<SessionMessage> loadHistory(SessionId sessionId) {
         SessionId requiredSessionId = Objects.requireNonNull(sessionId, "Session ID must not be null");
         try {
-            List<SessionMessage> messages = new java.util.ArrayList<>();
-            UUID id = UUID.fromString(requiredSessionId.value());
-            messages.addAll(loadToolMessages(id));
-            messages.addAll(loadToolObservations(id));
-            messages.addAll(loadAssistantMessages(id));
-            messages.addAll(loadFeedbackMessages(id));
-            messages.addAll(loadRuntimeMessages(id));
-            messages.addAll(loadUserMessages(id));
-            messages.sort(java.util.Comparator.comparingLong(message -> message.sequence().value()));
-            return List.copyOf(messages);
+            List<SessionMessage> history = historyTransactionTemplate.execute(
+                    transactionStatus -> loadHistoryInSingleSnapshot(requiredSessionId));
+            return Objects.requireNonNull(history, "Conversation history must not be null");
         } catch (RuntimeException exception) {
             throw translate(exception);
         }
+    }
+
+    private List<SessionMessage> loadHistoryInSingleSnapshot(SessionId sessionId) {
+        List<SessionMessage> messages = new java.util.ArrayList<>();
+        UUID id = UUID.fromString(sessionId.value());
+        messages.addAll(loadToolMessages(id));
+        messages.addAll(loadToolObservations(id));
+        messages.addAll(loadAssistantMessages(id));
+        messages.addAll(loadFeedbackMessages(id));
+        messages.addAll(loadRuntimeMessages(id));
+        messages.addAll(loadUserMessages(id));
+        messages.sort(java.util.Comparator.comparingLong(message -> message.sequence().value()));
+        return List.copyOf(messages);
     }
 
     @Override
