@@ -47,7 +47,7 @@ public final class ConversationHistoryProjector {
     }
 
     private static String toolObservationText(ToolObservation observation) {
-        return """
+        return "\n\n" + """
                 Runtime tool observation
                 Tool: %s
                 Input:
@@ -59,7 +59,7 @@ public final class ConversationHistoryProjector {
     }
 
     private static String runtimeMessageText(RuntimeMessage runtimeMessage) {
-        return """
+        return "\n\n" + """
                 Runtime message
                 Code: %s
                 Message: %s

@@ -51,9 +51,9 @@ class SessionAgentLiveIT {
     void records_video_format_source_inspection_in_http_history() throws Exception {
         Scenario scenario = ask("Which video formats are supported? Inspect Semantic source before answering.");
 
-        JsonNode observation = scenario.successfulSourceObservationWithEvidence("video");
+        JsonNode observation = scenario.successfulSourceObservationWithEvidence("mp4", "webm", "mov");
         assertRevisionPinnedSourceObservation(observation);
-        assertAnswerSharesFixtureFact(scenario.finalAssistantText(), observation, List.of("mp4", "webm", "hls", "dash", "m3u8"));
+        assertAnswerSharesFixtureFact(scenario.finalAssistantText(), observation, List.of("mp4", "webm", "mov", "hls", "dash", "m3u8"));
     }
 
     @Test

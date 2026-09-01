@@ -37,7 +37,7 @@ class ConversationHistoryProjectorTest {
         assertThat(projected.get(1)).isInstanceOf(org.springframework.ai.chat.messages.AssistantMessage.class);
         assertThat(projected.get(1).getText()).isEqualTo("The catalog is available.");
         assertThat(projected.get(2)).isInstanceOf(org.springframework.ai.chat.messages.UserMessage.class);
-        assertThat(projected.get(2).getText()).isEqualTo("""
+        assertThat(projected.get(2).getText()).isEqualTo("\n\n" + """
                 Runtime tool observation
                 Tool: list_repositories
                 Input:
@@ -47,7 +47,7 @@ class ConversationHistoryProjectorTest {
                 End runtime tool observation
                 """);
         assertThat(projected.get(3)).isInstanceOf(org.springframework.ai.chat.messages.UserMessage.class);
-        assertThat(projected.get(3).getText()).isEqualTo("""
+        assertThat(projected.get(3).getText()).isEqualTo("\n\n" + """
                 Runtime message
                 Code: MODEL_OUTPUT_INVALID
                 Message: Return one tool call or one reply.
