@@ -108,10 +108,14 @@ public final class SemanticToolProvider {
                         IncomingCallGraphInput.class, IncomingCallGraphInput::repositoryId, client::incomingCallGraph),
                 source(SemanticToolName.SEARCH_CODE_FACTS,
                         "Search code-derived facts. Copy repositoryId and revision from prior evidence; omit unknown optional filters rather than guessing. "
-                                + "An empty result supports a codebase-limited absence finding only when totalCount is 0, hasMore is false, and coverage.issues is empty.",
+                                + "Returned facts are evidence, so do not call another tool merely to confirm details already present. "
+                                + "For enum values, narrow the search with kinds=[ENUM_CONSTANT]. An empty result supports a codebase-limited absence finding "
+                                + "only when totalCount is 0, hasMore is false, and coverage.issues is empty. Once those fields show a complete empty result, "
+                                + "do not retry alternate spellings or inspect unrelated details solely to reconfirm that repository-limited absence.",
                         SearchCodeFactsInput.class, SearchCodeFactsInput::repositoryId, client::searchCodeFacts),
                 source(SemanticToolName.GET_CODE_FACT,
-                        "Get one exact factId copied from a prior code-fact search, using the same repositoryId and revision from prior evidence.",
+                        "Get one exact opaque factId copied from a prior code-fact search, using the same repositoryId and revision from prior evidence. "
+                                + "A factId is not a class or method name. Use this tool only for needed detail absent from the search result.",
                         GetCodeFactInput.class, GetCodeFactInput::repositoryId, client::getCodeFact),
                 source(SemanticToolName.DISCOVER_EVENT_LISTENERS,
                         "Discover listeners for a fully qualified Java event type, for example com.example.order.OrderCancelledEvent.",
@@ -129,10 +133,12 @@ public final class SemanticToolProvider {
                         "Get source evidence for the Java method identified by the supplied flat method fields.",
                         GetEvidenceSourceInput.class, GetEvidenceSourceInput::repositoryId, client::getEvidenceSource),
                 source(SemanticToolName.GET_METHOD_SOURCE,
-                        "Get source for the Java method identified by the supplied flat method fields.",
+                        "Get source for the Java method identified by the supplied flat method fields. If the source shows a value comes from runtime, "
+                                + "configuration, database, or external service data, report that limit rather than searching Semantic for a live value.",
                         GetMethodSourceInput.class, GetMethodSourceInput::repositoryId, client::getMethodSource),
                 source(SemanticToolName.GET_SOURCE_SEGMENT,
-                        "Get source text for the exact sourceFile and zero-based start/end positions copied from a prior result.",
+                        "Get source text only for the exact sourceFile and zero-based start/end positions copied from one prior result. "
+                                + "Never invent or expand a range. This tool is not needed to reconfirm facts or source already visible.",
                         GetSourceSegmentInput.class, GetSourceSegmentInput::repositoryId, client::getSourceSegment),
                 source(SemanticToolName.RESOLVE_SOURCE_SYMBOL,
                         "Resolve a symbol from exact source context and an optional zero-based position.",

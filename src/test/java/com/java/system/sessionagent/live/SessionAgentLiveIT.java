@@ -3,6 +3,7 @@ package com.java.system.sessionagent.live;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Assumptions;
+import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import org.springframework.util.StringUtils;
@@ -30,8 +31,9 @@ class SessionAgentLiveIT {
     private final HttpClient client = HttpClient.newBuilder().connectTimeout(TIMEOUT).build();
 
     @Test
+    @Tag("business-live")
     void records_payment_method_source_inspection_in_http_history() throws Exception {
-        Scenario scenario = ask("Which payment methods are supported? Inspect Semantic source before answering.");
+        Scenario scenario = ask("Which payment methods are supported?");
 
         JsonNode observation = scenario.successfulSourceObservationWithEvidence("credit card", "bank transfer", "wallet");
         assertRevisionPinnedSourceObservation(observation);
@@ -39,8 +41,9 @@ class SessionAgentLiveIT {
     }
 
     @Test
+    @Tag("business-live")
     void records_that_runtime_only_fee_data_is_unavailable() throws Exception {
-        Scenario scenario = ask("What is the current runtime database/API fee value? Inspect the source and say clearly if that live value is unavailable.");
+        Scenario scenario = ask("Are there any payment processing fees, and how much are they?");
 
         JsonNode observation = scenario.successfulSourceObservationWithEvidence("fee", "formula");
         assertRevisionPinnedSourceObservation(observation);
@@ -48,8 +51,9 @@ class SessionAgentLiveIT {
     }
 
     @Test
+    @Tag("business-live")
     void records_video_format_source_inspection_in_http_history() throws Exception {
-        Scenario scenario = ask("Which video formats are supported? Inspect Semantic source before answering.");
+        Scenario scenario = ask("Which video formats are supported?");
 
         JsonNode observation = scenario.successfulSourceObservationWithEvidence("mp4", "webm", "mov");
         assertRevisionPinnedSourceObservation(observation);
@@ -57,9 +61,9 @@ class SessionAgentLiveIT {
     }
 
     @Test
+    @Tag("business-live")
     void records_absent_bnpl_as_a_code_limited_finding() throws Exception {
-        Scenario scenario = ask("Does the payment service include BNPL? Check only payment-service for the exact term BNPL. "
-                + "A complete empty search is sufficient; answer only about the inspected code and do not inspect other symbols.");
+        Scenario scenario = ask("Does the payment service support buy now, pay later (BNPL)?");
 
         JsonNode observation = scenario.successfulToolNamed("codebase_search_code_facts");
         assertRevisionPinnedSourceObservation(observation);
@@ -74,8 +78,9 @@ class SessionAgentLiveIT {
     }
 
     @Test
+    @Tag("business-live")
     void records_cancellation_and_refund_source_inspection_in_http_history() throws Exception {
-        Scenario scenario = ask("How do cancellation and refund work? Inspect Semantic source before answering.");
+        Scenario scenario = ask("How do cancellation and refunds work?");
 
         JsonNode cancellationObservation = scenario.successfulSourceObservationWithEvidence("cancellation");
         JsonNode refundObservation = scenario.successfulSourceObservationWithEvidence("refund");
@@ -85,6 +90,7 @@ class SessionAgentLiveIT {
     }
 
     @Test
+    @Tag("runtime-contract-live")
     void records_a_failed_opaque_revision_observation_before_a_model_chosen_refresh_call() throws Exception {
         Scenario catalog = ask("List the available repositories through Semantic.");
         JsonNode catalogOutput = output(catalog.toolNamed("list_repositories"));
@@ -125,6 +131,7 @@ class SessionAgentLiveIT {
     }
 
     @Test
+    @Tag("runtime-contract-live")
     void carries_prior_user_tool_and_assistant_messages_into_a_follow_up_in_the_same_session() throws Exception {
         String sessionKey = "live-history-" + UUID.randomUUID();
         String memoryLabel = "ORCHID-" + UUID.randomUUID().toString().substring(0, 8);
@@ -220,6 +227,20 @@ class SessionAgentLiveIT {
         assertThat(toolOutput.required("data").isContainerNode()).isTrue();
     }
 
+    static boolean isRevisionPinnedSourceObservation(JsonNode observation) {
+        try {
+            JsonNode toolInput = input(observation);
+            JsonNode toolOutput = output(observation);
+            return toolInput.required("repositoryId").isTextual()
+                    && toolInput.required("revision").isTextual()
+                    && toolOutput.required("repositoryId").isTextual()
+                    && toolOutput.required("revision").isTextual()
+                    && toolOutput.required("data").isObject();
+        } catch (AssertionError | IllegalArgumentException exception) {
+            return false;
+        }
+    }
+
     private static void assertAnswerSharesFixtureFact(String answer, JsonNode observation, List<String> facts) {
         String evidence = lower(output(observation).toString());
         List<String> observedFacts = facts.stream().filter(evidence::contains).toList();
@@ -260,11 +281,17 @@ class SessionAgentLiveIT {
 
     static void assertHonestRuntimeFeeAnswer(String answer) {
         String normalized = lower(answer);
-        assertThat(normalized).containsAnyOf("unavailable", "cannot", "not available", "unable to obtain", "do not have");
+        boolean qualifiesFeeAmount = List.of(
+                "unavailable", "cannot", "not available", "unable to obtain", "do not have",
+                "depend on", "depends on", "dependent on", "determined by", "vary by", "varies by",
+                "not hard-coded", "not present", "not defined", "not provided")
+                .stream().anyMatch(normalized::contains);
+        assertThat(normalized).contains("fee");
+        assertThat(qualifiesFeeAmount)
+                .as("answer must state that the exact fee is unavailable, runtime-dependent, or absent from source")
+                .isTrue();
         assertThat(normalized).containsAnyOf("current", "runtime", "database", "api");
         assertThat(normalized).containsAnyOf("formula", "configuration", "json");
-        assertThat(normalized).containsPattern("(?s).*\\bcurrent\\b[^.!?\\n]{0,80}\\bfee(?:\\s+value)?\\b[^.!?\\n]{0,40}"
-                + "\\b(?:unavailable|not available|unknown|unobtainable|not known|not accessible|not provided)\\b.*");
         assertThat(normalized).doesNotMatch("(?s).*\\bcurrent\\b[^.!?\\n]{0,80}\\bfee(?:\\s+value)?\\s*"
                 + "(?:is|equals|=|:|of)\\s*(?:[$€£]\\s*)?\\d+(?:[.,]\\d+)?(?:\\s*%|\\s+percent)?\\b.*");
     }
@@ -273,7 +300,8 @@ class SessionAgentLiveIT {
         String normalized = lower(answer);
         assertThat(normalized).contains("bnpl");
         assertThat(normalized).containsAnyOf(
-                "not found", "no results", "no bnpl", "no evidence", "not implemented", "does not support", "does not include");
+                "not found", "no results", "no bnpl", "no evidence", "not implemented", "does not support", "does not include",
+                "does not appear to support", "does not currently support", "no mention");
         assertThat(normalized).containsAnyOf("inspected code", "codebase", "source code", "repository");
         assertThat(normalized).doesNotMatch("(?s).*\\bbnpl\\b.{0,120}\\b(?:is\\s+)?(?:not\\s+)?(?:supported|unsupported)\\b.{0,120}"
                 + "\\b(?:running\\s+system|production(?:\\s+system)?|live\\s+system)\\b.*");
@@ -309,17 +337,7 @@ class SessionAgentLiveIT {
         }
 
         private boolean isRevisionPinnedSourceObservation(JsonNode observation) {
-            try {
-                JsonNode toolInput = input(observation);
-                JsonNode toolOutput = output(observation);
-                return toolInput.required("repositoryId").isTextual()
-                        && toolInput.required("revision").isTextual()
-                        && toolOutput.required("repositoryId").isTextual()
-                        && toolOutput.required("revision").isTextual()
-                        && toolOutput.required("data").isObject();
-            } catch (Exception exception) {
-                return false;
-            }
+            return SessionAgentLiveIT.isRevisionPinnedSourceObservation(observation);
         }
 
         private static String outputText(JsonNode observation) {

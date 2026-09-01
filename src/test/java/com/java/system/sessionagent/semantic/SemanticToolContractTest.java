@@ -90,6 +90,28 @@ class SemanticToolContractTest {
                         .doesNotContain("sourceFile/range"));
     }
 
+    @Test
+    void descriptions_explain_when_existing_evidence_is_complete_and_inputs_must_be_copied() {
+        ToolSnapshot snapshot = snapshot();
+
+        assertThat(description(snapshot, "codebase_search_code_facts"))
+                .contains("Returned facts are evidence")
+                .contains("ENUM_CONSTANT")
+                .contains("do not call another tool merely to confirm")
+                .contains("do not retry alternate spellings")
+                .contains("repository-limited absence");
+        assertThat(description(snapshot, "codebase_get_code_fact"))
+                .contains("opaque factId")
+                .contains("not a class or method name")
+                .contains("detail absent from the search result");
+        assertThat(description(snapshot, "codebase_get_method_source"))
+                .contains("runtime, configuration, database, or external service")
+                .contains("report that limit");
+        assertThat(description(snapshot, "codebase_get_source_segment"))
+                .contains("Never invent or expand a range")
+                .contains("not needed to reconfirm");
+    }
+
     @ParameterizedTest(name = "{0}")
     @MethodSource("queryToolSchemas")
     void mirrors_each_flat_query_schema_and_describes_every_parameter(
@@ -195,5 +217,13 @@ class SemanticToolContractTest {
         SemanticToolProvider provider = new SemanticToolProvider(() -> List.of(), new SemanticSourceClient(
                 RestClient.builder().baseUrl("https://semantic.test").build()));
         return new DirectToolRegistry(provider.registrations()).snapshot();
+    }
+
+    private static String description(ToolSnapshot snapshot, String toolName) {
+        return snapshot.definitions().stream()
+                .filter(definition -> definition.name().equals(new ToolName(toolName)))
+                .map(ToolDefinition::description)
+                .findFirst()
+                .orElseThrow();
     }
 }
