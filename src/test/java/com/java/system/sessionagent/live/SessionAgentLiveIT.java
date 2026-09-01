@@ -245,7 +245,8 @@ class SessionAgentLiveIT {
     static void assertCodeLimitedBnplAnswer(String answer) {
         String normalized = lower(answer);
         assertThat(normalized).contains("bnpl");
-        assertThat(normalized).containsAnyOf("not found", "no bnpl", "no evidence", "not implemented", "does not support");
+        assertThat(normalized).containsAnyOf(
+                "not found", "no results", "no bnpl", "no evidence", "not implemented", "does not support", "does not include");
         assertThat(normalized).containsAnyOf("inspected code", "codebase", "source code", "repository");
         assertThat(normalized).doesNotMatch("(?s).*\\bbnpl\\b.{0,120}\\b(?:is\\s+)?(?:not\\s+)?(?:supported|unsupported)\\b.{0,120}"
                 + "\\b(?:running\\s+system|production(?:\\s+system)?|live\\s+system)\\b.*");

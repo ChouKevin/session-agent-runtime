@@ -49,6 +49,13 @@ class SessionAgentLiveAssertionTest {
     }
 
     @Test
+    void accepts_a_code_limited_bnpl_empty_search_finding() {
+        assertThatCode(() -> SessionAgentLiveIT.assertCodeLimitedBnplAnswer(
+                "The BNPL search yielded no results. Based on the inspected code, payment-service does not include BNPL."))
+                .doesNotThrowAnyException();
+    }
+
+    @Test
     void accepts_revision_pinned_source_observation_with_array_data() throws Exception {
         JsonNode observation = OBJECT_MAPPER.createObjectNode()
                 .put("input", "{\"repositoryId\":\"order-service\",\"revision\":\"abc123\"}")
