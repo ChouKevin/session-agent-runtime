@@ -58,7 +58,8 @@ class SessionAgentLiveIT {
 
     @Test
     void records_absent_bnpl_as_a_code_limited_finding() throws Exception {
-        Scenario scenario = ask("Is BNPL supported? Search the inspected code and avoid making a claim about a running system.");
+        Scenario scenario = ask("Does the payment service include BNPL? Check only payment-service for the exact term BNPL. "
+                + "A complete empty search is sufficient; answer only about the inspected code and do not inspect other symbols.");
 
         JsonNode observation = scenario.successfulToolNamed("codebase_search_code_facts");
         assertRevisionPinnedSourceObservation(observation);
