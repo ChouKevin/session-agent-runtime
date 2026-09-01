@@ -32,6 +32,7 @@ class PromptResourceTest {
                 .contains("Stop querying and answer")
                 .contains("Do not repeat")
                 .contains("equivalent request")
+                .contains("Do not repeat runtime observation block labels")
                 .contains("external-service values")
                 .doesNotContain("one tool call per")
                 .doesNotContainIgnoringCase("planning")

@@ -124,12 +124,39 @@ class SessionAgentLiveIT {
         assertTextContains(refresh.finalAssistantText(), repositoryId, currentRevision);
     }
 
+    @Test
+    void carries_prior_user_tool_and_assistant_messages_into_a_follow_up_in_the_same_session() throws Exception {
+        String sessionKey = "live-history-" + UUID.randomUUID();
+        String memoryLabel = "ORCHID-" + UUID.randomUUID().toString().substring(0, 8);
+        Scenario firstTurn = ask(sessionKey, "Which payment methods are supported? Inspect Semantic source before answering. "
+                + "Include this exact memory label in your answer: " + memoryLabel);
+
+        JsonNode observation = firstTurn.successfulSourceObservationWithEvidence("credit card", "bank transfer", "wallet");
+        assertRevisionPinnedSourceObservation(observation);
+        assertTextContains(firstTurn.finalAssistantText(), memoryLabel);
+
+        Scenario followUp = ask(sessionKey,
+                "What exact memory label did I ask you to include previously? Answer only from our conversation history.");
+
+        assertThat(followUp.sessionId()).isEqualTo(firstTurn.sessionId());
+        assertThat(followUp.history()).startsWith(firstTurn.history().toArray(JsonNode[]::new));
+        assertThat(followUp.history().stream().filter(message -> "USER".equals(message.required("type").asText())))
+                .hasSize(2);
+        assertTextContains(followUp.finalAssistantText(), memoryLabel);
+        assertThat(firstTurn.finalAssistantText()).doesNotContain("Runtime tool observation");
+        assertThat(followUp.finalAssistantText()).doesNotContain("Runtime tool observation");
+    }
+
     private Scenario ask(String question) throws Exception {
+        return ask("live-" + UUID.randomUUID(), question);
+    }
+
+    private Scenario ask(String sessionKey, String question) throws Exception {
         String baseUrl = requiredBaseUrl();
         String sourceMessageId = UUID.randomUUID().toString();
         JsonNode receipt = request(baseUrl, "POST", "/internal/messages", Optional.of(OBJECT_MAPPER.readTree("""
-                {"sessionKey":"live-%s","participantId":"live-tester","sourceMessageId":"%s","message":"%s"}
-                """.formatted(sourceMessageId, sourceMessageId, question))));
+                {"sessionKey":"%s","participantId":"live-tester","sourceMessageId":"%s","message":"%s"}
+                """.formatted(sessionKey, sourceMessageId, question))));
         String sessionId = receipt.required("sessionId").asText();
         String jobId = receipt.required("messageJobId").asText();
         JsonNode job = waitForTerminalJob(baseUrl, jobId);
@@ -141,7 +168,7 @@ class SessionAgentLiveIT {
         assertThat(history).isNotEmpty();
         assertThat(history).allSatisfy(message -> assertThat(message.required("type").asText()).isIn(HISTORY_TYPES));
         assertThat(history).extracting(message -> message.required("sequence").longValue()).isSorted();
-        return new Scenario(history);
+        return new Scenario(sessionId, history);
     }
 
     private String requiredBaseUrl() {
@@ -254,7 +281,7 @@ class SessionAgentLiveIT {
                 + "\\b(?:is\\s+)?(?:not\\s+)?(?:supported|unsupported)\\b.*");
     }
 
-    private record Scenario(List<JsonNode> history) {
+    private record Scenario(String sessionId, List<JsonNode> history) {
 
         private List<JsonNode> tools() {
             return history.stream().filter(message -> "TOOL".equals(message.required("type").asText())).toList();
