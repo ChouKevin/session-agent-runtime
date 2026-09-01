@@ -48,6 +48,17 @@ class SpringAiConversationModelTest {
     }
 
     @Test
+    void omits_tool_calling_options_when_no_tools_are_visible() {
+        RecordingChatModel chatModel = new RecordingChatModel(response(new AssistantMessage("answer")));
+        SpringAiConversationModel model = new SpringAiConversationModel(chatModel, new PromptResource());
+        ModelRequest request = new ModelRequest(List.of(), new DirectToolRegistry(List.of()).snapshot());
+
+        model.respond(request, () -> 1, usage -> { });
+
+        assertThat(chatModel.prompt.getOptions()).isNull();
+    }
+
+    @Test
     void keeps_same_generation_text_and_ordered_tool_requests_together() {
         AssistantMessage message = AssistantMessage.builder()
                 .content("I will inspect both sources.")
@@ -70,6 +81,24 @@ class SpringAiConversationModelTest {
         assertThat(((ToolCallingChatOptions) chatModel.prompt.getOptions()).getToolCallbacks())
                 .extracting(callback -> callback.getToolDefinition().name())
                 .containsExactly("first");
+    }
+
+    @Test
+    void derives_tool_calling_options_from_the_chat_model_defaults() {
+        ToolCallingChatOptions defaults = ToolCallingChatOptions.builder()
+                .model("configured-provider-model")
+                .temperature(0.25)
+                .build();
+        RecordingChatModel chatModel = new RecordingChatModel(
+                response(new AssistantMessage("answer")), defaults);
+        SpringAiConversationModel model = new SpringAiConversationModel(chatModel, new PromptResource());
+
+        model.respond(request(), () -> 1, usage -> { });
+
+        ToolCallingChatOptions promptOptions = (ToolCallingChatOptions) chatModel.prompt.getOptions();
+        assertThat(promptOptions.getModel()).isEqualTo("configured-provider-model");
+        assertThat(promptOptions.getTemperature()).isEqualTo(0.25);
+        assertThat(promptOptions.getToolCallbacks()).hasSize(1);
     }
 
     @Test
@@ -186,19 +215,26 @@ class SpringAiConversationModelTest {
         private final Optional<ChatResponse> response;
         private final Optional<RuntimeException> failure;
         private final List<String> events;
+        private final ToolCallingChatOptions options;
         private Prompt prompt;
         private int callCount;
 
         private RecordingChatModel(ChatResponse response) {
+            this(response, ToolCallingChatOptions.builder().build());
+        }
+
+        private RecordingChatModel(ChatResponse response, ToolCallingChatOptions options) {
             this.response = Optional.of(response);
             this.failure = Optional.empty();
             this.events = new ArrayList<>();
+            this.options = options;
         }
 
         private RecordingChatModel(RuntimeException failure, List<String> events) {
             this.response = Optional.empty();
             this.failure = Optional.of(failure);
             this.events = events;
+            this.options = ToolCallingChatOptions.builder().build();
         }
 
         @Override
@@ -214,7 +250,7 @@ class SpringAiConversationModelTest {
 
         @Override
         public ToolCallingChatOptions getOptions() {
-            return ToolCallingChatOptions.builder().build();
+            return options;
         }
     }
 }

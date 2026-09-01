@@ -18,6 +18,7 @@ import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.model.Generation;
+import org.springframework.ai.chat.prompt.ChatOptions;
 import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.ai.model.tool.ToolCallingChatOptions;
 import org.springframework.ai.retry.TransientAiException;
@@ -110,7 +111,16 @@ public final class SpringAiConversationModel implements ConversationModel {
         List<Message> messages = new ArrayList<>();
         messages.add(new org.springframework.ai.chat.messages.SystemMessage(promptResource.content()));
         messages.addAll(historyProjector.project(request.history()));
-        ToolCallingChatOptions options = ToolCallingChatOptions.builder().toolCallbacks(callbacks).build();
+        if (callbacks.isEmpty()) {
+            return new Prompt(List.copyOf(messages));
+        }
+        ChatOptions chatOptions = chatModel.getOptions();
+        Assert.isInstanceOf(ToolCallingChatOptions.class, chatOptions,
+                "Chat model options must support tool calling");
+        ToolCallingChatOptions options = ((ToolCallingChatOptions) chatOptions)
+                .mutate()
+                .toolCallbacks(callbacks)
+                .build();
         return new Prompt(List.copyOf(messages), options);
     }
 
