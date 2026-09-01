@@ -78,6 +78,12 @@ class StandaloneProjectTest {
         Element failsafe = pluginByArtifactId(child(profile, "build"), "maven-failsafe-plugin");
         assertEquals(Set.of("**/*PostgresIT.java"), elementText(child(child(failsafe, "configuration"), "includes"), "include"));
         assertEquals(Set.of("integration-test", "verify"), elementText(child(failsafe, "executions"), "goal"));
+
+        Element liveProfile = profileById(child(project, "profiles"), "live-it");
+        Element liveSurefire = pluginByArtifactId(child(liveProfile, "build"), "maven-surefire-plugin");
+        Element liveIncludes = child(child(liveSurefire, "configuration"), "includes");
+        assertEquals("override", liveIncludes.getAttribute("combine.self"));
+        assertEquals(Set.of("**/SessionAgentLiveIT.java"), elementText(liveIncludes, "include"));
     }
 
     private static void assertNoForbiddenDependencies(Element project) {
