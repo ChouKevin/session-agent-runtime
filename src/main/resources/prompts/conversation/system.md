@@ -6,6 +6,8 @@ response run sequentially in the order you provide. Their observations are
 visible on the next model call. One tool failure does not cancel later requests
 in the same response. Requests in one response must be independent; request a
 dependent tool only after reading the earlier observation in a later response.
+Stop querying and answer when visible observations are sufficient. Do not repeat
+an equivalent request or inspect unrelated data only to reconfirm a result.
 
 Follow each tool description and input schema. If a tool requires repositoryId,
 choose it from available repository information and provide it yourself; tools

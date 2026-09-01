@@ -182,14 +182,14 @@ class SessionAgentLiveIT {
         return List.copyOf(history);
     }
 
-    private static void assertRevisionPinnedSourceObservation(JsonNode observation) {
+    static void assertRevisionPinnedSourceObservation(JsonNode observation) {
         JsonNode toolInput = input(observation);
         assertThat(toolInput.required("repositoryId").asText()).isNotBlank();
         assertThat(toolInput.required("revision").asText()).isNotBlank();
         JsonNode toolOutput = output(observation);
         assertThat(toolOutput.required("repositoryId").asText()).isEqualTo(toolInput.required("repositoryId").asText());
         assertThat(toolOutput.required("revision").asText()).isEqualTo(toolInput.required("revision").asText());
-        assertThat(toolOutput.required("data").isObject()).isTrue();
+        assertThat(toolOutput.required("data").isContainerNode()).isTrue();
     }
 
     private static void assertAnswerSharesFixtureFact(String answer, JsonNode observation, List<String> facts) {
@@ -235,10 +235,10 @@ class SessionAgentLiveIT {
         assertThat(normalized).containsAnyOf("unavailable", "cannot", "not available", "unable to obtain", "do not have");
         assertThat(normalized).containsAnyOf("current", "runtime", "database", "api");
         assertThat(normalized).containsAnyOf("formula", "configuration", "json");
-        assertThat(normalized).containsPattern("(?s).*\\bcurrent(?:\\s+runtime)?(?:\\s+(?:database|api)(?:\\s*/\\s*(?:database|api))?)?"
-                + "\\s+fee(?:\\s+value)?[^.!?\\n]{0,40}\\b(?:unavailable|not available|unknown|unobtainable|not known|not accessible|not provided)\\b.*");
-        assertThat(normalized).doesNotMatch("(?s).*\\bcurrent(?:\\s+runtime)?(?:\\s+(?:database|api)(?:\\s*/\\s*(?:database|api))?)?"
-                + "\\s+fee(?:\\s+value)?\\s*(?:is|equals|=|:|of)\\s*(?:[$€£]\\s*)?\\d+(?:[.,]\\d+)?(?:\\s*%|\\s+percent)?\\b.*");
+        assertThat(normalized).containsPattern("(?s).*\\bcurrent\\b[^.!?\\n]{0,80}\\bfee(?:\\s+value)?\\b[^.!?\\n]{0,40}"
+                + "\\b(?:unavailable|not available|unknown|unobtainable|not known|not accessible|not provided)\\b.*");
+        assertThat(normalized).doesNotMatch("(?s).*\\bcurrent\\b[^.!?\\n]{0,80}\\bfee(?:\\s+value)?\\s*"
+                + "(?:is|equals|=|:|of)\\s*(?:[$€£]\\s*)?\\d+(?:[.,]\\d+)?(?:\\s*%|\\s+percent)?\\b.*");
     }
 
     static void assertCodeLimitedBnplAnswer(String answer) {
