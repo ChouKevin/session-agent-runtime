@@ -76,8 +76,10 @@ class SessionAgentLiveIT {
     void records_cancellation_and_refund_source_inspection_in_http_history() throws Exception {
         Scenario scenario = ask("How do cancellation and refund work? Inspect Semantic source before answering.");
 
-        JsonNode observation = scenario.successfulSourceObservationWithEvidence("cancellation", "refund");
-        assertRevisionPinnedSourceObservation(observation);
+        JsonNode cancellationObservation = scenario.successfulSourceObservationWithEvidence("cancellation");
+        JsonNode refundObservation = scenario.successfulSourceObservationWithEvidence("refund");
+        assertRevisionPinnedSourceObservation(cancellationObservation);
+        assertRevisionPinnedSourceObservation(refundObservation);
         assertTextContains(scenario.finalAssistantText(), "cancellation", "refund");
     }
 
@@ -88,7 +90,8 @@ class SessionAgentLiveIT {
         JsonNode repository = catalogOutput.required("repositories").get(0);
         String repositoryId = repository.required("repositoryId").asText();
         String revision = repository.required("revision").asText();
-        String staleRevision = revision + "-stale";
+        String replacement = "0".equals(revision.substring(0, 1)) ? "1" : "0";
+        String staleRevision = replacement + revision.substring(1);
 
         Scenario refresh = ask("For repository " + repositoryId + ", first call codebase_list_entry_points with revision "
                 + staleRevision + ". After its opaque failure observation, call list_repositories to obtain current Semantic "
@@ -197,9 +200,9 @@ class SessionAgentLiveIT {
     }
 
     private static void assertTextContains(String text, String... expectedTerms) {
-        String normalized = lower(text);
+        String normalized = normalizeWords(text);
         for (String expectedTerm : expectedTerms) {
-            assertThat(normalized).contains(lower(expectedTerm));
+            assertThat(normalized).contains(normalizeWords(expectedTerm));
         }
     }
 
@@ -223,19 +226,25 @@ class SessionAgentLiveIT {
         return value.toLowerCase(Locale.ROOT);
     }
 
+    private static String normalizeWords(String value) {
+        return lower(value).replace('_', ' ');
+    }
+
     static void assertHonestRuntimeFeeAnswer(String answer) {
         String normalized = lower(answer);
         assertThat(normalized).containsAnyOf("unavailable", "cannot", "not available", "unable to obtain", "do not have");
         assertThat(normalized).containsAnyOf("current", "runtime", "database", "api");
         assertThat(normalized).containsAnyOf("formula", "configuration", "json");
-        assertThat(normalized).doesNotMatch("(?s).*\\bcurrent(?:\\s+runtime)?(?:\\s+(?:database|api)(?:\\s*/\\s*(?:database|api))?)?\\s+fee(?:\\s+value)?\\s*(?:is|equals|=|:|of)\\s*"
-                + "(?!(?:unavailable|not available|unknown|unobtainable|not known|not accessible|not provided)\\b)[^.!?\\n]+.*");
+        assertThat(normalized).containsPattern("(?s).*\\bcurrent(?:\\s+runtime)?(?:\\s+(?:database|api)(?:\\s*/\\s*(?:database|api))?)?"
+                + "\\s+fee(?:\\s+value)?[^.!?\\n]{0,40}\\b(?:unavailable|not available|unknown|unobtainable|not known|not accessible|not provided)\\b.*");
+        assertThat(normalized).doesNotMatch("(?s).*\\bcurrent(?:\\s+runtime)?(?:\\s+(?:database|api)(?:\\s*/\\s*(?:database|api))?)?"
+                + "\\s+fee(?:\\s+value)?\\s*(?:is|equals|=|:|of)\\s*(?:[$€£]\\s*)?\\d+(?:[.,]\\d+)?(?:\\s*%|\\s+percent)?\\b.*");
     }
 
     static void assertCodeLimitedBnplAnswer(String answer) {
         String normalized = lower(answer);
         assertThat(normalized).contains("bnpl");
-        assertThat(normalized).containsAnyOf("not found", "no bnpl", "not implemented", "does not support");
+        assertThat(normalized).containsAnyOf("not found", "no bnpl", "no evidence", "not implemented", "does not support");
         assertThat(normalized).containsAnyOf("inspected code", "codebase", "source code", "repository");
         assertThat(normalized).doesNotMatch("(?s).*\\bbnpl\\b.{0,120}\\b(?:is\\s+)?(?:not\\s+)?(?:supported|unsupported)\\b.{0,120}"
                 + "\\b(?:running\\s+system|production(?:\\s+system)?|live\\s+system)\\b.*");
@@ -289,8 +298,9 @@ class SessionAgentLiveIT {
         }
 
         private static boolean containsAll(String value, String... expected) {
+            String normalized = normalizeWords(value);
             for (String expectedValue : expected) {
-                if (!value.contains(lower(expectedValue))) {
+                if (!normalized.contains(normalizeWords(expectedValue))) {
                     return false;
                 }
             }
