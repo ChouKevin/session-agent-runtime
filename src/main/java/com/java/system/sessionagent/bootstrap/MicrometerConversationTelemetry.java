@@ -10,16 +10,12 @@ import java.time.Duration;
 import java.util.Arrays;
 import java.util.Optional;
 import java.util.Set;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 public final class MicrometerConversationTelemetry implements ConversationTelemetry {
 
-    private static final Set<String> TOOL_NAMES = Set.of(
-            "list_repositories", "codebase_list_entry_points", "codebase_lookup_api_route", "codebase_suggest_api_route",
-            "codebase_outgoing_call_graph", "codebase_incoming_call_graph", "codebase_search_code_facts",
-            "codebase_get_code_fact", "codebase_discover_event_listeners", "codebase_discover_method_implementations",
-            "codebase_discover_type_members", "codebase_find_internal_references", "codebase_get_evidence_source",
-            "codebase_get_method_source", "codebase_get_source_segment", "codebase_resolve_source_symbol");
+    private static final Pattern PORTABLE_TOOL_NAME = Pattern.compile("[A-Za-z][A-Za-z0-9_-]{0,63}");
     private static final Set<String> INTAKE_OUTCOMES = Set.of("ACCEPTED", "REJECTED");
     private static final Set<String> JOB_OUTCOMES = Set.of("EMPTY", "CLAIMED", "COMPLETED", "OWNERSHIP_LOST", "FAILED");
     private static final Set<String> MODEL_OUTCOMES = Set.of("SUCCESS", "FAILURE");
@@ -70,7 +66,7 @@ public final class MicrometerConversationTelemetry implements ConversationTeleme
     @Override
     public void tool(String toolName, String outcome, Duration duration) {
         Assert.notNull(duration, "Tool duration must not be null");
-        String boundedToolName = bounded(toolName, TOOL_NAMES);
+        String boundedToolName = PORTABLE_TOOL_NAME.matcher(toolName).matches() ? "PORTABLE" : "OTHER";
         String boundedOutcome = bounded(outcome, TOOL_OUTCOMES);
         increment("session_agent.tool", "tool", boundedToolName, "outcome", boundedOutcome);
         recordDuration("session_agent.tool.duration", duration, "tool", boundedToolName, "outcome", boundedOutcome);

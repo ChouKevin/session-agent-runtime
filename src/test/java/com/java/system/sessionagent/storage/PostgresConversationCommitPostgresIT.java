@@ -3,7 +3,8 @@ package com.java.system.sessionagent.storage;
 import com.java.system.sessionagent.conversation.domain.IncomingMessage;
 import com.java.system.sessionagent.conversation.domain.MessageReceipt;
 import com.java.system.sessionagent.conversation.domain.MessageWorkClaim;
-import com.java.system.sessionagent.conversation.domain.ObservationId;
+import com.java.system.sessionagent.conversation.domain.ToolCallId;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.java.system.sessionagent.conversation.port.out.ConversationStore;
 import com.java.system.sessionagent.conversation.port.out.StaleWorkClaimException;
 import org.flywaydb.core.Flyway;
@@ -84,28 +85,32 @@ class PostgresConversationCommitPostgresIT {
                 """, String.class);
 
         assertThat(tables).containsExactlyInAnyOrder("conversation_session", "source_message", "session_message", "user_message",
-                "message_job", "assistant_message", "tool_observation", "runtime_message");
-        assertThat(observationColumns).containsExactlyInAnyOrder("session_id", "sequence", "role", "observation_id", "tool_name", "input", "output");
+                "message_job", "assistant_message", "assistant_tool_calls", "tool_observation", "runtime_message");
+        assertThat(observationColumns).containsExactlyInAnyOrder("session_id", "sequence", "role", "tool_call_id", "tool_name", "output");
         assertThat(jobColumns).doesNotContain("reply_sequence");
-        assertThat(roleChecks).contains("USER", "TOOL", "ASSISTANT", "RUNTIME").doesNotContain("FEEDBACK");
+        assertThat(roleChecks).contains("USER", "TOOL", "ASSISTANT", "ASSISTANT_TOOL_CALLS", "RUNTIME").doesNotContain("FEEDBACK");
         assertThat(jobChecks).contains("model_calls >= 0").doesNotContain("between 0 and 12");
     }
 
     @Test
-    void atomically_appends_final_tool_and_assistant_messages() {
+    void atomically_appends_native_assistant_calls_and_tool_results() {
         ConversationStore store = store();
         MessageReceipt receipt = store.receive(new IncomingMessage("thread", "alice", "source", "hello"));
         MessageWorkClaim claim = store.claimNext("worker", Duration.ofSeconds(30)).orElseThrow();
 
         store.append(claim, new ConversationStore.MessageBatch(List.of(
-                new ConversationStore.ToolObservationData(new ObservationId("4455b5ba-7b93-44cf-bd76-0d756e325eb5"), "lookup", "{}", "plain output"),
-                new ConversationStore.AssistantData("done")), ConversationStore.JobUpdate.COMPLETE), NOW);
+                new ConversationStore.AssistantToolCallsData(java.util.Optional.of("I will inspect both."), List.of(
+                        new ConversationStore.ToolCallData(new ToolCallId("call-1"), "mcp_lookup", java.util.Map.of("query", "fees")),
+                        new ConversationStore.ToolCallData(new ToolCallId("call-2"), "mcp_entries", java.util.Map.of()))),
+                new ConversationStore.ToolObservationData(new ToolCallId("call-1"), "mcp_lookup", java.util.Map.of("isError", false, "result", java.util.Map.of())),
+                new ConversationStore.ToolObservationData(new ToolCallId("call-2"), "mcp_entries", java.util.Map.of("isError", true, "result", "failure"))),
+                ConversationStore.JobUpdate.COMPLETE), NOW);
 
         assertThat(store.loadHistory(receipt.sessionId())).extracting(message -> message.sequence().value())
-                .containsExactly(1L, 2L, 3L);
+                .containsExactly(1L, 2L, 3L, 4L);
         assertThat(jdbcTemplate.queryForObject("select status from message_job where message_job_id = ?", String.class,
                 java.util.UUID.fromString(receipt.messageJobId().value()))).isEqualTo("DONE");
-        assertThat(jdbcTemplate.queryForObject("select count(*) from tool_observation", Integer.class)).isEqualTo(1);
+        assertThat(jdbcTemplate.queryForObject("select count(*) from tool_observation", Integer.class)).isEqualTo(2);
     }
 
     @Test
@@ -232,7 +237,7 @@ class PostgresConversationCommitPostgresIT {
     }
 
     private ConversationStore store() {
-        return new PostgresConversationStore(dataSource(), Clock.fixed(NOW, ZoneOffset.UTC));
+        return new PostgresConversationStore(dataSource(), Clock.fixed(NOW, ZoneOffset.UTC), new ObjectMapper());
     }
 
     private DriverManagerDataSource dataSource() {

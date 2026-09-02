@@ -6,6 +6,7 @@ public final class ModelCallFailure extends RuntimeException {
         CORRECTABLE,
         TRANSIENT,
         CONTEXT_TOO_LARGE,
+        INVALID_HISTORY,
         TERMINAL
     }
 
@@ -30,6 +31,10 @@ public final class ModelCallFailure extends RuntimeException {
 
     public static ModelCallFailure contextTooLarge() {
         return new ModelCallFailure(Kind.CONTEXT_TOO_LARGE, "Model context is too large");
+    }
+
+    public static ModelCallFailure invalidHistory() {
+        return new ModelCallFailure(Kind.INVALID_HISTORY, "Conversation history is invalid");
     }
 
     public Kind kind() {

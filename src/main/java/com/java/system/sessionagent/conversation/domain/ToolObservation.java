@@ -11,10 +11,9 @@ public record ToolObservation(
         Optional<MessageJobId> messageJobId,
         Instant createdAt,
         MessageRole role,
-        ObservationId observationId,
+        ToolCallId toolCallId,
         String toolName,
-        String input,
-        String output) implements SessionMessage {
+        Object output) implements SessionMessage {
 
     public ToolObservation {
         Assert.notNull(sessionId, "Session ID must not be null");
@@ -23,9 +22,8 @@ public record ToolObservation(
         Assert.isTrue(messageJobId.isPresent(), "Tool observation must belong to a message job");
         Assert.notNull(createdAt, "Message creation time must not be null");
         Assert.isTrue(role == MessageRole.TOOL, "Message role must match TOOL message type");
-        Assert.notNull(observationId, "Observation ID must not be null");
+        Assert.notNull(toolCallId, "Tool call ID must not be null");
         Assert.hasText(toolName, "Tool name must not be blank");
-        Assert.notNull(input, "Tool input must not be null");
         Assert.notNull(output, "Tool output must not be null");
     }
 }

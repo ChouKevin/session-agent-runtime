@@ -62,7 +62,6 @@ class StandaloneProjectTest {
         assertEquals("21", childText(properties, "java.version"));
         assertEquals("2.0.1", childText(properties, "spring-ai.version"));
         assertEquals("2.1.0", childText(properties, "spring-modulith.version"));
-        assertEquals("5.0.0", childText(properties, "victools.version"));
         assertEquals("1.4.2", childText(properties, "archunit.version"));
 
         Element managedDependencies = child(child(project, "dependencyManagement"), "dependencies");

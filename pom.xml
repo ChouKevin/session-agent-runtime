@@ -21,7 +21,6 @@
         <java.version>21</java.version>
         <spring-ai.version>2.0.1</spring-ai.version>
         <spring-modulith.version>2.1.0</spring-modulith.version>
-        <victools.version>5.0.0</victools.version>
         <archunit.version>1.4.2</archunit.version>
     </properties>
 
@@ -93,22 +92,6 @@
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-jackson2</artifactId>
         </dependency>
-        <dependency>
-            <groupId>com.github.victools</groupId>
-            <artifactId>jsonschema-generator</artifactId>
-            <version>${victools.version}</version>
-        </dependency>
-        <dependency>
-            <groupId>com.github.victools</groupId>
-            <artifactId>jsonschema-module-jackson</artifactId>
-            <version>${victools.version}</version>
-        </dependency>
-        <dependency>
-            <groupId>com.github.victools</groupId>
-            <artifactId>jsonschema-module-jakarta-validation</artifactId>
-            <version>${victools.version}</version>
-        </dependency>
-
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-test</artifactId>

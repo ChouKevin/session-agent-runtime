@@ -2,6 +2,7 @@ package com.java.system.sessionagent.web;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.java.system.sessionagent.conversation.domain.AssistantMessage;
+import com.java.system.sessionagent.conversation.domain.AssistantToolCallsMessage;
 import com.java.system.sessionagent.conversation.domain.RuntimeMessage;
 import com.java.system.sessionagent.conversation.domain.SessionMessage;
 import com.java.system.sessionagent.conversation.domain.ToolObservation;
@@ -30,7 +31,7 @@ public final class MessageResponses {
         }
     }
 
-    public sealed interface SessionMessageResponse permits UserResponse, ToolResponse, AssistantResponse, RuntimeResponse {
+    public sealed interface SessionMessageResponse permits UserResponse, AssistantToolCallsResponse, ToolResponse, AssistantResponse, RuntimeResponse {
 
         long sequence();
 
@@ -42,13 +43,19 @@ public final class MessageResponses {
         String messageJobId();
 
         static SessionMessageResponse from(SessionMessage message) {
-            String messageJobId = message.messageJobId().map(value -> value.value()).orElse(null);
+            String messageJobId = message.messageJobId().map(value -> value.value()).orElse(null); // cs-allow public API represents an absent optional job ID as null
             if (message instanceof UserMessage user) {
                 return new UserResponse(user.sequence().value(), user.createdAt(), messageJobId, user.participantId(), user.message());
             }
             if (message instanceof ToolObservation tool) {
-                return new ToolResponse(tool.sequence().value(), tool.createdAt(), messageJobId, tool.observationId().value(),
-                        tool.toolName(), tool.input(), tool.output());
+                return new ToolResponse(tool.sequence().value(), tool.createdAt(), messageJobId, tool.toolCallId().value(),
+                        tool.toolName(), tool.output());
+            }
+            if (message instanceof AssistantToolCallsMessage calls) {
+                return new AssistantToolCallsResponse(calls.sequence().value(), calls.createdAt(), messageJobId,
+                        calls.message().orElse(null), calls.requests().stream()
+                                .map(request -> new ToolCallResponse(request.toolCallId().value(), request.toolName().value(), request.arguments()))
+                                .toList()); // cs-allow public API represents absent optional assistant text as null
             }
             if (message instanceof AssistantMessage assistant) {
                 return new AssistantResponse(assistant.sequence().value(), assistant.createdAt(), messageJobId, assistant.message());
@@ -63,8 +70,16 @@ public final class MessageResponses {
         @Override public String type() { return "USER"; }
     }
 
-    public record ToolResponse(long sequence, Instant createdAt, String messageJobId, String observationId, String toolName,
-                               String input, String output) implements SessionMessageResponse {
+    public record AssistantToolCallsResponse(long sequence, Instant createdAt, String messageJobId, String message,
+                                             java.util.List<ToolCallResponse> calls) implements SessionMessageResponse {
+        @Override public String type() { return "ASSISTANT_TOOL_CALLS"; }
+    }
+
+    public record ToolCallResponse(String toolCallId, String toolName, java.util.Map<String, Object> arguments) {
+    }
+
+    public record ToolResponse(long sequence, Instant createdAt, String messageJobId, String toolCallId, String toolName,
+                               Object output) implements SessionMessageResponse {
         @Override public String type() { return "TOOL"; }
     }
 

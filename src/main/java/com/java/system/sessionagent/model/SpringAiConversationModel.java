@@ -1,5 +1,8 @@
 package com.java.system.sessionagent.model;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.java.system.sessionagent.conversation.domain.ModelReply;
 import com.java.system.sessionagent.conversation.domain.ModelRequest;
 import com.java.system.sessionagent.conversation.domain.ModelUsage;
@@ -29,11 +32,15 @@ import org.springframework.util.StringUtils;
 import java.net.SocketTimeoutException;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.function.Consumer;
+import java.util.UUID;
+import java.util.Map;
 
 public final class SpringAiConversationModel implements ConversationModel {
 
@@ -42,17 +49,15 @@ public final class SpringAiConversationModel implements ConversationModel {
     private final SpringAiToolCallbackFactory callbackFactory;
     private final ConversationHistoryProjector historyProjector;
     private final ConversationTelemetry telemetry;
-
-    public SpringAiConversationModel(ChatModel chatModel, PromptResource promptResource) {
-        this(chatModel, promptResource, new SpringAiToolCallbackFactory(), new ConversationHistoryProjector(),
-                new NoOpConversationTelemetry());
-    }
+    private final ObjectMapper objectMapper;
 
     public SpringAiConversationModel(
             ChatModel chatModel,
             PromptResource promptResource,
-            ConversationTelemetry telemetry) {
-        this(chatModel, promptResource, new SpringAiToolCallbackFactory(), new ConversationHistoryProjector(), telemetry);
+            ConversationTelemetry telemetry,
+            ObjectMapper objectMapper) {
+        this(chatModel, promptResource, new SpringAiToolCallbackFactory(objectMapper), new ConversationHistoryProjector(objectMapper), telemetry,
+                objectMapper);
     }
 
     SpringAiConversationModel(
@@ -60,17 +65,20 @@ public final class SpringAiConversationModel implements ConversationModel {
             PromptResource promptResource,
             SpringAiToolCallbackFactory callbackFactory,
             ConversationHistoryProjector historyProjector,
-            ConversationTelemetry telemetry) {
+            ConversationTelemetry telemetry,
+            ObjectMapper objectMapper) {
         Assert.notNull(chatModel, "Chat model must not be null");
         Assert.notNull(promptResource, "Prompt resource must not be null");
         Assert.notNull(callbackFactory, "Tool callback factory must not be null");
         Assert.notNull(historyProjector, "Conversation history projector must not be null");
         Assert.notNull(telemetry, "Conversation telemetry must not be null");
+        Assert.notNull(objectMapper, "Object mapper must not be null");
         this.chatModel = chatModel;
         this.promptResource = promptResource;
         this.callbackFactory = callbackFactory;
         this.historyProjector = historyProjector;
         this.telemetry = telemetry;
+        this.objectMapper = objectMapper;
     }
 
     @Override
@@ -82,7 +90,12 @@ public final class SpringAiConversationModel implements ConversationModel {
         Assert.notNull(reservation, "Model call reservation must not be null");
         Assert.notNull(usageObserver, "Model usage observer must not be null");
 
-        Prompt prompt = promptFor(request);
+        Prompt prompt;
+        try {
+            prompt = promptFor(request);
+        } catch (InvalidConversationHistoryException exception) {
+            throw ModelCallFailure.invalidHistory();
+        }
         reservation.reserve();
         ChatResponse response;
         long requestStartedAt = System.nanoTime();
@@ -95,7 +108,7 @@ public final class SpringAiConversationModel implements ConversationModel {
         }
         ModelReply reply;
         try {
-            reply = normalize(response);
+            reply = normalize(response, objectMapper);
         } catch (ModelCallFailure failure) {
             recordFailure("OUTPUT_INVALID", requestStartedAt);
             throw failure;
@@ -124,10 +137,10 @@ public final class SpringAiConversationModel implements ConversationModel {
         return new Prompt(List.copyOf(messages), options);
     }
 
-    private static ModelReply normalize(ChatResponse response) {
+    private static ModelReply normalize(ChatResponse response, ObjectMapper objectMapper) {
         AssistantMessage message = firstActionableMessage(response).orElseThrow(ModelCallFailure::correctable);
         if (message.hasToolCalls()) {
-            return new ModelReply.UseTools(text(message), toolRequests(message));
+            return new ModelReply.UseTools(text(message), toolRequests(message, objectMapper));
         }
         return new ModelReply.Text(text(message).orElseThrow(ModelCallFailure::correctable));
     }
@@ -151,12 +164,23 @@ public final class SpringAiConversationModel implements ConversationModel {
         return Optional.ofNullable(message.getText()).filter(StringUtils::hasText);
     }
 
-    private static List<ToolRequest> toolRequests(AssistantMessage message) {
+    private static List<ToolRequest> toolRequests(AssistantMessage message, ObjectMapper objectMapper) {
         try {
-            return message.getToolCalls().stream()
-                    .map(toolCall -> new ToolRequest(new ToolName(toolCall.name()), toolCall.arguments()))
-                    .toList();
-        } catch (IllegalArgumentException exception) {
+            List<ToolRequest> requests = new ArrayList<>();
+            HashSet<String> providerIds = new HashSet<>();
+            for (AssistantMessage.ToolCall toolCall : message.getToolCalls()) {
+                String providerId = toolCall.id();
+                if (StringUtils.hasText(providerId) && !providerIds.add(providerId)) {
+                    throw ModelCallFailure.correctable();
+                }
+                String toolCallId = StringUtils.hasText(providerId) ? providerId : UUID.randomUUID().toString();
+                Map<String, Object> arguments = objectMapper.readValue(toolCall.arguments(), new TypeReference<LinkedHashMap<String, Object>>() { });
+                Assert.notNull(arguments, "Tool call arguments must be a JSON object");
+                requests.add(new ToolRequest(new com.java.system.sessionagent.conversation.domain.ToolCallId(toolCallId),
+                        new ToolName(toolCall.name()), arguments));
+            }
+            return List.copyOf(requests);
+        } catch (IllegalArgumentException | JsonProcessingException exception) {
             throw ModelCallFailure.correctable();
         }
     }

@@ -7,16 +7,12 @@ management:
         include: health,mcpConnections
 session-agent:
   mcp:
+    connections: {}
     refresh-interval: ${SESSION_AGENT_MCP_REFRESH_INTERVAL:60s}
     request-timeout: ${SESSION_AGENT_MCP_REQUEST_TIMEOUT:30s}
     initial-backoff: ${SESSION_AGENT_MCP_INITIAL_BACKOFF:1s}
     maximum-backoff: ${SESSION_AGENT_MCP_MAXIMUM_BACKOFF:60s}
     shutdown-timeout: ${SESSION_AGENT_MCP_SHUTDOWN_TIMEOUT:5s}
-  semantic:
-    base-url: ${SEMANTIC_BASE_URL:http://localhost:8080}
-    api-token: ${SEMANTIC_API_TOKEN}
-    connect-timeout: ${SEMANTIC_CONNECT_TIMEOUT:2s}
-    response-timeout: ${SEMANTIC_RESPONSE_TIMEOUT:120s}
   model:
     max-model-calls-per-message: ${SESSION_AGENT_MAX_MODEL_CALLS_PER_MESSAGE:12}
   worker:

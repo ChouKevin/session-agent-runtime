@@ -14,29 +14,12 @@ import java.time.Duration;
 @Validated
 @ConfigurationProperties("session-agent")
 public record RuntimeProperties(
-        @Valid @DefaultValue Semantic semantic,
         @Valid @DefaultValue Model model,
         @Valid @DefaultValue Worker worker) {
 
     public RuntimeProperties {
-        Assert.notNull(semantic, "Semantic properties must not be null");
         Assert.notNull(model, "Model properties must not be null");
         Assert.notNull(worker, "Worker properties must not be null");
-    }
-
-    public record Semantic(
-            @NotBlank @DefaultValue("http://localhost:8080") String baseUrl,
-            @NotBlank String apiToken,
-            @DefaultValue("2s") Duration connectTimeout,
-            @DefaultValue("120s") Duration responseTimeout) {
-        public Semantic {
-            Assert.hasText(baseUrl, "Semantic base URL must not be blank");
-            Assert.hasText(apiToken, "Semantic API token must not be blank");
-            Assert.notNull(connectTimeout, "Semantic connect timeout must not be null");
-            Assert.notNull(responseTimeout, "Semantic response timeout must not be null");
-            Assert.isTrue(!connectTimeout.isNegative() && !connectTimeout.isZero(), "Semantic connect timeout must be positive");
-            Assert.isTrue(!responseTimeout.isNegative() && !responseTimeout.isZero(), "Semantic response timeout must be positive");
-        }
     }
 
     public record Model(@Positive @DefaultValue("12") int maxModelCallsPerMessage) {

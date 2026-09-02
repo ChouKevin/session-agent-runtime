@@ -1,18 +1,24 @@
 package com.java.system.sessionagent.storage;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.java.system.sessionagent.conversation.domain.AssistantMessage;
+import com.java.system.sessionagent.conversation.domain.AssistantToolCallsMessage;
 import com.java.system.sessionagent.conversation.domain.IncomingMessage;
 import com.java.system.sessionagent.conversation.domain.JobStatus;
 import com.java.system.sessionagent.conversation.domain.MessageJobId;
 import com.java.system.sessionagent.conversation.domain.MessageReceipt;
 import com.java.system.sessionagent.conversation.domain.MessageRole;
 import com.java.system.sessionagent.conversation.domain.MessageWorkClaim;
-import com.java.system.sessionagent.conversation.domain.ObservationId;
 import com.java.system.sessionagent.conversation.domain.RuntimeMessage;
 import com.java.system.sessionagent.conversation.domain.SessionId;
 import com.java.system.sessionagent.conversation.domain.SessionMessage;
 import com.java.system.sessionagent.conversation.domain.SessionSequence;
 import com.java.system.sessionagent.conversation.domain.ToolObservation;
+import com.java.system.sessionagent.conversation.domain.ToolCallId;
+import com.java.system.sessionagent.conversation.domain.ToolRequest;
+import com.java.system.sessionagent.tool.domain.ToolName;
 import com.java.system.sessionagent.conversation.domain.UserMessage;
 import com.java.system.sessionagent.conversation.port.in.MessageConflictException;
 import com.java.system.sessionagent.conversation.port.out.ConversationStore;
@@ -59,8 +65,9 @@ public final class PostgresConversationStore implements ConversationStore {
     private final TransactionTemplate transactionTemplate;
     private final TransactionTemplate historyTransactionTemplate;
     private final Clock clock;
+    private final ObjectMapper objectMapper;
 
-    public PostgresConversationStore(DataSource dataSource, Clock clock) {
+    public PostgresConversationStore(DataSource dataSource, Clock clock, ObjectMapper objectMapper) {
         DataSource requiredDataSource = Objects.requireNonNull(dataSource, "Data source must not be null");
         this.jdbcTemplate = new JdbcTemplate(requiredDataSource);
         DataSourceTransactionManager transactionManager = new DataSourceTransactionManager(requiredDataSource);
@@ -71,6 +78,7 @@ public final class PostgresConversationStore implements ConversationStore {
         this.historyTransactionTemplate.setIsolationLevel(TransactionDefinition.ISOLATION_REPEATABLE_READ);
         this.historyTransactionTemplate.setReadOnly(true);
         this.clock = Objects.requireNonNull(clock, "Clock must not be null");
+        this.objectMapper = Objects.requireNonNull(objectMapper, "Object mapper must not be null");
     }
 
     @Override
@@ -256,6 +264,7 @@ public final class PostgresConversationStore implements ConversationStore {
         UUID parsedSessionId = UUID.fromString(sessionId.value());
         List<SessionMessage> messages = new ArrayList<>();
         messages.addAll(loadUserMessages(parsedSessionId));
+        messages.addAll(loadAssistantToolCallsMessages(parsedSessionId));
         messages.addAll(loadToolObservations(parsedSessionId));
         messages.addAll(loadAssistantMessages(parsedSessionId));
         messages.addAll(loadRuntimeMessages(parsedSessionId));
@@ -297,13 +306,17 @@ public final class PostgresConversationStore implements ConversationStore {
                     insertSessionMessage(sessionId, sequence, messageJobId(requiredClaim), "ASSISTANT", requiredCreatedAt);
                     jdbcTemplate.update("insert into assistant_message(session_id, sequence, message) values (?, ?, ?)",
                             sessionId, sequence, assistant.message());
+                } else if (message instanceof AssistantToolCallsData assistantToolCalls) {
+                    insertSessionMessage(sessionId, sequence, messageJobId(requiredClaim), "ASSISTANT_TOOL_CALLS", requiredCreatedAt);
+                    jdbcTemplate.update("insert into assistant_tool_calls(session_id, sequence, message, calls) values (?, ?, ?, ?::jsonb)",
+                            sessionId, sequence, assistantToolCalls.message().orElse(null), json(storedToolCalls(assistantToolCalls.calls()))); // cs-allow nullable database column represents optional assistant text
                 } else if (message instanceof ToolObservationData observation) {
                     insertSessionMessage(sessionId, sequence, messageJobId(requiredClaim), "TOOL", requiredCreatedAt);
                     jdbcTemplate.update("""
-                            insert into tool_observation(session_id, sequence, observation_id, tool_name, input, output)
-                            values (?, ?, ?, ?, ?, ?)
-                            """, sessionId, sequence, UUID.fromString(observation.observationId().value()), observation.toolName(),
-                            observation.input(), observation.output());
+                            insert into tool_observation(session_id, sequence, tool_call_id, tool_name, output)
+                            values (?, ?, ?, ?, ?::jsonb)
+                            """, sessionId, sequence, observation.toolCallId().value(), observation.toolName(),
+                            json(observation.output()));
                 } else if (message instanceof RuntimeData runtime) {
                     insertSessionMessage(sessionId, sequence, messageJobId(requiredClaim), "RUNTIME", requiredCreatedAt);
                     jdbcTemplate.update("insert into runtime_message(session_id, sequence, code, message) values (?, ?, ?, ?)",
@@ -387,14 +400,25 @@ public final class PostgresConversationStore implements ConversationStore {
 
     private List<SessionMessage> loadToolObservations(UUID sessionId) {
         return jdbcTemplate.query("""
-                select message.sequence, message.message_job_id, message.created_at, detail.observation_id, detail.tool_name, detail.input, detail.output
+                select message.sequence, message.message_job_id, message.created_at, detail.tool_call_id, detail.tool_name, detail.output
                 from session_message message join tool_observation detail on detail.session_id = message.session_id and detail.sequence = message.sequence
                 where message.session_id = ?
                 """, (resultSet, rowNumber) -> new ToolObservation(new SessionId(sessionId.toString()),
                 new SessionSequence(resultSet.getLong("sequence")), Optional.of(new MessageJobId(
                 resultSet.getObject("message_job_id", UUID.class).toString())), resultSet.getObject("created_at", OffsetDateTime.class).toInstant(),
-                MessageRole.TOOL, new ObservationId(resultSet.getObject("observation_id", UUID.class).toString()),
-                resultSet.getString("tool_name"), resultSet.getString("input"), resultSet.getString("output")), sessionId);
+                MessageRole.TOOL, new ToolCallId(resultSet.getString("tool_call_id")),
+                resultSet.getString("tool_name"), structuredValue(resultSet.getString("output"))), sessionId);
+    }
+
+    private List<SessionMessage> loadAssistantToolCallsMessages(UUID sessionId) {
+        return jdbcTemplate.query("""
+                select message.sequence, message.message_job_id, message.created_at, detail.message, detail.calls
+                from session_message message join assistant_tool_calls detail on detail.session_id = message.session_id and detail.sequence = message.sequence
+                where message.session_id = ?
+                """, (resultSet, rowNumber) -> new AssistantToolCallsMessage(new SessionId(sessionId.toString()),
+                new SessionSequence(resultSet.getLong("sequence")), Optional.of(new MessageJobId(
+                resultSet.getObject("message_job_id", UUID.class).toString())), resultSet.getObject("created_at", OffsetDateTime.class).toInstant(),
+                MessageRole.ASSISTANT_TOOL_CALLS, Optional.ofNullable(resultSet.getString("message")), toolRequests(resultSet.getString("calls"))), sessionId);
     }
 
     private List<SessionMessage> loadAssistantMessages(UUID sessionId) {
@@ -473,6 +497,37 @@ public final class PostgresConversationStore implements ConversationStore {
         return OffsetDateTime.ofInstant(instant, ZoneOffset.UTC);
     }
 
+    private String json(Object value) {
+        try {
+            return objectMapper.writeValueAsString(value);
+        } catch (JsonProcessingException exception) {
+            throw new IllegalArgumentException("Conversation data cannot be serialized", exception);
+        }
+    }
+
+    private Object structuredValue(String value) {
+        try {
+            return objectMapper.readValue(value, Object.class);
+        } catch (JsonProcessingException exception) {
+            throw new IllegalArgumentException("Stored conversation output is invalid", exception);
+        }
+    }
+
+    private List<ToolRequest> toolRequests(String value) {
+        try {
+            List<StoredToolCall> calls = objectMapper.readValue(value, new TypeReference<List<StoredToolCall>>() { });
+            return calls.stream().map(call -> new ToolRequest(new ToolCallId(call.toolCallId()), new ToolName(call.toolName()), call.arguments())).toList();
+        } catch (JsonProcessingException exception) {
+            throw new IllegalArgumentException("Stored assistant tool calls are invalid", exception);
+        }
+    }
+
+    private static List<StoredToolCall> storedToolCalls(List<ToolCallData> calls) {
+        return calls.stream()
+                .map(call -> new StoredToolCall(call.toolCallId().value(), call.toolName(), call.arguments()))
+                .toList();
+    }
+
     private static RuntimeException translate(RuntimeException exception) {
         if (exception instanceof ConversationStoreFailure || exception instanceof StaleWorkClaimException
                 || exception instanceof MessageConflictException) {
@@ -501,5 +556,8 @@ public final class PostgresConversationStore implements ConversationStore {
     }
 
     private record StoredSourceMessage(UUID sessionId, String contentHash, UUID messageJobId) {
+    }
+
+    private record StoredToolCall(String toolCallId, String toolName, java.util.Map<String, Object> arguments) {
     }
 }

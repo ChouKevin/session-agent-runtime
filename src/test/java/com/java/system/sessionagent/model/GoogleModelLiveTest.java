@@ -7,7 +7,9 @@ import com.java.system.sessionagent.conversation.domain.ModelRequest;
 import com.java.system.sessionagent.conversation.domain.SessionId;
 import com.java.system.sessionagent.conversation.domain.SessionSequence;
 import com.java.system.sessionagent.conversation.domain.UserMessage;
-import com.java.system.sessionagent.tool.application.DirectToolRegistry;
+import com.java.system.sessionagent.conversation.port.out.NoOpConversationTelemetry;
+import com.java.system.sessionagent.tool.port.ToolSnapshot;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import org.springframework.ai.chat.model.ChatModel;
@@ -47,9 +49,10 @@ class GoogleModelLiveTest {
                 MessageRole.USER, "tester", "Reply with a short greeting and do not call tools.");
         AtomicInteger reservations = new AtomicInteger();
         CountingChatModel countingModel = new CountingChatModel(provider);
-        SpringAiConversationModel model = new SpringAiConversationModel(countingModel, new PromptResource());
+        SpringAiConversationModel model = new SpringAiConversationModel(
+                countingModel, new PromptResource(), new NoOpConversationTelemetry(), new ObjectMapper());
 
-        ModelReply reply = model.respond(new ModelRequest(List.of(question), new DirectToolRegistry(List.of()).snapshot()),
+        ModelReply reply = model.respond(new ModelRequest(List.of(question), new ToolSnapshot(List.of())),
                 reservations::incrementAndGet, usage -> { });
 
         assertThat(retryProperties.getMaxAttempts()).isEqualTo(1);

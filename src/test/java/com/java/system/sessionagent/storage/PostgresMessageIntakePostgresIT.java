@@ -4,6 +4,7 @@ import com.java.system.sessionagent.conversation.domain.IncomingMessage;
 import com.java.system.sessionagent.conversation.domain.MessageReceipt;
 import com.java.system.sessionagent.conversation.port.in.MessageConflictException;
 import com.java.system.sessionagent.conversation.port.out.ConversationStore;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -29,14 +30,14 @@ class PostgresMessageIntakePostgresIT {
     @BeforeEach void migrate() { POSTGRES.start(); flyway().clean(); flyway().migrate(); }
     @AfterEach void clean() { flyway().clean(); }
     @Test void retains_inbound_idempotency_and_rejects_conflicting_duplicate_content() {
-        ConversationStore store = new PostgresConversationStore(dataSource(), Clock.fixed(Instant.parse("2026-08-31T10:00:01Z"), ZoneOffset.UTC));
+        ConversationStore store = new PostgresConversationStore(dataSource(), Clock.fixed(Instant.parse("2026-08-31T10:00:01Z"), ZoneOffset.UTC), new ObjectMapper());
         MessageReceipt first = store.receive(new IncomingMessage("thread", "alice", "source", "first"));
         MessageReceipt duplicate = store.receive(new IncomingMessage("thread", "alice", "source", "first"));
         assertThat(duplicate).isEqualTo(first);
         assertThatThrownBy(() -> store.receive(new IncomingMessage("thread", "alice", "source", "changed"))).isInstanceOf(MessageConflictException.class);
     }
     @Test void allocates_ordered_sequences_under_concurrent_intake_without_duplicate_source_jobs() throws Exception {
-        ConversationStore store = new PostgresConversationStore(dataSource(), Clock.fixed(Instant.parse("2026-08-31T10:00:01Z"), ZoneOffset.UTC));
+        ConversationStore store = new PostgresConversationStore(dataSource(), Clock.fixed(Instant.parse("2026-08-31T10:00:01Z"), ZoneOffset.UTC), new ObjectMapper());
         List<MessageReceipt> duplicates = concurrently(() -> store.receive(new IncomingMessage("thread", "alice", "same", "hello")));
         List<MessageReceipt> distinct = concurrently(() -> store.receive(new IncomingMessage("thread", "alice",
                 "source-" + Thread.currentThread().threadId(), "message")));

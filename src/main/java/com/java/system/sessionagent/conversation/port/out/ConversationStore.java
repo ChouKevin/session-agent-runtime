@@ -5,9 +5,9 @@ import com.java.system.sessionagent.conversation.domain.JobStatus;
 import com.java.system.sessionagent.conversation.domain.MessageJobId;
 import com.java.system.sessionagent.conversation.domain.MessageReceipt;
 import com.java.system.sessionagent.conversation.domain.MessageWorkClaim;
-import com.java.system.sessionagent.conversation.domain.ObservationId;
 import com.java.system.sessionagent.conversation.domain.SessionId;
 import com.java.system.sessionagent.conversation.domain.SessionMessage;
+import com.java.system.sessionagent.conversation.domain.ToolCallId;
 import org.springframework.util.Assert;
 
 import java.time.Duration;
@@ -47,7 +47,7 @@ public interface ConversationStore {
         COMPLETE
     }
 
-    sealed interface MessageData permits AssistantData, ToolObservationData, RuntimeData {
+    sealed interface MessageData permits AssistantData, AssistantToolCallsData, ToolObservationData, RuntimeData {
     }
 
     record AssistantData(String message) implements MessageData {
@@ -57,16 +57,34 @@ public interface ConversationStore {
         }
     }
 
+    record AssistantToolCallsData(Optional<String> message, List<ToolCallData> calls) implements MessageData {
+
+        public AssistantToolCallsData {
+            Assert.notNull(message, "Assistant tool call message must not be null");
+            message.ifPresent(value -> Assert.hasText(value, "Assistant tool call message must not be blank"));
+            Assert.notEmpty(calls, "Assistant tool calls must not be empty");
+            calls = List.copyOf(calls);
+        }
+    }
+
+    record ToolCallData(ToolCallId toolCallId, String toolName, java.util.Map<String, Object> arguments) {
+
+        public ToolCallData {
+            Assert.notNull(toolCallId, "Tool call ID must not be null");
+            Assert.hasText(toolName, "Tool name must not be blank");
+            Assert.notNull(arguments, "Tool arguments must not be null");
+            arguments = java.util.Collections.unmodifiableMap(new java.util.LinkedHashMap<>(arguments));
+        }
+    }
+
     record ToolObservationData(
-            ObservationId observationId,
+            ToolCallId toolCallId,
             String toolName,
-            String input,
-            String output) implements MessageData {
+            Object output) implements MessageData {
 
         public ToolObservationData {
-            Assert.notNull(observationId, "Observation ID must not be null");
+            Assert.notNull(toolCallId, "Tool call ID must not be null");
             Assert.hasText(toolName, "Tool name must not be blank");
-            Assert.notNull(input, "Tool input must not be null");
             Assert.notNull(output, "Tool output must not be null");
         }
     }

@@ -5,6 +5,7 @@ import com.java.system.sessionagent.conversation.domain.MessageReceipt;
 import com.java.system.sessionagent.conversation.domain.MessageWorkClaim;
 import com.java.system.sessionagent.conversation.port.out.ConversationStore;
 import com.java.system.sessionagent.conversation.port.out.StaleWorkClaimException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -130,7 +131,7 @@ class PostgresMessageJobPostgresIT {
     }
 
     private ConversationStore store() {
-        return new PostgresConversationStore(dataSource(), Clock.fixed(NOW, ZoneOffset.UTC));
+        return new PostgresConversationStore(dataSource(), Clock.fixed(NOW, ZoneOffset.UTC), new ObjectMapper());
     }
 
     private DriverManagerDataSource dataSource() {

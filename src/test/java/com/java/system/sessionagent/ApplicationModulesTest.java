@@ -18,7 +18,7 @@ class ApplicationModulesTest {
         ApplicationModules modules = ApplicationModules.of(SessionAgentRuntimeApplication.class);
 
         assertEquals(
-                Set.of("tool", "conversation", "semantic", "mcp", "model", "storage", "web", "worker", "bootstrap"),
+                Set.of("tool", "conversation", "mcp", "model", "storage", "web", "worker", "bootstrap"),
                 modules.stream().map(module -> module.getIdentifier().toString()).collect(Collectors.toSet()));
         modules.verify();
     }
@@ -31,13 +31,12 @@ class ApplicationModulesTest {
                 Map.of(
                         "tool", Set.of(),
                         "conversation", Set.of("tool"),
-                        "semantic", Set.of("tool"),
                         "mcp", Set.of("tool"),
                         "model", Set.of("conversation", "tool"),
-                        "storage", Set.of("conversation"),
-                        "web", Set.of("conversation"),
+                        "storage", Set.of("conversation", "tool"),
+                        "web", Set.of("conversation", "tool"),
                         "worker", Set.of("conversation"),
-                        "bootstrap", Set.of("tool", "conversation", "semantic", "mcp", "model", "storage", "web", "worker")),
+                        "bootstrap", Set.of("tool", "conversation", "mcp", "model", "storage", "web", "worker")),
                 modules.stream().collect(Collectors.toMap(
                         module -> module.getIdentifier().toString(),
                         module -> allowedModuleNames(module, modules))));
@@ -52,7 +51,7 @@ class ApplicationModulesTest {
         ApplicationModule tool = modules.getModuleByName("tool").orElseThrow();
 
         assertEquals(
-                Set.of("tool :: domain", "tool :: application"),
+                Set.of("tool :: domain", "tool :: port"),
                 conversation.getAllowedDependencies(modules).stream()
                         .map(dependency -> dependency.getTargetModule().getIdentifier()
                                 + " :: " + dependency.getTargetNamedInterface().getName())
@@ -64,7 +63,7 @@ class ApplicationModulesTest {
                                 + " :: " + dependency.getTargetNamedInterface().getName())
                         .collect(Collectors.toSet()));
         assertEquals(
-                Set.of("domain", "application", "json", "port"),
+                Set.of("domain", "port"),
                 tool.getNamedInterfaces().stream()
                         .filter(namedInterface -> !namedInterface.isUnnamed())
                         .map(namedInterface -> namedInterface.getName())

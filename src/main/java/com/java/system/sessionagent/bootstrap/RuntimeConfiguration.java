@@ -10,11 +10,8 @@ import com.java.system.sessionagent.conversation.port.out.ConversationStore;
 import com.java.system.sessionagent.conversation.port.out.ConversationTelemetry;
 import com.java.system.sessionagent.model.SpringAiConversationModel;
 import com.java.system.sessionagent.model.PromptResource;
-import com.java.system.sessionagent.semantic.http.SemanticRepositoryClient;
-import com.java.system.sessionagent.semantic.http.SemanticSourceClient;
-import com.java.system.sessionagent.semantic.tool.SemanticToolProvider;
 import com.java.system.sessionagent.storage.PostgresConversationStore;
-import com.java.system.sessionagent.tool.application.DirectToolRegistry;
+import com.java.system.sessionagent.tool.port.ToolCatalog;
 import com.java.system.sessionagent.worker.MessageJobWorker;
 import com.java.system.sessionagent.worker.WorkerProperties;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -30,10 +27,9 @@ import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
-import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.scheduling.TaskScheduler;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
-import org.springframework.web.client.RestClient;
+import com.fasterxml.jackson.databind.ObjectMapper;
 
 import javax.sql.DataSource;
 import java.time.Clock;
@@ -68,44 +64,17 @@ public class RuntimeConfiguration {
     }
 
     @Bean
-    RestClient semanticRestClient(RuntimeProperties properties, ObservationRegistry observationRegistry) {
-        SimpleClientHttpRequestFactory requestFactory = new SimpleClientHttpRequestFactory();
-        requestFactory.setConnectTimeout(properties.semantic().connectTimeout());
-        requestFactory.setReadTimeout(properties.semantic().responseTimeout());
-        RestClient.Builder builder = RestClient.builder()
-                .baseUrl(properties.semantic().baseUrl())
-                .requestFactory(requestFactory)
-                .defaultHeader("X-Api-Token", properties.semantic().apiToken())
-                .observationRegistry(observationRegistry);
-        return builder.build();
-    }
-
-    @Bean
-    SemanticRepositoryClient semanticRepositoryClient(RestClient semanticRestClient) {
-        return new SemanticRepositoryClient(semanticRestClient);
-    }
-
-    @Bean
-    SemanticSourceClient semanticSourceClient(RestClient semanticRestClient) {
-        return new SemanticSourceClient(semanticRestClient);
-    }
-
-    @Bean
-    DirectToolRegistry directToolRegistry(SemanticRepositoryClient repositoryClient, SemanticSourceClient sourceClient) {
-        return new DirectToolRegistry(new SemanticToolProvider(repositoryClient, sourceClient).registrations());
-    }
-
-    @Bean
     SpringAiConversationModel conversationModel(
             ChatModel chatModel,
             PromptResource promptResource,
-            ConversationTelemetry conversationTelemetry) {
-        return new SpringAiConversationModel(chatModel, promptResource, conversationTelemetry);
+            ConversationTelemetry conversationTelemetry,
+            ObjectMapper objectMapper) {
+        return new SpringAiConversationModel(chatModel, promptResource, conversationTelemetry, objectMapper);
     }
 
     @Bean
-    ConversationStore conversationStore(DataSource dataSource, Clock runtimeClock) {
-        return new PostgresConversationStore(dataSource, runtimeClock);
+    ConversationStore conversationStore(DataSource dataSource, Clock runtimeClock, ObjectMapper objectMapper) {
+        return new PostgresConversationStore(dataSource, runtimeClock, objectMapper);
     }
 
     @Bean
@@ -132,12 +101,12 @@ public class RuntimeConfiguration {
     MessageJobService messageJobService(
             ConversationStore conversationStore,
             SpringAiConversationModel conversationModel,
-            DirectToolRegistry directToolRegistry,
+            ToolCatalog toolCatalog,
             Clock runtimeClock,
             RuntimeProperties properties,
             MessageJobRetryPolicy messageJobRetryPolicy,
             ConversationTelemetry conversationTelemetry) {
-        return new MessageJobService(conversationStore, conversationModel, directToolRegistry, runtimeClock,
+        return new MessageJobService(conversationStore, conversationModel, toolCatalog, runtimeClock,
                 properties.model().maxModelCallsPerMessage(), messageJobRetryPolicy, conversationTelemetry);
     }
 
