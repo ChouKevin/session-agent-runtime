@@ -12,6 +12,7 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -55,6 +56,26 @@ class McpToolCatalogTest {
 
         assertThat(originalClient.lastRequest().arguments()).containsEntry("query", "first");
         assertThat(replacementClient.lastRequest().arguments()).containsEntry("query", "second");
+        assertThat(originalClient.closeCount()).isZero();
+        originalSnapshot.close();
+        assertThat(originalClient.closeCount()).isEqualTo(1);
+    }
+
+    @Test
+    void releases_an_acquired_manager_view_when_snapshot_binding_construction_fails() {
+        RecordingClient originalClient = new RecordingClient();
+        RecordingClient replacementClient = new RecordingClient();
+        McpConnectionManager manager = manager();
+        McpToolCatalog catalog = new McpToolCatalog(manager, OBJECT_MAPPER);
+        manager.publish("semantic", originalClient, List.of(new McpSchema.Tool("search_code", null, "Search code",
+                new FailingSecondTraversalMap(), Map.of(), null, Map.of())));
+
+        org.assertj.core.api.Assertions.assertThatThrownBy(catalog::snapshot)
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("schema traversal failed");
+        manager.publish("semantic", replacementClient, List.of(tool("lookup_invoice", "Lookup invoice")));
+
+        assertThat(originalClient.closeCount()).isEqualTo(1);
     }
 
     @Test
@@ -201,9 +222,10 @@ class McpToolCatalogTest {
         }, new ManualTaskScheduler(), java.time.Clock.systemUTC(), OBJECT_MAPPER, Runnable::run);
     }
 
-    private static final class RecordingClient implements McpConnectionClient {
+    private static class RecordingClient implements McpConnectionClient {
 
         private final AtomicReference<McpSchema.CallToolRequest> lastRequest = new AtomicReference<>();
+        private final AtomicInteger closeCount = new AtomicInteger();
         private boolean toolCallFails;
 
         @Override
@@ -235,6 +257,24 @@ class McpToolCatalogTest {
 
         @Override
         public void close() {
+            closeCount.incrementAndGet();
+        }
+
+        private int closeCount() {
+            return closeCount.get();
+        }
+    }
+
+    private static final class FailingSecondTraversalMap extends java.util.AbstractMap<String, Object> {
+
+        private final AtomicInteger traversals = new AtomicInteger();
+
+        @Override
+        public java.util.Set<Entry<String, Object>> entrySet() {
+            if (traversals.incrementAndGet() > 1) {
+                throw new IllegalStateException("schema traversal failed");
+            }
+            return Map.<String, Object>of("type", "object").entrySet();
         }
     }
 

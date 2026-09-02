@@ -25,6 +25,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 public final class McpConnectionManager {
 
@@ -45,6 +46,7 @@ public final class McpConnectionManager {
     private final Map<String, List<McpSchema.Tool>> rawToolsByConnection = new LinkedHashMap<>();
     private final Set<String> inFlightConnections = new java.util.HashSet<>();
     private final Set<McpConnectionClient> ownedClients = Collections.newSetFromMap(new IdentityHashMap<>());
+    private final Map<McpConnectionClient, ClientLifetime> clientLifetimes = new IdentityHashMap<>();
 
     private volatile View view;
     private boolean started;
@@ -126,21 +128,37 @@ public final class McpConnectionManager {
         McpConnectionProperties.validateConnectionName(connectionName);
         Assert.notNull(client, "MCP connection client must not be null");
         Assert.notNull(tools, "MCP tools must not be null");
-        boolean closeClient;
+        List<McpConnectionClient> clientsToClose;
         synchronized (this) {
-            closeClient = stopped;
-            if (!closeClient) {
-                ownedClients.add(client);
-                replacePublished(connectionName, client, tools);
+            if (stopped) {
+                clientsToClose = List.of(client);
+            } else {
+                retainOwnedClient(client);
+                clientsToClose = replacePublished(connectionName, client, tools);
             }
         }
-        if (closeClient) {
-            closeQuietly(client);
-        }
+        closeClients(clientsToClose);
     }
 
     public View view() {
         return view;
+    }
+
+    AcquiredView acquireView() {
+        synchronized (this) {
+            View acquired = view;
+            Set<McpConnectionClient> retainedClients = Collections.newSetFromMap(new IdentityHashMap<>());
+            for (ConnectionView connection : acquired.connections().values()) {
+                connection.client().ifPresent(client -> {
+                    if (retainedClients.add(client)) {
+                        ClientLifetime lifetime = Objects.requireNonNull(clientLifetimes.get(client),
+                                "MCP current client lifetime must be tracked");
+                        lifetime.acquire();
+                    }
+                });
+            }
+            return new AcquiredView(this, acquired, List.copyOf(retainedClients));
+        }
     }
 
     public Diagnostic diagnostic(String connectionName) {
@@ -150,15 +168,18 @@ public final class McpConnectionManager {
         return connection.diagnostic();
     }
 
-    synchronized void markDegraded(String connectionName, ConnectionView expectedConnection) {
+    void markDegraded(String connectionName, ConnectionView expectedConnection) {
         McpConnectionProperties.validateConnectionName(connectionName);
         Assert.notNull(expectedConnection, "Expected MCP connection view must not be null");
-        ConnectionView connection = view.connections().get(connectionName);
-        Assert.notNull(connection, "MCP connection is not known");
-        if (!connection.equals(expectedConnection)) {
-            return;
+        List<McpConnectionClient> clientsToClose = List.of();
+        synchronized (this) {
+            ConnectionView connection = view.connections().get(connectionName);
+            Assert.notNull(connection, "MCP connection is not known");
+            if (connection.equals(expectedConnection)) {
+                clientsToClose = replace(connectionName, connection.withDiagnostic(Diagnostic.withheldBinding()));
+            }
         }
-        replace(connectionName, connection.withDiagnostic(Diagnostic.withheldBinding()));
+        closeClients(clientsToClose);
     }
 
     public void stop() {
@@ -177,6 +198,7 @@ public final class McpConnectionManager {
             rawToolsByConnection.clear();
             clientsToClose = new ArrayList<>(ownedClients);
             ownedClients.clear();
+            clientLifetimes.clear();
         }
         ownedWorkExecutor.ifPresent(ExecutorService::shutdownNow);
         closeWithinTimeout(clientsToClose);
@@ -226,12 +248,14 @@ public final class McpConnectionManager {
     }
 
     private void connect(String connectionName) {
+        List<McpConnectionClient> clientsToClose;
         synchronized (this) {
             if (stopped) {
                 return;
             }
-            replace(connectionName, ConnectionView.withoutClient(McpConnectionState.CONNECTING));
+            clientsToClose = replace(connectionName, ConnectionView.withoutClient(McpConnectionState.CONNECTING));
         }
+        closeClients(clientsToClose);
         McpConnectionClient client;
         try {
             client = clientFactory.create(properties.connections().get(connectionName));
@@ -258,7 +282,7 @@ public final class McpConnectionManager {
             if (stopped) {
                 return false;
             }
-            ownedClients.add(client);
+            retainOwnedClient(client);
             return true;
         }
     }
@@ -276,30 +300,31 @@ public final class McpConnectionManager {
         try {
             McpSchema.ListToolsResult listedTools = Objects.requireNonNull(client.listTools(), "MCP tools response must not be null");
             List<McpSchema.Tool> tools = Objects.requireNonNull(listedTools.tools(), "MCP tools list must not be null");
+            List<McpConnectionClient> clientsToClose = List.of();
             synchronized (this) {
-                if (stopped) {
-                    return;
+                ConnectionView currentConnection = view.connections().get(connectionName);
+                if (!stopped && currentConnection.client().filter(currentClient -> currentClient == client).isPresent()) { // cs-allow concrete client identity prevents stale refresh publication
+                    clientsToClose = replacePublished(connectionName, client, tools);
                 }
-                replacePublished(connectionName, client, tools);
             }
+            closeClients(clientsToClose);
         } catch (RuntimeException exception) {
-            markUnavailableAndReconnect(connectionName, exception);
+            markUnavailableAndReconnect(connectionName, exception, Optional.of(client));
         }
     }
 
     private void publishConnected(String connectionName, McpConnectionClient client, List<McpSchema.Tool> tools) {
-        boolean closeClient;
+        List<McpConnectionClient> clientsToClose;
         synchronized (this) {
-            closeClient = stopped;
-            if (!closeClient) {
+            if (stopped) {
+                clientsToClose = List.of();
+            } else {
                 reconnectFailures.remove(connectionName);
-                replacePublished(connectionName, client, tools);
+                clientsToClose = replacePublished(connectionName, client, tools);
                 scheduleRefresh(connectionName, client);
             }
         }
-        if (closeClient) {
-            closeOwnedClient(client);
-        }
+        closeClients(clientsToClose);
     }
 
     private synchronized void scheduleRefresh(String connectionName, McpConnectionClient client) {
@@ -313,17 +338,31 @@ public final class McpConnectionManager {
     }
 
     private void markUnavailableAndReconnect(String connectionName, RuntimeException exception) {
+        markUnavailableAndReconnect(connectionName, exception, Optional.empty());
+    }
+
+    private void markUnavailableAndReconnect(
+            String connectionName,
+            RuntimeException exception,
+            Optional<McpConnectionClient> expectedClient) {
+        List<McpConnectionClient> clientsToClose = List.of();
         synchronized (this) {
             if (stopped) {
                 return;
             }
+            ConnectionView currentConnection = view.connections().get(connectionName);
+            if (expectedClient.isPresent() && currentConnection.client()
+                    .filter(currentClient -> currentClient == expectedClient.orElseThrow()).isEmpty()) { // cs-allow concrete client identity prevents stale refresh failure from replacing a newer client
+                return;
+            }
             cancelPendingWork(refreshWork.remove(connectionName));
             ToolOutput failure = resultMapper.mapRuntimeFailure(exception).orElseGet(resultMapper::connectionFailure);
-            replace(connectionName, ConnectionView.withoutClient(new Diagnostic(
+            clientsToClose = replace(connectionName, ConnectionView.withoutClient(new Diagnostic(
                     McpConnectionState.UNAVAILABLE, failureCode(failure), CONNECTION_FAILURE_MESSAGE)));
             int failures = reconnectFailures.merge(connectionName, 1, Integer::sum);
             scheduleAttempt(connectionName, reconnectDelay(failures));
         }
+        closeClients(clientsToClose);
     }
 
     private String failureCode(ToolOutput failure) {
@@ -373,6 +412,7 @@ public final class McpConnectionManager {
         boolean closeClient;
         synchronized (this) {
             closeClient = ownedClients.remove(client);
+            clientLifetimes.remove(client);
         }
         if (closeClient) {
             closeQuietly(client);
@@ -384,6 +424,12 @@ public final class McpConnectionManager {
             client.close();
         } catch (RuntimeException ignored) {
             // Cleanup must not expose MCP SDK failures to lifecycle callers.
+        }
+    }
+
+    private static void closeClients(List<McpConnectionClient> clients) {
+        for (McpConnectionClient client : clients) {
+            closeQuietly(client);
         }
     }
 
@@ -402,20 +448,73 @@ public final class McpConnectionManager {
         }
     }
 
-    private synchronized void replace(String connectionName, ConnectionView replacement) {
+    private List<McpConnectionClient> replace(String connectionName, ConnectionView replacement) {
         if (replacement.client().isEmpty()) {
             rawToolsByConnection.remove(connectionName);
         }
         LinkedHashMap<String, ConnectionView> nextConnections = new LinkedHashMap<>(view.connections());
         nextConnections.put(connectionName, replacement);
-        view = new View(nextConnections);
+        return replaceView(new View(nextConnections));
     }
 
-    private void replacePublished(String connectionName, McpConnectionClient client, List<McpSchema.Tool> rawTools) {
+    private List<McpConnectionClient> replacePublished(String connectionName, McpConnectionClient client, List<McpSchema.Tool> rawTools) {
         rawToolsByConnection.put(connectionName, Collections.unmodifiableList(new ArrayList<>(rawTools)));
         LinkedHashMap<String, ConnectionView> candidates = new LinkedHashMap<>(view.connections());
         candidates.put(connectionName, new ConnectionView(Optional.of(client), List.of(), Diagnostic.available()));
-        view = validatedView(candidates);
+        return replaceView(validatedView(candidates));
+    }
+
+    private List<McpConnectionClient> replaceView(View replacement) {
+        View previous = view;
+        view = replacement;
+        return retireDisplacedClients(previous, replacement);
+    }
+
+    private List<McpConnectionClient> retireDisplacedClients(View previous, View replacement) {
+        Set<McpConnectionClient> replacementClients = clientsIn(replacement);
+        List<McpConnectionClient> clientsToClose = new ArrayList<>();
+        for (McpConnectionClient previousClient : clientsIn(previous)) {
+            if (!replacementClients.contains(previousClient)) {
+                ClientLifetime lifetime = Objects.requireNonNull(clientLifetimes.get(previousClient),
+                        "MCP displaced client lifetime must be tracked");
+                lifetime.retire();
+                if (lifetime.canClose() && ownedClients.remove(previousClient)) {
+                    clientLifetimes.remove(previousClient);
+                    clientsToClose.add(previousClient);
+                }
+            }
+        }
+        return clientsToClose;
+    }
+
+    private static Set<McpConnectionClient> clientsIn(View source) {
+        Set<McpConnectionClient> clients = Collections.newSetFromMap(new IdentityHashMap<>());
+        for (ConnectionView connection : source.connections().values()) {
+            connection.client().ifPresent(clients::add);
+        }
+        return clients;
+    }
+
+    private void retainOwnedClient(McpConnectionClient client) {
+        ownedClients.add(client);
+        clientLifetimes.computeIfAbsent(client, ignored -> new ClientLifetime());
+    }
+
+    private void release(List<McpConnectionClient> retainedClients) {
+        List<McpConnectionClient> clientsToClose = new ArrayList<>();
+        synchronized (this) {
+            for (McpConnectionClient retainedClient : retainedClients) {
+                ClientLifetime lifetime = clientLifetimes.get(retainedClient);
+                if (Objects.nonNull(lifetime)) {
+                    lifetime.release();
+                    if (lifetime.canClose() && ownedClients.remove(retainedClient)) {
+                        clientLifetimes.remove(retainedClient);
+                        clientsToClose.add(retainedClient);
+                    }
+                }
+            }
+        }
+        closeClients(clientsToClose);
     }
 
     private View validatedView(Map<String, ConnectionView> candidates) {
@@ -504,6 +603,31 @@ public final class McpConnectionManager {
         }
     }
 
+    static final class AcquiredView implements AutoCloseable {
+
+        private final McpConnectionManager manager;
+        private final View view;
+        private final List<McpConnectionClient> retainedClients;
+        private final AtomicBoolean closed = new AtomicBoolean();
+
+        private AcquiredView(McpConnectionManager manager, View view, List<McpConnectionClient> retainedClients) {
+            this.manager = manager;
+            this.view = view;
+            this.retainedClients = retainedClients;
+        }
+
+        View view() {
+            return view;
+        }
+
+        @Override
+        public void close() {
+            if (closed.compareAndSet(false, true)) {
+                manager.release(retainedClients);
+            }
+        }
+    }
+
     public record ConnectionView(Optional<McpConnectionClient> client, List<McpSchema.Tool> tools, Diagnostic diagnostic) {
 
         public ConnectionView {
@@ -527,6 +651,29 @@ public final class McpConnectionManager {
     }
 
     private record RouteCandidate(String connectionName, McpSchema.Tool tool) {
+    }
+
+    private static final class ClientLifetime {
+
+        private int uses;
+        private boolean retired;
+
+        private void acquire() {
+            uses++;
+        }
+
+        private void release() {
+            Assert.state(uses > 0, "MCP client use count must be positive before release");
+            uses--;
+        }
+
+        private void retire() {
+            retired = true;
+        }
+
+        private boolean canClose() {
+            return retired && uses == 0; // cs-allow primitive count boundary
+        }
     }
 
     public record Diagnostic(McpConnectionState state, String code, String message) {

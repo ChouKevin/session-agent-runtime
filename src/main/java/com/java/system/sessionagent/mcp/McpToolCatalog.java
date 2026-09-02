@@ -30,26 +30,32 @@ public final class McpToolCatalog implements ToolCatalog {
 
     @Override
     public ToolSnapshot snapshot() {
-        McpConnectionManager.View managerView = connectionManager.view();
-        LinkedHashMap<String, Route> routes = new LinkedHashMap<>();
-        for (Map.Entry<String, McpConnectionManager.ConnectionView> entry : managerView.connections().entrySet()) {
-            String connectionName = entry.getKey();
-            McpConnectionManager.ConnectionView connection = entry.getValue();
-            Optional<McpConnectionClient> client = connection.client();
-            if (client.isEmpty()) {
-                continue;
+        McpConnectionManager.AcquiredView acquiredView = connectionManager.acquireView();
+        try {
+            McpConnectionManager.View managerView = acquiredView.view();
+            LinkedHashMap<String, Route> routes = new LinkedHashMap<>();
+            for (Map.Entry<String, McpConnectionManager.ConnectionView> entry : managerView.connections().entrySet()) {
+                String connectionName = entry.getKey();
+                McpConnectionManager.ConnectionView connection = entry.getValue();
+                Optional<McpConnectionClient> client = connection.client();
+                if (client.isEmpty()) {
+                    continue;
+                }
+                for (McpSchema.Tool tool : connection.tools()) {
+                    Route route = validRoute(connectionName, client.orElseThrow(), tool).orElseThrow();
+                    routes.put(route.exposedName(), route);
+                }
             }
-            for (McpSchema.Tool tool : connection.tools()) {
-                Route route = validRoute(connectionName, client.orElseThrow(), tool).orElseThrow();
-                routes.put(route.exposedName(), route);
-            }
-        }
 
-        List<ToolBinding> bindings = new ArrayList<>();
-        for (Route route : routes.values()) {
-            bindings.add(binding(route));
+            List<ToolBinding> bindings = new ArrayList<>();
+            for (Route route : routes.values()) {
+                bindings.add(binding(route));
+            }
+            return new ToolSnapshot(bindings, acquiredView::close);
+        } catch (RuntimeException | Error exception) {
+            acquiredView.close();
+            throw exception;
         }
-        return new ToolSnapshot(bindings);
     }
 
     private static Optional<Route> validRoute(String connectionName, McpConnectionClient client, McpSchema.Tool tool) {

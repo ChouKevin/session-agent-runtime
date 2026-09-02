@@ -98,49 +98,50 @@ public final class MessageJobService implements MessageJobPort {
     private void processClaim(MessageWorkClaim claim, WorkGuard guard) {
         while (guard.stillOwned()) {
             List<SessionMessage> history = conversationStore.loadHistory(claim.sessionId());
-            ToolSnapshot tools = toolCatalog.snapshot();
-            ReservationState reservation = new ReservationState();
-            ModelRequest request = new ModelRequest(history, tools);
-            ModelReply reply;
-            long requestStartedAt = System.nanoTime();
-            try {
-                reply = conversationModel.respond(request, () -> reserveAndLogModelRequest(claim, guard, reservation,
-                                history.size(), tools.definitions().size()),
-                        usage -> { });
-            } catch (BudgetExhausted exception) {
-                appendRuntime(claim, guard, List.of(runtime(MODEL_CALL_LIMIT_REACHED)), ConversationStore.JobUpdate.COMPLETE);
-                return;
-            } catch (ModelCallFailure failure) {
-                if (failure.kind() == ModelCallFailure.Kind.INVALID_HISTORY) {
-                    appendRuntime(claim, guard, List.of(runtime(INVALID_CONVERSATION_HISTORY)), ConversationStore.JobUpdate.COMPLETE);
+            try (ToolSnapshot tools = toolCatalog.snapshot()) {
+                ReservationState reservation = new ReservationState();
+                ModelRequest request = new ModelRequest(history, tools);
+                ModelReply reply;
+                long requestStartedAt = System.nanoTime();
+                try {
+                    reply = conversationModel.respond(request, () -> reserveAndLogModelRequest(claim, guard, reservation,
+                                    history.size(), tools.definitions().size()),
+                            usage -> { });
+                } catch (BudgetExhausted exception) {
+                    appendRuntime(claim, guard, List.of(runtime(MODEL_CALL_LIMIT_REACHED)), ConversationStore.JobUpdate.COMPLETE);
+                    return;
+                } catch (ModelCallFailure failure) {
+                    if (failure.kind() == ModelCallFailure.Kind.INVALID_HISTORY) {
+                        appendRuntime(claim, guard, List.of(runtime(INVALID_CONVERSATION_HISTORY)), ConversationStore.JobUpdate.COMPLETE);
+                        return;
+                    }
+                    if (handleModelFailure(claim, guard, reservation, failure, elapsedSince(requestStartedAt))) {
+                        continue;
+                    }
                     return;
                 }
-                if (handleModelFailure(claim, guard, reservation, failure, elapsedSince(requestStartedAt))) {
-                    continue;
+                if (!guard.stillOwned()) {
+                    return;
                 }
-                return;
-            }
-            if (!guard.stillOwned()) {
-                return;
-            }
-            int ordinal = reservation.ordinal();
-            logModelResponse(claim, ordinal, reply, elapsedSince(requestStartedAt));
-            if (reply instanceof ModelReply.Text text) {
-                appendRuntime(claim, guard, List.of(new ConversationStore.AssistantData(text.message())),
-                        ConversationStore.JobUpdate.COMPLETE);
-                return;
-            }
-            ModelReply.UseTools useTools = (ModelReply.UseTools) reply;
-            if (ordinal == maxModelCalls) {
-                appendRuntime(claim, guard, List.of(runtime(MODEL_CALL_LIMIT_REACHED)), ConversationStore.JobUpdate.COMPLETE);
-                return;
-            }
-            List<ConversationStore.MessageData> messages = toolBatch(claim, guard, ordinal, useTools, tools);
-            if (!guard.stillOwned()) {
-                return;
-            }
-            if (!appendRuntime(claim, guard, messages, ConversationStore.JobUpdate.KEEP_WORKING)) {
-                return;
+                int ordinal = reservation.ordinal();
+                logModelResponse(claim, ordinal, reply, elapsedSince(requestStartedAt));
+                if (reply instanceof ModelReply.Text text) {
+                    appendRuntime(claim, guard, List.of(new ConversationStore.AssistantData(text.message())),
+                            ConversationStore.JobUpdate.COMPLETE);
+                    return;
+                }
+                ModelReply.UseTools useTools = (ModelReply.UseTools) reply;
+                if (ordinal == maxModelCalls) {
+                    appendRuntime(claim, guard, List.of(runtime(MODEL_CALL_LIMIT_REACHED)), ConversationStore.JobUpdate.COMPLETE);
+                    return;
+                }
+                List<ConversationStore.MessageData> messages = toolBatch(claim, guard, ordinal, useTools, tools);
+                if (!guard.stillOwned()) {
+                    return;
+                }
+                if (!appendRuntime(claim, guard, messages, ConversationStore.JobUpdate.KEEP_WORKING)) {
+                    return;
+                }
             }
         }
     }

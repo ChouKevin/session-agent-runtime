@@ -14,6 +14,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
@@ -60,6 +61,18 @@ class GenericToolSnapshotTest {
         source.add(binding("replacement"));
 
         assertEquals(List.of(first.definition(), second.definition()), snapshot.definitions());
+    }
+
+    @Test
+    void closes_its_lifetime_action_once_without_changing_unmanaged_snapshot_behavior() {
+        AtomicInteger releases = new AtomicInteger();
+        ToolSnapshot snapshot = new ToolSnapshot(List.of(binding("first")), releases::incrementAndGet);
+
+        snapshot.close();
+        snapshot.close();
+
+        assertEquals(1, releases.get());
+        assertFalse(snapshot.invoke(new ToolName("first"), Map.of()).isError());
     }
 
     @Test

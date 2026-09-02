@@ -34,6 +34,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
@@ -62,6 +63,96 @@ class MessageJobServiceTest {
         assertThat(batch.getValue()).isEqualTo(new ConversationStore.MessageBatch(List.of(
                 new ConversationStore.AssistantData("```json\n{\"answer\":\"plain completion\"}\n```")),
                 ConversationStore.JobUpdate.COMPLETE));
+    }
+
+    @Test
+    void releases_the_snapshot_after_a_final_text_reply() {
+        ConversationStore store = mock(ConversationStore.class);
+        MessageWorkClaim claim = claim();
+        AtomicInteger releases = new AtomicInteger();
+        when(store.loadHistory(claim.sessionId())).thenReturn(List.of(user()));
+        when(store.reserveModelCall(eq(claim), eq(2), any(Instant.class))).thenReturn(OptionalInt.of(1));
+        ConversationModel model = (request, reservation, usage) -> {
+            reservation.reserve();
+            return new ModelReply.Text("done");
+        };
+        ToolCatalog catalog = () -> trackedSnapshot(releases);
+
+        service(store, model, catalog).process(claim, () -> true);
+
+        assertThat(releases.get()).isEqualTo(1);
+    }
+
+    @Test
+    void keeps_the_snapshot_open_for_its_tool_batch_then_releases_it() {
+        ConversationStore store = mock(ConversationStore.class);
+        MessageWorkClaim claim = claim();
+        AtomicBoolean closed = new AtomicBoolean();
+        when(store.loadHistory(claim.sessionId())).thenReturn(List.of(user()), List.of(user()));
+        when(store.reserveModelCall(eq(claim), eq(2), any(Instant.class))).thenReturn(OptionalInt.of(1), OptionalInt.of(2));
+        ToolCatalog catalog = () -> new ToolSnapshot(List.of(binding("first", arguments -> {
+            assertThat(closed).isFalse();
+            return new ToolOutput(false, Map.of());
+        })), () -> closed.set(true));
+        ConversationModel model = (request, reservation, usage) -> {
+            reservation.reserve();
+            return request.history().size() == 1
+                    ? new ModelReply.UseTools(Optional.empty(), List.of(request("call-1", "first")))
+                    : new ModelReply.Text("done");
+        };
+
+        service(store, model, catalog).process(claim, () -> true);
+
+        assertThat(closed).isTrue();
+    }
+
+    @Test
+    void releases_the_snapshot_when_the_model_fails() {
+        ConversationStore store = mock(ConversationStore.class);
+        MessageWorkClaim claim = claim();
+        AtomicInteger releases = new AtomicInteger();
+        when(store.loadHistory(claim.sessionId())).thenReturn(List.of(user()));
+        ConversationModel model = (request, reservation, usage) -> { throw ModelCallFailure.invalidHistory(); };
+
+        service(store, model, () -> trackedSnapshot(releases)).process(claim, () -> true);
+
+        assertThat(releases.get()).isEqualTo(1);
+    }
+
+    @Test
+    void releases_the_snapshot_when_work_ownership_is_lost_after_the_model_reply() {
+        ConversationStore store = mock(ConversationStore.class);
+        MessageWorkClaim claim = claim();
+        AtomicInteger releases = new AtomicInteger();
+        AtomicBoolean owned = new AtomicBoolean(true);
+        when(store.loadHistory(claim.sessionId())).thenReturn(List.of(user()));
+        when(store.reserveModelCall(eq(claim), eq(2), any(Instant.class))).thenReturn(OptionalInt.of(1));
+        ConversationModel model = (request, reservation, usage) -> {
+            reservation.reserve();
+            owned.set(false);
+            return new ModelReply.Text("ignored after ownership loss");
+        };
+
+        service(store, model, () -> trackedSnapshot(releases)).process(claim, owned::get);
+
+        assertThat(releases.get()).isEqualTo(1);
+    }
+
+    @Test
+    void releases_the_snapshot_when_the_model_call_limit_blocks_a_tool_batch() {
+        ConversationStore store = mock(ConversationStore.class);
+        MessageWorkClaim claim = claim();
+        AtomicInteger releases = new AtomicInteger();
+        when(store.loadHistory(claim.sessionId())).thenReturn(List.of(user()));
+        when(store.reserveModelCall(eq(claim), eq(1), any(Instant.class))).thenReturn(OptionalInt.of(1));
+        ConversationModel model = (request, reservation, usage) -> {
+            reservation.reserve();
+            return new ModelReply.UseTools(Optional.empty(), List.of(request("call-1", "first")));
+        };
+
+        service(store, model, () -> trackedSnapshot(releases), 1).process(claim, () -> true);
+
+        assertThat(releases.get()).isEqualTo(1);
     }
 
     @Test
@@ -231,6 +322,10 @@ class MessageJobServiceTest {
         return () -> new ToolSnapshot(List.of(
                 new ToolBinding(new ToolDefinition(new ToolName("first"), "first", Map.of()), arguments -> new ToolOutput(false, Map.of("value", 1))),
                 new ToolBinding(new ToolDefinition(new ToolName("second"), "second", Map.of()), arguments -> new ToolOutput(true, Map.of("code", "TOOL_TIMEOUT")))));
+    }
+
+    private static ToolSnapshot trackedSnapshot(AtomicInteger releases) {
+        return new ToolSnapshot(List.of(), releases::incrementAndGet);
     }
 
     private static ToolBinding binding(String name, java.util.function.Function<Map<String, Object>, ToolOutput> invocation) {
