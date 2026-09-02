@@ -315,14 +315,27 @@ public final class McpConnectionManager {
 
     private void publishConnected(String connectionName, McpConnectionClient client, List<McpSchema.Tool> tools) {
         List<McpConnectionClient> clientsToClose;
+        Optional<RuntimeException> refreshSchedulingFailure = Optional.empty();
         synchronized (this) {
             if (stopped) {
                 clientsToClose = List.of();
             } else {
                 reconnectFailures.remove(connectionName);
                 clientsToClose = replacePublished(connectionName, client, tools);
-                scheduleRefresh(connectionName, client);
+                try {
+                    scheduleRefresh(connectionName, client);
+                } catch (RuntimeException exception) {
+                    refreshSchedulingFailure = Optional.of(exception);
+                }
             }
+        }
+        if (refreshSchedulingFailure.isPresent()) {
+            try {
+                markUnavailableAndReconnect(connectionName, refreshSchedulingFailure.orElseThrow(), Optional.of(client));
+            } finally {
+                closeClients(clientsToClose);
+            }
+            return;
         }
         closeClients(clientsToClose);
     }
@@ -346,23 +359,26 @@ public final class McpConnectionManager {
             RuntimeException exception,
             Optional<McpConnectionClient> expectedClient) {
         List<McpConnectionClient> clientsToClose = List.of();
-        synchronized (this) {
-            if (stopped) {
-                return;
+        try {
+            synchronized (this) {
+                if (stopped) {
+                    return;
+                }
+                ConnectionView currentConnection = view.connections().get(connectionName);
+                if (expectedClient.isPresent() && currentConnection.client()
+                        .filter(currentClient -> currentClient == expectedClient.orElseThrow()).isEmpty()) { // cs-allow concrete client identity prevents stale refresh failure from replacing a newer client
+                    return;
+                }
+                cancelPendingWork(refreshWork.remove(connectionName));
+                ToolOutput failure = resultMapper.mapRuntimeFailure(exception).orElseGet(resultMapper::connectionFailure);
+                clientsToClose = replace(connectionName, ConnectionView.withoutClient(new Diagnostic(
+                        McpConnectionState.UNAVAILABLE, failureCode(failure), CONNECTION_FAILURE_MESSAGE)));
+                int failures = reconnectFailures.merge(connectionName, 1, Integer::sum);
+                scheduleAttempt(connectionName, reconnectDelay(failures));
             }
-            ConnectionView currentConnection = view.connections().get(connectionName);
-            if (expectedClient.isPresent() && currentConnection.client()
-                    .filter(currentClient -> currentClient == expectedClient.orElseThrow()).isEmpty()) { // cs-allow concrete client identity prevents stale refresh failure from replacing a newer client
-                return;
-            }
-            cancelPendingWork(refreshWork.remove(connectionName));
-            ToolOutput failure = resultMapper.mapRuntimeFailure(exception).orElseGet(resultMapper::connectionFailure);
-            clientsToClose = replace(connectionName, ConnectionView.withoutClient(new Diagnostic(
-                    McpConnectionState.UNAVAILABLE, failureCode(failure), CONNECTION_FAILURE_MESSAGE)));
-            int failures = reconnectFailures.merge(connectionName, 1, Integer::sum);
-            scheduleAttempt(connectionName, reconnectDelay(failures));
+        } finally {
+            closeClients(clientsToClose);
         }
-        closeClients(clientsToClose);
     }
 
     private String failureCode(ToolOutput failure) {

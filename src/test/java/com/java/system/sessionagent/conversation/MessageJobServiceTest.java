@@ -87,23 +87,32 @@ class MessageJobServiceTest {
     void keeps_the_snapshot_open_for_its_tool_batch_then_releases_it() {
         ConversationStore store = mock(ConversationStore.class);
         MessageWorkClaim claim = claim();
-        AtomicBoolean closed = new AtomicBoolean();
+        List<AtomicInteger> releases = List.of(new AtomicInteger(), new AtomicInteger());
+        AtomicInteger snapshots = new AtomicInteger();
         when(store.loadHistory(claim.sessionId())).thenReturn(List.of(user()), List.of(user()));
         when(store.reserveModelCall(eq(claim), eq(2), any(Instant.class))).thenReturn(OptionalInt.of(1), OptionalInt.of(2));
-        ToolCatalog catalog = () -> new ToolSnapshot(List.of(binding("first", arguments -> {
-            assertThat(closed).isFalse();
-            return new ToolOutput(false, Map.of());
-        })), () -> closed.set(true));
+        ToolCatalog catalog = () -> {
+            int snapshotIndex = snapshots.getAndIncrement();
+            return new ToolSnapshot(List.of(binding("first", arguments -> {
+                assertThat(releases.get(snapshotIndex)).hasValue(0);
+                return new ToolOutput(false, Map.of());
+            })), () -> releases.get(snapshotIndex).incrementAndGet());
+        };
         ConversationModel model = (request, reservation, usage) -> {
             reservation.reserve();
             return request.history().size() == 1
                     ? new ModelReply.UseTools(Optional.empty(), List.of(request("call-1", "first")))
-                    : new ModelReply.Text("done");
+                    : secondIteration(releases);
         };
 
         service(store, model, catalog).process(claim, () -> true);
 
-        assertThat(closed).isTrue();
+        assertThat(releases).extracting(AtomicInteger::get).containsExactly(1, 1);
+    }
+
+    private static ModelReply secondIteration(List<AtomicInteger> releases) {
+        assertThat(releases).extracting(AtomicInteger::get).containsExactly(1, 0);
+        return new ModelReply.Text("done");
     }
 
     @Test

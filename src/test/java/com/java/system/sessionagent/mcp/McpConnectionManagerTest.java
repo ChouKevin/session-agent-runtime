@@ -16,12 +16,14 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Delayed;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -188,6 +190,59 @@ class McpConnectionManagerTest {
 
         assertThat(manager.view().connections().get("semantic").client()).contains(replacement);
         assertThat(manager.diagnostic("semantic").state()).isEqualTo(McpConnectionState.AVAILABLE);
+    }
+
+    @Test
+    void closes_a_retired_client_when_reconnect_scheduling_is_rejected() {
+        ControlledTaskScheduler scheduler = new ControlledTaskScheduler();
+        RecordingClient client = new RecordingClient(List.of(tool("search_code")));
+        McpConnectionManager manager = manager(Map.of("semantic", connection()), configuredConnection -> client, scheduler);
+        manager.start();
+        scheduler.runDueTasks();
+        client.failNextList();
+        scheduler.rejectNextOneShotSchedule();
+
+        scheduler.runRecurringTasks();
+
+        assertThat(manager.diagnostic("semantic").state()).isEqualTo(McpConnectionState.UNAVAILABLE);
+        assertThat(client.closeCount()).isEqualTo(1);
+    }
+
+    @Test
+    void retires_a_published_client_and_reconnects_when_refresh_scheduling_is_rejected() {
+        ControlledTaskScheduler scheduler = new ControlledTaskScheduler();
+        AtomicReference<McpConnectionManager> managerReference = new AtomicReference<>();
+        RecordingClient original = new RecordingClient(List.of(tool("search_code"))) {
+            @Override
+            public void close() {
+                McpConnectionManager connectionManager = managerReference.get();
+                assertThat(connectionManager.view().connections().get("semantic").client()).isEmpty();
+                super.close();
+            }
+        };
+        RecordingClient replacement = new RecordingClient(List.of(tool("lookup_invoice")));
+        AtomicInteger factoryCalls = new AtomicInteger();
+        McpConnectionManager manager = manager(Map.of("semantic", connection()), configuredConnection -> {
+            if (factoryCalls.getAndIncrement() == 0) {
+                return original;
+            }
+            return replacement;
+        }, scheduler);
+        managerReference.set(manager);
+        scheduler.rejectNextRefreshSchedule();
+
+        org.assertj.core.api.Assertions.assertThatCode(() -> {
+            manager.start();
+            scheduler.runDueTasks();
+        }).doesNotThrowAnyException();
+
+        assertThat(manager.diagnostic("semantic").state()).isEqualTo(McpConnectionState.UNAVAILABLE);
+        assertThat(original.closeCount()).isEqualTo(1);
+        scheduler.advanceBy(Duration.ofSeconds(1));
+
+        assertThat(manager.diagnostic("semantic").state()).isEqualTo(McpConnectionState.AVAILABLE);
+        assertThat(manager.view().connections().get("semantic").client()).contains(replacement);
+        assertThat(replacement.closeCount()).isZero();
     }
 
     @Test
@@ -449,6 +504,8 @@ class McpConnectionManagerTest {
 
         private Instant now = Instant.parse("2026-09-03T00:00:00Z");
         private final List<ScheduledTask> tasks = new ArrayList<>();
+        private final AtomicBoolean rejectNextOneShotSchedule = new AtomicBoolean();
+        private final AtomicBoolean rejectNextRefreshSchedule = new AtomicBoolean();
 
         @Override
         public ScheduledFuture<?> schedule(Runnable task, Trigger trigger) {
@@ -457,6 +514,9 @@ class McpConnectionManagerTest {
 
         @Override
         public ScheduledFuture<?> schedule(Runnable task, Instant startTime) {
+            if (rejectNextOneShotSchedule.compareAndSet(true, false)) {
+                throw new RejectedExecutionException("one-shot scheduling rejected");
+            }
             ScheduledTask scheduledTask = new ScheduledTask(task, startTime, false);
             tasks.add(scheduledTask);
             return scheduledTask;
@@ -464,6 +524,9 @@ class McpConnectionManagerTest {
 
         @Override
         public ScheduledFuture<?> scheduleAtFixedRate(Runnable task, Instant startTime, Duration period) {
+            if (rejectNextRefreshSchedule.compareAndSet(true, false)) {
+                throw new RejectedExecutionException("refresh scheduling rejected");
+            }
             ScheduledTask scheduledTask = new ScheduledTask(task, startTime, true);
             tasks.add(scheduledTask);
             return scheduledTask;
@@ -506,6 +569,14 @@ class McpConnectionManagerTest {
         private void advanceBy(Duration delay) {
             now = now.plus(delay);
             runDueTasks();
+        }
+
+        private void rejectNextOneShotSchedule() {
+            rejectNextOneShotSchedule.set(true);
+        }
+
+        private void rejectNextRefreshSchedule() {
+            rejectNextRefreshSchedule.set(true);
         }
 
         private List<Duration> oneShotDelays() {
