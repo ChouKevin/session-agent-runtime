@@ -58,6 +58,15 @@ class ConversationHistoryProjectorTest {
         ToolObservation extraResult = new ToolObservation(new SessionId("session-1"), new SessionSequence(4),
                 Optional.of(new MessageJobId("job-1")), Instant.EPOCH, MessageRole.TOOL,
                 new ToolCallId("call-extra"), "extra", Map.of("isError", false, "result", Map.of()));
+        ToolObservation crossJob = new ToolObservation(new SessionId("session-1"), new SessionSequence(2),
+                Optional.of(new MessageJobId("job-2")), Instant.EPOCH, MessageRole.TOOL,
+                new ToolCallId("call-1"), "first", Map.of("isError", false, "result", Map.of()));
+        ToolObservation crossSession = new ToolObservation(new SessionId("session-2"), new SessionSequence(2),
+                Optional.of(new MessageJobId("job-1")), Instant.EPOCH, MessageRole.TOOL,
+                new ToolCallId("call-1"), "first", Map.of("isError", false, "result", Map.of()));
+        ToolObservation nonconsecutive = new ToolObservation(new SessionId("session-1"), new SessionSequence(4),
+                Optional.of(new MessageJobId("job-1")), Instant.EPOCH, MessageRole.TOOL,
+                new ToolCallId("call-1"), "first", Map.of("isError", false, "result", Map.of()));
         AssistantMessage interleaved = new AssistantMessage(new SessionId("session-1"), new SessionSequence(2),
                 Optional.of(new MessageJobId("job-1")), Instant.EPOCH, MessageRole.ASSISTANT, "interleaved");
         return Stream.of(
@@ -66,6 +75,9 @@ class ConversationHistoryProjectorTest {
                 Arguments.of("duplicate call ID", List.of(duplicate, valid.get(1), valid.get(2))),
                 Arguments.of("name mismatch", List.of(valid.getFirst(), mismatchedName, valid.get(2))),
                 Arguments.of("extra result", List.of(valid.getFirst(), valid.get(1), valid.get(2), extraResult)),
+                Arguments.of("cross-job TOOL", List.of(valid.getFirst(), crossJob, valid.get(2))),
+                Arguments.of("cross-session TOOL", List.of(valid.getFirst(), crossSession, valid.get(2))),
+                Arguments.of("nonconsecutive TOOL sequence", List.of(valid.getFirst(), nonconsecutive, valid.get(2))),
                 Arguments.of("interleaved incomplete batch", List.of(valid.getFirst(), interleaved, valid.get(2))));
     }
 

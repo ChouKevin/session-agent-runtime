@@ -1,6 +1,7 @@
 package com.java.system.sessionagent.storage;
 
 import com.java.system.sessionagent.conversation.domain.IncomingMessage;
+import com.java.system.sessionagent.conversation.domain.JobStatus;
 import com.java.system.sessionagent.conversation.domain.MessageReceipt;
 import com.java.system.sessionagent.conversation.domain.MessageWorkClaim;
 import com.java.system.sessionagent.conversation.domain.ToolCallId;
@@ -10,6 +11,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.java.system.sessionagent.conversation.port.out.ConversationStore;
 import com.java.system.sessionagent.conversation.port.out.ConversationStoreFailure;
 import com.java.system.sessionagent.conversation.port.out.StaleWorkClaimException;
+import com.java.system.sessionagent.model.ConversationHistoryProjector;
+import com.java.system.sessionagent.model.InvalidConversationHistoryException;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -264,6 +267,36 @@ class PostgresConversationCommitPostgresIT {
             assertThat(failure).isInstanceOf(ConversationStoreFailure.class);
             assertThat(((ConversationStoreFailure) failure).kind()).isEqualTo(ConversationStoreFailure.Kind.INVALID_HISTORY);
         }
+    }
+
+    @Test
+    void exposes_cross_job_native_tool_corruption_to_the_terminal_history_projector() {
+        ConversationStore store = store();
+        MessageReceipt firstReceipt = store.receive(new IncomingMessage("thread", "alice", "source-1", "first"));
+        MessageReceipt secondReceipt = store.receive(new IncomingMessage("thread", "alice", "source-2", "second"));
+        MessageWorkClaim firstClaim = store.claimNext("worker", Duration.ofSeconds(30)).orElseThrow();
+        UUID sessionId = UUID.fromString(firstReceipt.sessionId().value());
+        UUID firstJobId = UUID.fromString(firstClaim.messageJobId().value());
+        UUID secondJobId = UUID.fromString(secondReceipt.messageJobId().value());
+        DataSource dataSource = Objects.requireNonNull(jdbcTemplate.getDataSource(), "JDBC data source must not be null");
+        TransactionTemplate transaction = new TransactionTemplate(new DataSourceTransactionManager(dataSource));
+
+        transaction.executeWithoutResult(status -> {
+            jdbcTemplate.update("insert into session_message(session_id, sequence, message_job_id, role, created_at) values (?, 3, ?, 'ASSISTANT_TOOL_CALLS', ?)",
+                    sessionId, firstJobId, Timestamp.from(NOW));
+            jdbcTemplate.update("insert into assistant_tool_calls(session_id, sequence, message, calls) values (?, 3, null, ?::jsonb)",
+                    sessionId, "[{\"toolCallId\":\"call-1\",\"toolName\":\"mcp_lookup\",\"arguments\":{}}]");
+            jdbcTemplate.update("insert into session_message(session_id, sequence, message_job_id, role, created_at) values (?, 4, ?, 'TOOL', ?)",
+                    sessionId, secondJobId, Timestamp.from(NOW));
+            jdbcTemplate.update("insert into tool_observation(session_id, sequence, tool_call_id, tool_name, output) values (?, 4, 'call-1', 'mcp_lookup', '{}'::jsonb)",
+                    sessionId);
+            jdbcTemplate.update("update conversation_session set next_sequence = next_sequence + 1 where session_id = ?", sessionId);
+            jdbcTemplate.update("update conversation_session set next_sequence = next_sequence + 1 where session_id = ?", sessionId);
+        });
+
+        assertThatThrownBy(() -> new ConversationHistoryProjector(new ObjectMapper()).project(store.loadHistory(firstReceipt.sessionId())))
+                .isInstanceOf(InvalidConversationHistoryException.class);
+        assertThat(store.readJob(firstClaim.messageJobId())).hasValueSatisfying(job -> assertThat(job.status()).isEqualTo(JobStatus.WORKING));
     }
 
     private void insertMalformedAssistantCalls(MessageReceipt receipt, MessageWorkClaim claim, String calls) {

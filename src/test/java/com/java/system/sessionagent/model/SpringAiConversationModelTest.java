@@ -1,9 +1,16 @@
 package com.java.system.sessionagent.model;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.java.system.sessionagent.conversation.domain.AssistantToolCallsMessage;
+import com.java.system.sessionagent.conversation.domain.MessageJobId;
+import com.java.system.sessionagent.conversation.domain.MessageRole;
 import com.java.system.sessionagent.conversation.domain.ModelReply;
 import com.java.system.sessionagent.conversation.domain.ModelRequest;
+import com.java.system.sessionagent.conversation.domain.SessionId;
+import com.java.system.sessionagent.conversation.domain.SessionMessage;
+import com.java.system.sessionagent.conversation.domain.SessionSequence;
 import com.java.system.sessionagent.conversation.domain.ToolCallId;
+import com.java.system.sessionagent.conversation.domain.ToolObservation;
 import com.java.system.sessionagent.conversation.domain.ToolRequest;
 import com.java.system.sessionagent.conversation.port.out.NoOpConversationTelemetry;
 import com.java.system.sessionagent.conversation.port.out.ModelCallFailure;
@@ -11,16 +18,18 @@ import com.java.system.sessionagent.tool.domain.ToolName;
 import com.java.system.sessionagent.tool.port.ToolSnapshot;
 import org.junit.jupiter.api.Test;
 import org.springframework.ai.chat.messages.AssistantMessage;
+import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.ai.chat.metadata.ChatResponseMetadata;
 import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.model.Generation;
 import org.springframework.ai.model.tool.ToolCallingChatOptions;
-import org.springframework.ai.chat.prompt.Prompt;
 
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -67,9 +76,30 @@ class SpringAiConversationModelTest {
                 () -> 1, usage -> { })).isInstanceOf(ModelCallFailure.class);
     }
 
+    @Test
+    void rejects_cross_job_native_tool_history_before_calling_the_provider() {
+        AtomicBoolean providerCalled = new AtomicBoolean();
+        SpringAiConversationModel model = model(new AssistantMessage("unreachable"), providerCalled);
+        List<SessionMessage> malformedHistory = List.of(
+                new AssistantToolCallsMessage(new SessionId("session-1"), new SessionSequence(1), Optional.of(new MessageJobId("job-1")),
+                        Instant.EPOCH, MessageRole.ASSISTANT_TOOL_CALLS, Optional.empty(),
+                        List.of(new ToolRequest(new ToolCallId("call-1"), new ToolName("first"), Map.of()))),
+                new ToolObservation(new SessionId("session-1"), new SessionSequence(2), Optional.of(new MessageJobId("job-2")),
+                        Instant.EPOCH, MessageRole.TOOL, new ToolCallId("call-1"), "first", Map.of("isError", false, "result", Map.of())));
+
+        assertThatThrownBy(() -> model.respond(new ModelRequest(malformedHistory, new ToolSnapshot(List.of())), () -> 1, usage -> { }))
+                .isInstanceOf(ModelCallFailure.class);
+        assertThat(providerCalled).isFalse();
+    }
+
     private static SpringAiConversationModel model(AssistantMessage message) {
+        return model(message, new AtomicBoolean());
+    }
+
+    private static SpringAiConversationModel model(AssistantMessage message, AtomicBoolean providerCalled) {
         ChatModel chatModel = new ChatModel() {
             @Override public ChatResponse call(Prompt prompt) {
+                providerCalled.set(true);
                 return new ChatResponse(List.of(new Generation(message)), ChatResponseMetadata.builder().build());
             }
             @Override public ToolCallingChatOptions getOptions() { return ToolCallingChatOptions.builder().build(); }

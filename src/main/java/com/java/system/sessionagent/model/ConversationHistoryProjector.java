@@ -63,6 +63,17 @@ public final class ConversationHistoryProjector {
             if (!request.toolCallId().equals(observation.toolCallId()) || !request.toolName().value().equals(observation.toolName())) {
                 throw new InvalidConversationHistoryException();
             }
+            long expectedSequence;
+            try {
+                expectedSequence = Math.addExact(calls.sequence().value(), offset + 1L);
+            } catch (ArithmeticException exception) {
+                throw new InvalidConversationHistoryException();
+            }
+            if (!calls.sessionId().equals(observation.sessionId())
+                    || !calls.messageJobId().equals(observation.messageJobId())
+                    || observation.sequence().value() != expectedSequence) {
+                throw new InvalidConversationHistoryException();
+            }
             observations.add(observation);
         }
         List<org.springframework.ai.chat.messages.AssistantMessage.ToolCall> toolCalls = calls.requests().stream()

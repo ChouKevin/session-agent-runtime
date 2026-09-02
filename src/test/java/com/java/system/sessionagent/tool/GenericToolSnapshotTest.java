@@ -92,6 +92,27 @@ class GenericToolSnapshotTest {
     }
 
     @Test
+    void recursively_detaches_and_freezes_the_input_schema_tree() {
+        LinkedHashMap<String, Object> nested = new LinkedHashMap<>();
+        nested.put("minimum", 1);
+        ArrayList<Object> properties = new ArrayList<>();
+        properties.add(nested);
+        LinkedHashMap<String, Object> schema = new LinkedHashMap<>();
+        schema.put("properties", properties);
+
+        ToolDefinition definition = new ToolDefinition(new ToolName("lookup"), "Lookup", schema);
+        nested.put("maximum", 2);
+        properties.add(Map.of("additionalProperties", false));
+
+        Map<?, ?> frozenNested = (Map<?, ?>) ((List<?>) definition.inputSchema().get("properties")).getFirst();
+        assertEquals(Map.of("minimum", 1), frozenNested);
+        assertThrows(UnsupportedOperationException.class,
+                () -> ((Map<String, Object>) frozenNested).put("maximum", 2));
+        assertThrows(UnsupportedOperationException.class,
+                () -> ((List<Object>) definition.inputSchema().get("properties")).add(Map.of()));
+    }
+
+    @Test
     void preserves_a_null_result_key_in_structured_output() {
         ToolOutput output = new ToolOutput(false, null);
 

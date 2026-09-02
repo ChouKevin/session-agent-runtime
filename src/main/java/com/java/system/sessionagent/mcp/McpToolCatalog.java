@@ -10,19 +10,13 @@ import io.modelcontextprotocol.spec.McpSchema;
 import org.springframework.util.Assert;
 import org.springframework.util.StringUtils;
 
-import java.util.ArrayList;
 import java.util.LinkedHashMap;
-import java.util.LinkedHashSet;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 import java.util.Optional;
-import java.util.Set;
-import java.util.regex.Pattern;
 
 public final class McpToolCatalog implements ToolCatalog {
-
-    private static final Pattern PORTABLE_TOOL_NAME = Pattern.compile("[A-Za-z][A-Za-z0-9_-]{0,63}");
 
     private final McpConnectionManager connectionManager;
     private final McpToolResultMapper resultMapper;
@@ -37,8 +31,7 @@ public final class McpToolCatalog implements ToolCatalog {
     @Override
     public ToolSnapshot snapshot() {
         McpConnectionManager.View managerView = connectionManager.view();
-        LinkedHashMap<String, List<Route>> candidateRoutes = new LinkedHashMap<>();
-        Set<String> degradedConnections = new LinkedHashSet<>();
+        LinkedHashMap<String, Route> routes = new LinkedHashMap<>();
         for (Map.Entry<String, McpConnectionManager.ConnectionView> entry : managerView.connections().entrySet()) {
             String connectionName = entry.getKey();
             McpConnectionManager.ConnectionView connection = entry.getValue();
@@ -47,46 +40,21 @@ public final class McpToolCatalog implements ToolCatalog {
                 continue;
             }
             for (McpSchema.Tool tool : connection.tools()) {
-                McpSchema.Tool discoveredTool = Objects.requireNonNull(tool, "MCP tool must not be null");
-                Optional<Route> route = validRoute(connectionName, client.orElseThrow(), discoveredTool);
-                if (route.isEmpty()) {
-                    degradedConnections.add(connectionName);
-                    continue;
-                }
-                Route retainedRoute = route.orElseThrow();
-                candidateRoutes.computeIfAbsent(retainedRoute.exposedName(), ignored -> new ArrayList<>()).add(retainedRoute);
+                Route route = validRoute(connectionName, client.orElseThrow(), tool).orElseThrow();
+                routes.put(route.exposedName(), route);
             }
         }
 
         List<ToolBinding> bindings = new ArrayList<>();
-        for (Map.Entry<String, List<Route>> entry : candidateRoutes.entrySet()) {
-            List<Route> routes = entry.getValue();
-            if (routes.size() > 1) {
-                for (Route route : routes) {
-                    degradedConnections.add(route.connectionName());
-                }
-                continue;
-            }
-            bindings.add(binding(routes.getFirst()));
-        }
-        for (String connectionName : degradedConnections) {
-            connectionManager.markDegraded(connectionName, managerView.connections().get(connectionName));
+        for (Route route : routes.values()) {
+            bindings.add(binding(route));
         }
         return new ToolSnapshot(bindings);
     }
 
     private static Optional<Route> validRoute(String connectionName, McpConnectionClient client, McpSchema.Tool tool) {
         String rawToolName = tool.name();
-        if (!StringUtils.hasText(rawToolName)) {
-            return Optional.empty();
-        }
         String exposedName = connectionName + "_" + rawToolName;
-        if (!PORTABLE_TOOL_NAME.matcher(exposedName).matches()) {
-            return Optional.empty();
-        }
-        if (Optional.ofNullable(tool.inputSchema()).isEmpty()) {
-            return Optional.empty();
-        }
         String description = StringUtils.hasText(tool.description()) ? tool.description() : rawToolName;
         return Optional.of(new Route(connectionName, rawToolName, exposedName, description, tool.inputSchema(), client));
     }

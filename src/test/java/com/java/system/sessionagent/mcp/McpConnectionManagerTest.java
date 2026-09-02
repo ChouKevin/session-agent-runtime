@@ -12,6 +12,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Delayed;
@@ -21,6 +22,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.BooleanSupplier;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -122,6 +124,20 @@ class McpConnectionManagerTest {
     }
 
     @Test
+    void keeps_a_connection_degraded_when_tools_list_contains_malformed_entries() {
+        ControlledTaskScheduler scheduler = new ControlledTaskScheduler();
+        RecordingClient client = new RecordingClient(Arrays.asList(tool("search_code"), null, tool("not.valid")));
+        McpConnectionManager manager = manager(Map.of("semantic", connection()), configuredConnection -> client, scheduler);
+
+        manager.start();
+        scheduler.runDueTasks();
+
+        assertThat(manager.diagnostic("semantic").state()).isEqualTo(McpConnectionState.DEGRADED);
+        assertThat(manager.view().connections().get("semantic").tools()).extracting(McpSchema.Tool::name)
+                .containsExactly("search_code");
+    }
+
+    @Test
     void closes_a_client_that_finishes_initial_listing_after_shutdown() throws InterruptedException {
         ControlledTaskScheduler scheduler = new ControlledTaskScheduler();
         BlockingListClient client = new BlockingListClient(List.of(tool("search_code")));
@@ -157,9 +173,19 @@ class McpConnectionManagerTest {
 
         assertThat(slowClient.listingStarted.await(1, TimeUnit.SECONDS)).isTrue();
         assertThat(availableClient.listingCompleted.await(1, TimeUnit.SECONDS)).isTrue();
-        assertThat(manager.diagnostic("fast").state()).isEqualTo(McpConnectionState.AVAILABLE);
+        assertThat(awaitCondition(
+                () -> manager.diagnostic("fast").state() == McpConnectionState.AVAILABLE,
+                Duration.ofSeconds(1))).isTrue();
         slowClient.releaseListing.countDown();
         manager.stop();
+    }
+
+    private static boolean awaitCondition(BooleanSupplier condition, Duration timeout) throws InterruptedException {
+        long deadlineNanos = System.nanoTime() + timeout.toNanos();
+        while (!condition.getAsBoolean() && System.nanoTime() < deadlineNanos) {
+            Thread.sleep(10L);
+        }
+        return condition.getAsBoolean();
     }
 
     private static McpConnectionManager manager(

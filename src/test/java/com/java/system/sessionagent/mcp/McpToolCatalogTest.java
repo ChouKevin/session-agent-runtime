@@ -8,6 +8,7 @@ import org.junit.jupiter.api.Test;
 
 import java.net.URI;
 import java.util.EnumSet;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
@@ -85,6 +86,35 @@ class McpToolCatalogTest {
         assertThat(snapshot.definitions()).extracting(definition -> definition.name().value())
                 .containsExactly("semantic_get_fact");
         assertThat(manager.diagnostic("semantic").state()).isEqualTo(McpConnectionState.DEGRADED);
+    }
+
+    @Test
+    void publishes_safe_diagnostics_and_unrelated_routes_before_a_snapshot_is_requested() {
+        McpConnectionManager manager = manager();
+        McpToolCatalog catalog = new McpToolCatalog(manager, OBJECT_MAPPER);
+
+        manager.publish("semantic", new RecordingClient(), Arrays.asList(
+                tool("search_code", "Search code"), null, tool("not.valid", "Invalid"), tool("get_fact", "Get fact")));
+        manager.publish("billing", new RecordingClient(), List.of(tool("lookup_invoice", "Lookup invoice")));
+
+        assertThat(manager.diagnostic("semantic").state()).isEqualTo(McpConnectionState.DEGRADED);
+        assertThat(manager.diagnostic("billing").state()).isEqualTo(McpConnectionState.AVAILABLE);
+        assertThat(catalog.snapshot().definitions()).extracting(definition -> definition.name().value())
+                .containsExactly("semantic_search_code", "semantic_get_fact", "billing_lookup_invoice");
+    }
+
+    @Test
+    void withholds_a_malformed_schema_before_any_snapshot_can_reach_the_worker() {
+        McpConnectionManager manager = manager();
+        McpToolCatalog catalog = new McpToolCatalog(manager, OBJECT_MAPPER);
+        McpSchema.Tool malformed = new McpSchema.Tool("bad_schema", null, "Malformed",
+                Map.of("type", new Object()), Map.of(), null, Map.of());
+
+        manager.publish("semantic", new RecordingClient(), List.of(tool("search_code", "Search code"), malformed));
+
+        assertThat(manager.diagnostic("semantic").state()).isEqualTo(McpConnectionState.DEGRADED);
+        assertThat(catalog.snapshot().definitions()).extracting(definition -> definition.name().value())
+                .containsExactly("semantic_search_code");
     }
 
     @Test

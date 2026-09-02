@@ -13,11 +13,13 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.regex.Pattern;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -28,6 +30,7 @@ public final class McpConnectionManager {
 
     private static final String WITHHELD_BINDING_MESSAGE = "One or more MCP tool bindings were withheld.";
     private static final String CONNECTION_FAILURE_MESSAGE = "The MCP connection is unavailable.";
+    private static final Pattern PORTABLE_TOOL_NAME = Pattern.compile("[A-Za-z][A-Za-z0-9_-]{0,63}");
 
     private final McpConnectionProperties properties;
     private final McpConnectionClientFactory clientFactory;
@@ -39,6 +42,7 @@ public final class McpConnectionManager {
     private final Map<String, PendingWork> reconnectWork = new LinkedHashMap<>();
     private final Map<String, PendingWork> refreshWork = new LinkedHashMap<>();
     private final Map<String, Integer> reconnectFailures = new LinkedHashMap<>();
+    private final Map<String, List<McpSchema.Tool>> rawToolsByConnection = new LinkedHashMap<>();
     private final Set<String> inFlightConnections = new java.util.HashSet<>();
     private final Set<McpConnectionClient> ownedClients = Collections.newSetFromMap(new IdentityHashMap<>());
 
@@ -127,7 +131,7 @@ public final class McpConnectionManager {
             closeClient = stopped;
             if (!closeClient) {
                 ownedClients.add(client);
-                replace(connectionName, new ConnectionView(Optional.of(client), tools, Diagnostic.available()));
+                replacePublished(connectionName, client, tools);
             }
         }
         if (closeClient) {
@@ -170,6 +174,7 @@ public final class McpConnectionManager {
                 stoppedConnections.put(connectionName, ConnectionView.withoutClient(McpConnectionState.STOPPED));
             }
             view = new View(stoppedConnections);
+            rawToolsByConnection.clear();
             clientsToClose = new ArrayList<>(ownedClients);
             ownedClients.clear();
         }
@@ -275,7 +280,7 @@ public final class McpConnectionManager {
                 if (stopped) {
                     return;
                 }
-                replace(connectionName, new ConnectionView(Optional.of(client), tools, Diagnostic.available()));
+                replacePublished(connectionName, client, tools);
             }
         } catch (RuntimeException exception) {
             markUnavailableAndReconnect(connectionName, exception);
@@ -288,7 +293,7 @@ public final class McpConnectionManager {
             closeClient = stopped;
             if (!closeClient) {
                 reconnectFailures.remove(connectionName);
-                replace(connectionName, new ConnectionView(Optional.of(client), tools, Diagnostic.available()));
+                replacePublished(connectionName, client, tools);
                 scheduleRefresh(connectionName, client);
             }
         }
@@ -398,9 +403,97 @@ public final class McpConnectionManager {
     }
 
     private synchronized void replace(String connectionName, ConnectionView replacement) {
+        if (replacement.client().isEmpty()) {
+            rawToolsByConnection.remove(connectionName);
+        }
         LinkedHashMap<String, ConnectionView> nextConnections = new LinkedHashMap<>(view.connections());
         nextConnections.put(connectionName, replacement);
         view = new View(nextConnections);
+    }
+
+    private void replacePublished(String connectionName, McpConnectionClient client, List<McpSchema.Tool> rawTools) {
+        rawToolsByConnection.put(connectionName, Collections.unmodifiableList(new ArrayList<>(rawTools)));
+        LinkedHashMap<String, ConnectionView> candidates = new LinkedHashMap<>(view.connections());
+        candidates.put(connectionName, new ConnectionView(Optional.of(client), List.of(), Diagnostic.available()));
+        view = validatedView(candidates);
+    }
+
+    private View validatedView(Map<String, ConnectionView> candidates) {
+        LinkedHashMap<String, List<RouteCandidate>> routesByName = new LinkedHashMap<>();
+        LinkedHashSet<String> degradedConnections = new LinkedHashSet<>();
+        for (Map.Entry<String, ConnectionView> entry : candidates.entrySet()) {
+            String connectionName = entry.getKey();
+            ConnectionView connection = entry.getValue();
+            if (connection.client().isEmpty()) {
+                continue;
+            }
+            for (McpSchema.Tool tool : rawToolsByConnection.getOrDefault(connectionName, List.of())) {
+                if (!isValidTool(connectionName, tool)) {
+                    degradedConnections.add(connectionName);
+                    continue;
+                }
+                String exposedName = connectionName + "_" + tool.name();
+                routesByName.computeIfAbsent(exposedName, ignored -> new ArrayList<>())
+                        .add(new RouteCandidate(connectionName, tool));
+            }
+        }
+        LinkedHashMap<String, List<McpSchema.Tool>> acceptedTools = new LinkedHashMap<>();
+        for (Map.Entry<String, List<RouteCandidate>> entry : routesByName.entrySet()) {
+            List<RouteCandidate> routes = entry.getValue();
+            if (routes.size() > 1) {
+                for (RouteCandidate route : routes) {
+                    degradedConnections.add(route.connectionName());
+                }
+                continue;
+            }
+            RouteCandidate route = routes.getFirst();
+            acceptedTools.computeIfAbsent(route.connectionName(), ignored -> new ArrayList<>()).add(route.tool());
+        }
+        LinkedHashMap<String, ConnectionView> validatedConnections = new LinkedHashMap<>();
+        for (Map.Entry<String, ConnectionView> entry : candidates.entrySet()) {
+            String connectionName = entry.getKey();
+            ConnectionView connection = entry.getValue();
+            if (connection.client().isEmpty()) {
+                validatedConnections.put(connectionName, connection);
+                continue;
+            }
+            Diagnostic diagnostic = degradedConnections.contains(connectionName)
+                    ? Diagnostic.withheldBinding() : Diagnostic.available();
+            List<McpSchema.Tool> accepted = acceptedTools.getOrDefault(connectionName, List.of());
+            validatedConnections.put(connectionName, new ConnectionView(connection.client(), accepted, diagnostic));
+        }
+        return new View(validatedConnections);
+    }
+
+    private static boolean isValidTool(String connectionName, McpSchema.Tool tool) {
+        if (Objects.isNull(tool) || !org.springframework.util.StringUtils.hasText(tool.name())) {
+            return false;
+        }
+        if (Objects.isNull(tool.inputSchema())) {
+            return false;
+        }
+        return PORTABLE_TOOL_NAME.matcher(connectionName + "_" + tool.name()).matches()
+                && isGenericJsonValue(tool.inputSchema());
+    }
+
+    private static boolean isGenericJsonValue(Object value) {
+        if (value instanceof Map<?, ?> map) {
+            for (Map.Entry<?, ?> entry : map.entrySet()) {
+                if (!(entry.getKey() instanceof String) || !isGenericJsonValue(entry.getValue())) {
+                    return false;
+                }
+            }
+            return true;
+        }
+        if (value instanceof List<?> list) {
+            for (Object item : list) {
+                if (!isGenericJsonValue(item)) {
+                    return false;
+                }
+            }
+            return true;
+        }
+        return value instanceof String || value instanceof Number || value instanceof Boolean || Objects.isNull(value);
     }
 
     public record View(Map<String, ConnectionView> connections) {
@@ -431,6 +524,9 @@ public final class McpConnectionManager {
         private ConnectionView withDiagnostic(Diagnostic replacementDiagnostic) {
             return new ConnectionView(client, tools, replacementDiagnostic);
         }
+    }
+
+    private record RouteCandidate(String connectionName, McpSchema.Tool tool) {
     }
 
     public record Diagnostic(McpConnectionState state, String code, String message) {

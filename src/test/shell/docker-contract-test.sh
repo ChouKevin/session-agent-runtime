@@ -20,8 +20,8 @@ for required_command in curl docker jq; do
     fi
 done
 
-SEMANTIC_API_TOKEN='contract-semantic-token' SESSION_AGENT_POSTGRES_PASSWORD='contract-only-password' docker compose -f "${compose_file}" config --quiet
-compose_json="$(SEMANTIC_API_TOKEN='contract-semantic-token' SESSION_AGENT_POSTGRES_PASSWORD='contract-only-password' docker compose -f "${compose_file}" config --format json)"
+SESSION_AGENT_POSTGRES_PASSWORD='contract-only-password' docker compose -f "${compose_file}" config --quiet
+compose_json="$(SESSION_AGENT_POSTGRES_PASSWORD='contract-only-password' docker compose -f "${compose_file}" config --format json)"
 service_names="$(jq -r '.services | keys | sort | join(",")' <<<"${compose_json}")"
 [[ "${service_names}" == "postgres,session-agent-runtime" ]] || {
     printf 'unexpected compose services: %s\n' "${service_names}" >&2
@@ -63,10 +63,6 @@ if rg -n 'SESSION_AGENT_POSTGRES_PASSWORD:-|POSTGRES_PASSWORD:.*session_agent' "
     printf 'compose password must not have a committed fallback\n' >&2
     exit 1
 fi
-if rg -n 'SEMANTIC_API_TOKEN:-' "${compose_file}" >/dev/null; then
-    printf 'compose Semantic token must not have a committed fallback\n' >&2
-    exit 1
-fi
 
 google_live_test="${runtime_root}/src/test/java/com/java/system/sessionagent/model/GoogleModelLiveTest.java"
 [[ -f "${google_live_test}" ]] || { printf 'missing GoogleModelLiveTest\n' >&2; exit 1; }
@@ -79,12 +75,26 @@ if [[ -e "${runtime_root}/src/test/java/com/java/system/sessionagent/model/Googl
     exit 1
 fi
 
-for required_input in SEMANTIC_BASE_URL SEMANTIC_API_TOKEN GOOGLE_API_KEY GOOGLE_GENAI_MODEL; do
+for required_input in SESSION_AGENT_MCP_CONFIGURATION_JSON GOOGLE_API_KEY GOOGLE_GENAI_MODEL; do
     grep -Fq "${required_input}" "${compose_file}" || {
         printf 'missing environment input: %s\n' "${required_input}" >&2
         exit 1
     }
 done
+
+configured_compose_json="$(SESSION_AGENT_POSTGRES_PASSWORD='contract-only-password' \
+    SESSION_AGENT_MCP_CONFIGURATION_JSON='{"session-agent":{"mcp":{"connections":{"semantic":{"enabled":true,"url":"https://semantic.example/custom/mcp","headers":{"Authorization":"Bearer contract-token"}}}}}}' \
+    docker compose -f "${compose_file}" config --format json)"
+jq -e '
+    .services["session-agent-runtime"].environment.SPRING_APPLICATION_JSON
+    | fromjson
+    | .["session-agent"].mcp.connections.semantic.enabled == true
+      and .["session-agent"].mcp.connections.semantic.url == "https://semantic.example/custom/mcp"
+      and .["session-agent"].mcp.connections.semantic.headers.Authorization == "Bearer contract-token"
+' <<<"${configured_compose_json}" >/dev/null || {
+    printf 'compose must forward the configured generic MCP connection unchanged\n' >&2
+    exit 1
+}
 
 for reserved_input in SLACK_APP_TOKEN SLACK_BOT_TOKEN SLACK_BOT_USER_ID; do
     grep -Fq "${reserved_input}: \${${reserved_input}:-}" "${compose_file}" || {
