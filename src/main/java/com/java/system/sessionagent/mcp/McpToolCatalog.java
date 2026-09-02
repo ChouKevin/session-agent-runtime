@@ -5,6 +5,7 @@ import com.java.system.sessionagent.tool.port.ToolCatalog;
 import com.java.system.sessionagent.tool.port.ToolDefinition;
 import com.java.system.sessionagent.tool.port.ToolOutput;
 import com.java.system.sessionagent.tool.port.ToolSnapshot;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.modelcontextprotocol.spec.McpSchema;
 import org.springframework.util.Assert;
 import org.springframework.util.StringUtils;
@@ -24,10 +25,17 @@ public final class McpToolCatalog implements ToolCatalog {
     private static final Pattern PORTABLE_TOOL_NAME = Pattern.compile("[A-Za-z][A-Za-z0-9_-]{0,63}");
 
     private final McpConnectionManager connectionManager;
+    private final McpToolResultMapper resultMapper;
 
     public McpToolCatalog(McpConnectionManager connectionManager) {
+        this(connectionManager, new ObjectMapper());
+    }
+
+    public McpToolCatalog(McpConnectionManager connectionManager, ObjectMapper objectMapper) {
         Assert.notNull(connectionManager, "MCP connection manager must not be null");
+        Assert.notNull(objectMapper, "Object mapper must not be null");
         this.connectionManager = connectionManager;
+        this.resultMapper = new McpToolResultMapper(objectMapper);
     }
 
     @Override
@@ -87,17 +95,20 @@ public final class McpToolCatalog implements ToolCatalog {
         return Optional.of(new Route(connectionName, rawToolName, exposedName, description, tool.inputSchema(), client));
     }
 
-    private static ToolBinding binding(Route route) {
+    private ToolBinding binding(Route route) {
         ToolDefinition definition = ToolDefinition.fromExposedName(
                 route.exposedName(), route.description(), route.inputSchema());
         return new ToolBinding(definition, arguments -> invoke(route, arguments));
     }
 
-    private static ToolOutput invoke(Route route, Map<String, Object> arguments) {
+    private ToolOutput invoke(Route route, Map<String, Object> arguments) {
         McpSchema.CallToolRequest request = new McpSchema.CallToolRequest(route.rawToolName(), arguments);
-        McpSchema.CallToolResult result = route.client().callTool(request);
-        Objects.requireNonNull(result, "MCP tool result must not be null");
-        return new ToolOutput(Boolean.TRUE.equals(result.isError()), null);
+        try {
+            Optional<McpSchema.CallToolResult> result = Optional.ofNullable(route.client().callTool(request));
+            return result.map(resultMapper::map).orElseGet(resultMapper::protocolFailure);
+        } catch (RuntimeException exception) {
+            return resultMapper.mapRuntimeFailure(exception).orElseThrow(() -> exception);
+        }
     }
 
     private record Route(

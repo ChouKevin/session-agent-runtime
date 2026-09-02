@@ -37,7 +37,7 @@ class ApplicationModulesTest {
                         "storage", Set.of("conversation"),
                         "web", Set.of("conversation"),
                         "worker", Set.of("conversation"),
-                        "bootstrap", Set.of("tool", "conversation", "semantic", "model", "storage", "web", "worker")),
+                        "bootstrap", Set.of("tool", "conversation", "semantic", "mcp", "model", "storage", "web", "worker")),
                 modules.stream().collect(Collectors.toMap(
                         module -> module.getIdentifier().toString(),
                         module -> allowedModuleNames(module, modules))));

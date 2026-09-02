@@ -3,6 +3,7 @@ package com.java.system.sessionagent.bootstrap;
 import com.java.system.sessionagent.conversation.port.out.ConversationStore;
 import com.java.system.sessionagent.model.PromptResource;
 import com.java.system.sessionagent.tool.application.DirectToolRegistry;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import io.micrometer.observation.ObservationRegistry;
 import org.junit.jupiter.api.Test;
@@ -36,7 +37,7 @@ class ApplicationStartupTest {
             "org.springframework.boot.flyway.autoconfigure.FlywayAutoConfiguration";
 
     private final ApplicationContextRunner contextRunner = new ApplicationContextRunner()
-            .withUserConfiguration(RuntimeConfiguration.class, TestDependencies.class)
+            .withUserConfiguration(RuntimeConfiguration.class, McpConfiguration.class, TestDependencies.class)
             .withPropertyValues(
                     "spring.datasource.url=jdbc:postgresql://localhost:5432/session_agent",
                     "spring.datasource.password=test-datasource-password",
@@ -47,6 +48,7 @@ class ApplicationStartupTest {
         contextRunner.run(context -> {
             assertThat(context).hasNotFailed();
             assertThat(context.getBeansOfType(DirectToolRegistry.class)).hasSize(1);
+            assertThat(context.getBeansOfType(com.java.system.sessionagent.mcp.McpConnectionManager.class)).hasSize(1);
             assertThat(context.getBean(DirectToolRegistry.class).snapshot().definitions()).hasSize(16);
             assertThat(context.getBeansOfType(ConversationStore.class)).hasSize(1);
             assertThat(context.getBeansOfType(com.java.system.sessionagent.model.SpringAiConversationModel.class)).hasSize(1);
@@ -127,13 +129,13 @@ class ApplicationStartupTest {
     @Test
     void failsEagerlyWhenRequiredSemanticTokenOrDatasourcePasswordIsMissing() {
         new ApplicationContextRunner()
-                .withUserConfiguration(RuntimeConfiguration.class, TestDependencies.class)
+                .withUserConfiguration(RuntimeConfiguration.class, McpConfiguration.class, TestDependencies.class)
                 .withPropertyValues(
                         "spring.datasource.url=jdbc:postgresql://localhost:5432/session_agent",
                         "spring.datasource.password=test-datasource-password")
                 .run(context -> assertThat(context).hasFailed());
         new ApplicationContextRunner()
-                .withUserConfiguration(RuntimeConfiguration.class, TestDependencies.class)
+                .withUserConfiguration(RuntimeConfiguration.class, McpConfiguration.class, TestDependencies.class)
                 .withPropertyValues(
                         "spring.datasource.url=jdbc:postgresql://localhost:5432/session_agent",
                         "session-agent.semantic.api-token=test-semantic-token")
@@ -165,6 +167,11 @@ class ApplicationStartupTest {
         @Bean
         ObservationRegistry observationRegistry() {
             return ObservationRegistry.NOOP;
+        }
+
+        @Bean
+        ObjectMapper objectMapper() {
+            return new ObjectMapper();
         }
     }
 

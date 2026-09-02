@@ -1,5 +1,10 @@
 server:
   address: 127.0.0.1
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,mcpConnections
 session-agent:
   mcp:
     refresh-interval: ${SESSION_AGENT_MCP_REFRESH_INTERVAL:60s}
