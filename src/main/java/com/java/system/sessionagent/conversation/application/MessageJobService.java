@@ -283,6 +283,10 @@ public final class MessageJobService implements MessageJobPort {
         if (!guard.stillOwned()) {
             return;
         }
+        if (failure.kind() == ConversationStoreFailure.Kind.INVALID_HISTORY) {
+            appendRuntime(claim, guard, List.of(runtime(INVALID_CONVERSATION_HISTORY)), ConversationStore.JobUpdate.COMPLETE);
+            return;
+        }
         try {
             Optional<ConversationStore.MessageJobProjection> job = conversationStore.readJob(claim.messageJobId());
             if (failure.kind() != ConversationStoreFailure.Kind.CONTRACT

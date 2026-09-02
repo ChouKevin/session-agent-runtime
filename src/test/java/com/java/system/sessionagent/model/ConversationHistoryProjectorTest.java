@@ -2,6 +2,7 @@ package com.java.system.sessionagent.model;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.java.system.sessionagent.conversation.domain.AssistantToolCallsMessage;
+import com.java.system.sessionagent.conversation.domain.AssistantMessage;
 import com.java.system.sessionagent.conversation.domain.MessageJobId;
 import com.java.system.sessionagent.conversation.domain.MessageRole;
 import com.java.system.sessionagent.conversation.domain.SessionId;
@@ -12,6 +13,9 @@ import com.java.system.sessionagent.conversation.domain.ToolObservation;
 import com.java.system.sessionagent.conversation.domain.ToolRequest;
 import com.java.system.sessionagent.tool.domain.ToolName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.ToolResponseMessage;
 
@@ -19,6 +23,7 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.stream.Stream;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -34,21 +39,34 @@ class ConversationHistoryProjectorTest {
                 value -> assertThat(value.getResponses()).extracting(ToolResponseMessage.ToolResponse::id).containsExactly("call-1", "call-2"));
     }
 
-    @Test
-    void rejects_an_incomplete_tool_batch_before_provider_invocation() {
-        assertThatThrownBy(() -> new ConversationHistoryProjector(new ObjectMapper()).project(List.of(batch().getFirst())))
+    @ParameterizedTest(name = "rejects {0} native history before provider invocation")
+    @MethodSource("invalidHistories")
+    void rejects_invalid_native_history_before_provider_invocation(String ignoredCase, List<SessionMessage> history) {
+        assertThatThrownBy(() -> new ConversationHistoryProjector(new ObjectMapper()).project(history))
                 .isInstanceOf(InvalidConversationHistoryException.class);
     }
 
-    @Test
-    void rejects_duplicate_call_ids_in_a_durable_batch() {
-        List<SessionMessage> history = batch();
+    private static Stream<Arguments> invalidHistories() {
+        List<SessionMessage> valid = batch();
         AssistantToolCallsMessage duplicate = new AssistantToolCallsMessage(new SessionId("session-1"), new SessionSequence(1),
                 Optional.of(new MessageJobId("job-1")), Instant.EPOCH, MessageRole.ASSISTANT_TOOL_CALLS, Optional.empty(), List.of(
                 new ToolRequest(new ToolCallId("call-1"), new ToolName("first"), Map.of()),
                 new ToolRequest(new ToolCallId("call-1"), new ToolName("second"), Map.of())));
-        assertThatThrownBy(() -> new ConversationHistoryProjector(new ObjectMapper()).project(List.of(duplicate, history.get(1), history.get(2))))
-                .isInstanceOf(InvalidConversationHistoryException.class);
+        ToolObservation mismatchedName = new ToolObservation(new SessionId("session-1"), new SessionSequence(2),
+                Optional.of(new MessageJobId("job-1")), Instant.EPOCH, MessageRole.TOOL,
+                new ToolCallId("call-1"), "other", Map.of("isError", false, "result", Map.of()));
+        ToolObservation extraResult = new ToolObservation(new SessionId("session-1"), new SessionSequence(4),
+                Optional.of(new MessageJobId("job-1")), Instant.EPOCH, MessageRole.TOOL,
+                new ToolCallId("call-extra"), "extra", Map.of("isError", false, "result", Map.of()));
+        AssistantMessage interleaved = new AssistantMessage(new SessionId("session-1"), new SessionSequence(2),
+                Optional.of(new MessageJobId("job-1")), Instant.EPOCH, MessageRole.ASSISTANT, "interleaved");
+        return Stream.of(
+                Arguments.of("orphan TOOL", List.of(valid.get(1))),
+                Arguments.of("missing TOOL", List.of(valid.getFirst(), valid.get(1))),
+                Arguments.of("duplicate call ID", List.of(duplicate, valid.get(1), valid.get(2))),
+                Arguments.of("name mismatch", List.of(valid.getFirst(), mismatchedName, valid.get(2))),
+                Arguments.of("extra result", List.of(valid.getFirst(), valid.get(1), valid.get(2), extraResult)),
+                Arguments.of("interleaved incomplete batch", List.of(valid.getFirst(), interleaved, valid.get(2))));
     }
 
     private static List<SessionMessage> batch() {

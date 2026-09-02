@@ -4,8 +4,11 @@ import com.java.system.sessionagent.conversation.domain.IncomingMessage;
 import com.java.system.sessionagent.conversation.domain.MessageReceipt;
 import com.java.system.sessionagent.conversation.domain.MessageWorkClaim;
 import com.java.system.sessionagent.conversation.domain.ToolCallId;
+import com.java.system.sessionagent.conversation.domain.AssistantToolCallsMessage;
+import com.java.system.sessionagent.conversation.domain.ToolObservation;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.java.system.sessionagent.conversation.port.out.ConversationStore;
+import com.java.system.sessionagent.conversation.port.out.ConversationStoreFailure;
 import com.java.system.sessionagent.conversation.port.out.StaleWorkClaimException;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.AfterEach;
@@ -27,6 +30,7 @@ import java.sql.PreparedStatement;
 import java.sql.Timestamp;
 import java.util.UUID;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
@@ -100,17 +104,33 @@ class PostgresConversationCommitPostgresIT {
 
         store.append(claim, new ConversationStore.MessageBatch(List.of(
                 new ConversationStore.AssistantToolCallsData(java.util.Optional.of("I will inspect both."), List.of(
-                        new ConversationStore.ToolCallData(new ToolCallId("call-1"), "mcp_lookup", java.util.Map.of("query", "fees")),
+                        new ConversationStore.ToolCallData(new ToolCallId("call-1"), "mcp_lookup", java.util.Map.of("query", Map.of("terms", List.of("fees", "late")))),
                         new ConversationStore.ToolCallData(new ToolCallId("call-2"), "mcp_entries", java.util.Map.of()))),
-                new ConversationStore.ToolObservationData(new ToolCallId("call-1"), "mcp_lookup", java.util.Map.of("isError", false, "result", java.util.Map.of())),
-                new ConversationStore.ToolObservationData(new ToolCallId("call-2"), "mcp_entries", java.util.Map.of("isError", true, "result", "failure"))),
+                new ConversationStore.ToolObservationData(new ToolCallId("call-1"), "mcp_lookup", java.util.Map.of("isError", false, "result", java.util.Map.of("hits", List.of(Map.of("id", 7))))),
+                new ConversationStore.ToolObservationData(new ToolCallId("call-2"), "mcp_entries", java.util.Map.of("isError", true, "result", Map.of("failure", Map.of("code", "TOOL_TIMEOUT"))))),
                 ConversationStore.JobUpdate.COMPLETE), NOW);
 
-        assertThat(store.loadHistory(receipt.sessionId())).extracting(message -> message.sequence().value())
+        ConversationStore restartedStore = store();
+        List<com.java.system.sessionagent.conversation.domain.SessionMessage> history = restartedStore.loadHistory(receipt.sessionId());
+        assertThat(history).extracting(message -> message.sequence().value())
                 .containsExactly(1L, 2L, 3L, 4L);
+        assertThat(history.get(1)).isInstanceOfSatisfying(AssistantToolCallsMessage.class, calls -> {
+            assertThat(calls.message()).contains("I will inspect both.");
+            assertThat(calls.requests()).extracting(request -> request.toolCallId().value()).containsExactly("call-1", "call-2");
+            assertThat(calls.requests()).extracting(request -> request.toolName().value()).containsExactly("mcp_lookup", "mcp_entries");
+            assertThat(calls.requests().getFirst().arguments()).isEqualTo(Map.of("query", Map.of("terms", List.of("fees", "late"))));
+        });
+        assertThat(history.subList(2, 4)).allSatisfy(message -> assertThat(message).isInstanceOf(ToolObservation.class));
+        assertThat(history.subList(2, 4)).extracting(message -> ((ToolObservation) message).toolCallId().value())
+                .containsExactly("call-1", "call-2");
+        assertThat(history.subList(2, 4)).extracting(message -> ((ToolObservation) message).toolName())
+                .containsExactly("mcp_lookup", "mcp_entries");
+        assertThat(((ToolObservation) history.get(2)).output()).isEqualTo(Map.of("isError", false, "result", Map.of("hits", List.of(Map.of("id", 7)))));
+        assertThat(((ToolObservation) history.get(3)).output()).isEqualTo(Map.of("isError", true, "result", Map.of("failure", Map.of("code", "TOOL_TIMEOUT"))));
         assertThat(jdbcTemplate.queryForObject("select status from message_job where message_job_id = ?", String.class,
                 java.util.UUID.fromString(receipt.messageJobId().value()))).isEqualTo("DONE");
         assertThat(jdbcTemplate.queryForObject("select count(*) from tool_observation", Integer.class)).isEqualTo(2);
+        assertThat(restartedStore.claimNext("recovery-worker", Duration.ofSeconds(30))).isEmpty();
     }
 
     @Test
@@ -162,27 +182,32 @@ class PostgresConversationCommitPostgresIT {
     }
 
     @Test
-    void rolls_back_an_earlier_detail_when_a_later_detail_insert_fails() {
+    void rolls_back_the_entire_native_batch_when_a_later_tool_result_insert_fails() {
         ConversationStore store = store();
         MessageReceipt receipt = store.receive(new IncomingMessage("thread", "alice", "source", "hello"));
         MessageWorkClaim claim = store.claimNext("worker", Duration.ofSeconds(30)).orElseThrow();
         jdbcTemplate.execute("""
-                create function fail_test_runtime_detail() returns trigger language plpgsql as $$
+                create function fail_test_tool_detail() returns trigger language plpgsql as $$
                 begin
-                    raise exception 'forced runtime detail failure';
+                    raise exception 'forced tool detail failure';
                 end;
                 $$;
-                create trigger fail_test_runtime_detail before insert on runtime_message
-                    for each row execute function fail_test_runtime_detail();
+                create trigger fail_test_tool_detail before insert on tool_observation
+                    for each row execute function fail_test_tool_detail();
                 """);
 
         assertThatThrownBy(() -> store.append(claim, new ConversationStore.MessageBatch(List.of(
-                new ConversationStore.AssistantData("first"), new ConversationStore.RuntimeData("TEST", "second")),
+                new ConversationStore.AssistantToolCallsData(java.util.Optional.of("Checking."), List.of(
+                        new ConversationStore.ToolCallData(new ToolCallId("call-1"), "mcp_lookup", Map.of()),
+                        new ConversationStore.ToolCallData(new ToolCallId("call-2"), "mcp_entries", Map.of()))),
+                new ConversationStore.ToolObservationData(new ToolCallId("call-1"), "mcp_lookup", Map.of("isError", false, "result", Map.of())),
+                new ConversationStore.ToolObservationData(new ToolCallId("call-2"), "mcp_entries", Map.of("isError", false, "result", Map.of()))),
                 ConversationStore.JobUpdate.KEEP_WORKING), NOW)).isInstanceOf(RuntimeException.class);
 
         assertThat(jdbcTemplate.queryForObject("select count(*) from session_message", Integer.class)).isEqualTo(1);
         assertThat(jdbcTemplate.queryForObject("select count(*) from assistant_message", Integer.class)).isZero();
-        assertThat(jdbcTemplate.queryForObject("select count(*) from runtime_message", Integer.class)).isZero();
+        assertThat(jdbcTemplate.queryForObject("select count(*) from assistant_tool_calls", Integer.class)).isZero();
+        assertThat(jdbcTemplate.queryForObject("select count(*) from tool_observation", Integer.class)).isZero();
         assertThat(jdbcTemplate.queryForObject("select next_sequence from conversation_session", Long.class)).isEqualTo(2L);
         assertThat(jdbcTemplate.queryForObject("select status from message_job where message_job_id = ?", String.class,
                 java.util.UUID.fromString(receipt.messageJobId().value()))).isEqualTo("WORKING");
@@ -202,9 +227,9 @@ class PostgresConversationCommitPostgresIT {
         assertThatThrownBy(() -> transaction.executeWithoutResult(status -> {
             jdbcTemplate.update("insert into session_message(session_id, sequence, message_job_id, role, created_at) values (?, 2, ?, 'TOOL', ?)",
                     sessionId, jobId, createdAt);
-            jdbcTemplate.update("insert into tool_observation(session_id, sequence, observation_id, tool_name, input, output) values (?, 2, ?, '   ', '{}', 'output')",
-                    sessionId, UUID.randomUUID());
-        })).isInstanceOf(RuntimeException.class);
+            jdbcTemplate.update("insert into tool_observation(session_id, sequence, tool_call_id, tool_name, output) values (?, 2, 'call-1', '   ', '{}')",
+                    sessionId);
+        })).isInstanceOf(RuntimeException.class).hasStackTraceContaining("tool_observation_tool_name_check");
         assertThatThrownBy(() -> transaction.executeWithoutResult(status -> {
             jdbcTemplate.update("insert into session_message(session_id, sequence, message_job_id, role, created_at) values (?, 2, ?, 'RUNTIME', ?)",
                     sessionId, jobId, createdAt);
@@ -218,6 +243,40 @@ class PostgresConversationCommitPostgresIT {
 
         assertThat(jdbcTemplate.queryForObject("select count(*) from tool_observation", Integer.class)).isZero();
         assertThat(jdbcTemplate.queryForObject("select count(*) from runtime_message", Integer.class)).isZero();
+    }
+
+    @Test
+    void classifies_malformed_persisted_native_call_arrays_as_invalid_history() {
+        List<String> malformedCalls = List.of(
+                "[{\"toolCallId\":null,\"toolName\":\"mcp_lookup\",\"arguments\":{}}]",
+                "[{\"toolCallId\":\"   \",\"toolName\":\"mcp_lookup\",\"arguments\":{}}]",
+                "[{\"toolCallId\":\"call-1\",\"toolName\":\"not portable!\",\"arguments\":{}}]",
+                "[{\"toolCallId\":\"call-1\",\"toolName\":\"mcp_lookup\",\"arguments\":null}]",
+                "[1]");
+        int index = 0;
+        for (String calls : malformedCalls) {
+            index++;
+            MessageReceipt receipt = store().receive(new IncomingMessage("thread-" + index, "alice", "source-" + index, "hello"));
+            MessageWorkClaim claim = store().claimNext("worker-" + index, Duration.ofSeconds(30)).orElseThrow();
+            insertMalformedAssistantCalls(receipt, claim, calls);
+
+            Throwable failure = org.assertj.core.api.Assertions.catchThrowable(() -> store().loadHistory(receipt.sessionId()));
+            assertThat(failure).isInstanceOf(ConversationStoreFailure.class);
+            assertThat(((ConversationStoreFailure) failure).kind()).isEqualTo(ConversationStoreFailure.Kind.INVALID_HISTORY);
+        }
+    }
+
+    private void insertMalformedAssistantCalls(MessageReceipt receipt, MessageWorkClaim claim, String calls) {
+        DataSource dataSource = Objects.requireNonNull(jdbcTemplate.getDataSource(), "JDBC data source must not be null");
+        TransactionTemplate transaction = new TransactionTemplate(new DataSourceTransactionManager(dataSource));
+        UUID sessionId = UUID.fromString(receipt.sessionId().value());
+        UUID jobId = UUID.fromString(claim.messageJobId().value());
+        transaction.executeWithoutResult(status -> {
+            jdbcTemplate.update("insert into session_message(session_id, sequence, message_job_id, role, created_at) values (?, 2, ?, 'ASSISTANT_TOOL_CALLS', ?)",
+                    sessionId, jobId, Timestamp.from(NOW));
+            jdbcTemplate.update("insert into assistant_tool_calls(session_id, sequence, message, calls) values (?, 2, null, ?::jsonb)",
+                    sessionId, calls);
+        });
     }
 
     private void waitForSessionLock() throws InterruptedException {

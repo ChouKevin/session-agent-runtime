@@ -40,6 +40,7 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.sql.SQLRecoverableException;
+import java.sql.ResultSet;
 import java.sql.SQLTimeoutException;
 import java.sql.SQLTransientException;
 import java.time.Clock;
@@ -255,6 +256,8 @@ public final class PostgresConversationStore implements ConversationStore {
         try {
             List<SessionMessage> history = historyTransactionTemplate.execute(status -> loadHistoryInSingleSnapshot(requiredSessionId));
             return Objects.requireNonNull(history, "Conversation history must not be null");
+        } catch (InvalidStoredNativeHistoryException exception) {
+            throw ConversationStoreFailure.invalidHistory(exception);
         } catch (RuntimeException exception) {
             throw translate(exception);
         }
@@ -403,11 +406,7 @@ public final class PostgresConversationStore implements ConversationStore {
                 select message.sequence, message.message_job_id, message.created_at, detail.tool_call_id, detail.tool_name, detail.output
                 from session_message message join tool_observation detail on detail.session_id = message.session_id and detail.sequence = message.sequence
                 where message.session_id = ?
-                """, (resultSet, rowNumber) -> new ToolObservation(new SessionId(sessionId.toString()),
-                new SessionSequence(resultSet.getLong("sequence")), Optional.of(new MessageJobId(
-                resultSet.getObject("message_job_id", UUID.class).toString())), resultSet.getObject("created_at", OffsetDateTime.class).toInstant(),
-                MessageRole.TOOL, new ToolCallId(resultSet.getString("tool_call_id")),
-                resultSet.getString("tool_name"), structuredValue(resultSet.getString("output"))), sessionId);
+                """, (resultSet, rowNumber) -> storedToolObservation(sessionId, resultSet), sessionId);
     }
 
     private List<SessionMessage> loadAssistantToolCallsMessages(UUID sessionId) {
@@ -415,10 +414,30 @@ public final class PostgresConversationStore implements ConversationStore {
                 select message.sequence, message.message_job_id, message.created_at, detail.message, detail.calls
                 from session_message message join assistant_tool_calls detail on detail.session_id = message.session_id and detail.sequence = message.sequence
                 where message.session_id = ?
-                """, (resultSet, rowNumber) -> new AssistantToolCallsMessage(new SessionId(sessionId.toString()),
-                new SessionSequence(resultSet.getLong("sequence")), Optional.of(new MessageJobId(
-                resultSet.getObject("message_job_id", UUID.class).toString())), resultSet.getObject("created_at", OffsetDateTime.class).toInstant(),
-                MessageRole.ASSISTANT_TOOL_CALLS, Optional.ofNullable(resultSet.getString("message")), toolRequests(resultSet.getString("calls"))), sessionId);
+                """, (resultSet, rowNumber) -> storedAssistantToolCalls(sessionId, resultSet), sessionId);
+    }
+
+    private ToolObservation storedToolObservation(UUID sessionId, ResultSet resultSet) throws java.sql.SQLException {
+        try {
+            return new ToolObservation(new SessionId(sessionId.toString()),
+                    new SessionSequence(resultSet.getLong("sequence")), Optional.of(new MessageJobId(
+                    resultSet.getObject("message_job_id", UUID.class).toString())), resultSet.getObject("created_at", OffsetDateTime.class).toInstant(),
+                    MessageRole.TOOL, new ToolCallId(resultSet.getString("tool_call_id")),
+                    resultSet.getString("tool_name"), structuredValue(resultSet.getString("output")));
+        } catch (IllegalArgumentException | NullPointerException exception) {
+            throw new InvalidStoredNativeHistoryException(exception);
+        }
+    }
+
+    private AssistantToolCallsMessage storedAssistantToolCalls(UUID sessionId, ResultSet resultSet) throws java.sql.SQLException {
+        try {
+            return new AssistantToolCallsMessage(new SessionId(sessionId.toString()),
+                    new SessionSequence(resultSet.getLong("sequence")), Optional.of(new MessageJobId(
+                    resultSet.getObject("message_job_id", UUID.class).toString())), resultSet.getObject("created_at", OffsetDateTime.class).toInstant(),
+                    MessageRole.ASSISTANT_TOOL_CALLS, Optional.ofNullable(resultSet.getString("message")), toolRequests(resultSet.getString("calls")));
+        } catch (IllegalArgumentException | NullPointerException exception) {
+            throw new InvalidStoredNativeHistoryException(exception);
+        }
     }
 
     private List<SessionMessage> loadAssistantMessages(UUID sessionId) {
@@ -517,8 +536,8 @@ public final class PostgresConversationStore implements ConversationStore {
         try {
             List<StoredToolCall> calls = objectMapper.readValue(value, new TypeReference<List<StoredToolCall>>() { });
             return calls.stream().map(call -> new ToolRequest(new ToolCallId(call.toolCallId()), new ToolName(call.toolName()), call.arguments())).toList();
-        } catch (JsonProcessingException exception) {
-            throw new IllegalArgumentException("Stored assistant tool calls are invalid", exception);
+        } catch (JsonProcessingException | IllegalArgumentException | NullPointerException exception) {
+            throw new InvalidStoredNativeHistoryException(exception);
         }
     }
 
@@ -559,5 +578,12 @@ public final class PostgresConversationStore implements ConversationStore {
     }
 
     private record StoredToolCall(String toolCallId, String toolName, java.util.Map<String, Object> arguments) {
+    }
+
+    private static final class InvalidStoredNativeHistoryException extends RuntimeException {
+
+        private InvalidStoredNativeHistoryException(Throwable cause) {
+            super("Stored native conversation history is invalid", cause);
+        }
     }
 }

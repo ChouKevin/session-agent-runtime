@@ -94,6 +94,21 @@ class PostgresMessageJobPostgresIT {
     }
 
     @Test
+    void consumes_a_reserved_ordinal_across_reclaim_while_leaving_uncommitted_tool_work_replayable() {
+        ConversationStore store = store();
+        MessageReceipt receipt = store.receive(new IncomingMessage("thread", "alice", "source", "hello"));
+        MessageWorkClaim original = store.claimNext("worker", Duration.ofSeconds(30)).orElseThrow();
+
+        assertThat(store.reserveModelCall(original, 2, NOW)).hasValue(1);
+        jdbcTemplate.update("update message_job set locked_until = clock_timestamp() - interval '1 millisecond' where message_job_id = ?",
+                UUID.fromString(original.messageJobId().value()));
+
+        MessageWorkClaim recovered = store.claimNext("recovery-worker", Duration.ofSeconds(30)).orElseThrow();
+        assertThat(store.loadHistory(receipt.sessionId())).extracting(message -> message.sequence().value()).containsExactly(1L);
+        assertThat(store.reserveModelCall(recovered, 2, NOW)).hasValue(2);
+    }
+
+    @Test
     void rejects_an_aba_stale_claim_without_allocating_or_appending_a_message() {
         ConversationStore store = store();
         MessageReceipt receipt = store.receive(new IncomingMessage("thread", "alice", "source", "hello"));
