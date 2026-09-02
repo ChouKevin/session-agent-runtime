@@ -9,6 +9,10 @@ import java.util.Map;
 
 public record ToolDefinition(ToolName name, String description, Map<String, Object> inputSchema) {
 
+    public static ToolDefinition fromExposedName(String exposedName, String description, Map<String, Object> inputSchema) {
+        return new ToolDefinition(new ToolName(exposedName), description, inputSchema);
+    }
+
     public ToolDefinition {
         Assert.notNull(name, "Tool name must not be null");
         Assert.hasText(description, "Tool description must not be blank");

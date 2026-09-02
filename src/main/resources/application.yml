@@ -1,6 +1,12 @@
 server:
   address: 127.0.0.1
 session-agent:
+  mcp:
+    refresh-interval: ${SESSION_AGENT_MCP_REFRESH_INTERVAL:60s}
+    request-timeout: ${SESSION_AGENT_MCP_REQUEST_TIMEOUT:30s}
+    initial-backoff: ${SESSION_AGENT_MCP_INITIAL_BACKOFF:1s}
+    maximum-backoff: ${SESSION_AGENT_MCP_MAXIMUM_BACKOFF:60s}
+    shutdown-timeout: ${SESSION_AGENT_MCP_SHUTDOWN_TIMEOUT:5s}
   semantic:
     base-url: ${SEMANTIC_BASE_URL:http://localhost:8080}
     api-token: ${SEMANTIC_API_TOKEN}

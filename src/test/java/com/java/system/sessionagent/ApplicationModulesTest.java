@@ -18,7 +18,7 @@ class ApplicationModulesTest {
         ApplicationModules modules = ApplicationModules.of(SessionAgentRuntimeApplication.class);
 
         assertEquals(
-                Set.of("tool", "conversation", "semantic", "model", "storage", "web", "worker", "bootstrap"),
+                Set.of("tool", "conversation", "semantic", "mcp", "model", "storage", "web", "worker", "bootstrap"),
                 modules.stream().map(module -> module.getIdentifier().toString()).collect(Collectors.toSet()));
         modules.verify();
     }
@@ -32,6 +32,7 @@ class ApplicationModulesTest {
                         "tool", Set.of(),
                         "conversation", Set.of("tool"),
                         "semantic", Set.of("tool"),
+                        "mcp", Set.of("tool"),
                         "model", Set.of("conversation", "tool"),
                         "storage", Set.of("conversation"),
                         "web", Set.of("conversation"),
@@ -47,6 +48,7 @@ class ApplicationModulesTest {
     void exposesOnlyToolContractsRequiredByConversation() {
         ApplicationModules modules = ApplicationModules.of(SessionAgentRuntimeApplication.class);
         ApplicationModule conversation = modules.getModuleByName("conversation").orElseThrow();
+        ApplicationModule mcp = modules.getModuleByName("mcp").orElseThrow();
         ApplicationModule tool = modules.getModuleByName("tool").orElseThrow();
 
         assertEquals(
@@ -56,7 +58,13 @@ class ApplicationModulesTest {
                                 + " :: " + dependency.getTargetNamedInterface().getName())
                         .collect(Collectors.toSet()));
         assertEquals(
-                Set.of("domain", "application", "json"),
+                Set.of("tool :: port"),
+                mcp.getAllowedDependencies(modules).stream()
+                        .map(dependency -> dependency.getTargetModule().getIdentifier()
+                                + " :: " + dependency.getTargetNamedInterface().getName())
+                        .collect(Collectors.toSet()));
+        assertEquals(
+                Set.of("domain", "application", "json", "port"),
                 tool.getNamedInterfaces().stream()
                         .filter(namedInterface -> !namedInterface.isUnnamed())
                         .map(namedInterface -> namedInterface.getName())
