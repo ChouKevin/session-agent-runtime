@@ -2,6 +2,8 @@ package com.java.system.sessionagent.mcp;
 
 import io.modelcontextprotocol.spec.McpSchema;
 import org.junit.jupiter.api.Test;
+import org.mockito.Mockito;
+import org.springframework.scheduling.TaskScheduler;
 
 import java.util.List;
 import java.util.Map;
@@ -12,7 +14,11 @@ class McpConnectionsEndpointTest {
 
     @Test
     void exposes_only_safe_connection_diagnostics_without_configuration_secrets() {
-        McpConnectionManager manager = new McpConnectionManager();
+        McpConnectionManager manager = new McpConnectionManager(
+                new McpConnectionProperties(Map.of(), null, null, null, null, null), connection -> {
+                    throw new IllegalStateException("MCP lifecycle is not configured");
+                }, Mockito.mock(TaskScheduler.class), java.time.Clock.systemUTC(),
+                new com.fasterxml.jackson.databind.ObjectMapper(), Runnable::run);
         manager.publish("semantic", new EmptyClient(), List.of(new McpSchema.Tool(
                 "search_code", null, "Search", Map.of("type", "object"), Map.of(), null, Map.of())));
         McpConnectionsEndpoint endpoint = new McpConnectionsEndpoint(manager);

@@ -2,6 +2,7 @@ package com.java.system.sessionagent.mcp;
 
 import com.java.system.sessionagent.tool.domain.ToolName;
 import com.java.system.sessionagent.tool.port.ToolSnapshot;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.modelcontextprotocol.spec.McpSchema;
 import org.junit.jupiter.api.Test;
 
@@ -15,11 +16,13 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 class McpToolCatalogTest {
 
+    private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
+
     @Test
     void composes_names_but_routes_with_the_retained_connection_and_raw_name() {
         RecordingClient client = new RecordingClient();
-        McpConnectionManager manager = new McpConnectionManager();
-        McpToolCatalog catalog = new McpToolCatalog(manager);
+        McpConnectionManager manager = manager();
+        McpToolCatalog catalog = new McpToolCatalog(manager, OBJECT_MAPPER);
         manager.publish("semantic", client, List.of(tool("search_code", "Search code")));
 
         ToolSnapshot snapshot = catalog.snapshot();
@@ -31,7 +34,7 @@ class McpToolCatalogTest {
 
     @Test
     void exposes_no_bindings_when_no_connections_have_been_published() {
-        McpToolCatalog catalog = new McpToolCatalog(new McpConnectionManager());
+        McpToolCatalog catalog = new McpToolCatalog(manager(), OBJECT_MAPPER);
 
         assertThat(catalog.snapshot().definitions()).isEmpty();
     }
@@ -40,8 +43,8 @@ class McpToolCatalogTest {
     void snapshot_retains_the_source_client_after_the_manager_replaces_its_connection_view() {
         RecordingClient originalClient = new RecordingClient();
         RecordingClient replacementClient = new RecordingClient();
-        McpConnectionManager manager = new McpConnectionManager();
-        McpToolCatalog catalog = new McpToolCatalog(manager);
+        McpConnectionManager manager = manager();
+        McpToolCatalog catalog = new McpToolCatalog(manager, OBJECT_MAPPER);
         manager.publish("semantic", originalClient, List.of(tool("search_code", "Search code")));
         ToolSnapshot originalSnapshot = catalog.snapshot();
         manager.publish("semantic", replacementClient, List.of(tool("search_code", "Search code")));
@@ -57,7 +60,7 @@ class McpToolCatalogTest {
     void does_not_degrade_a_replacement_when_an_older_view_rejected_a_binding() {
         RecordingClient originalClient = new RecordingClient();
         RecordingClient replacementClient = new RecordingClient();
-        McpConnectionManager manager = new McpConnectionManager();
+        McpConnectionManager manager = manager();
         manager.publish("semantic", originalClient, List.of(tool("not.valid", "Invalid")));
         McpConnectionManager.View rejectedView = manager.view();
         manager.publish("semantic", replacementClient, List.of(tool("search_code", "Search code")));
@@ -70,8 +73,8 @@ class McpToolCatalogTest {
 
     @Test
     void rejects_both_ambiguous_bindings_without_affecting_unrelated_tools() {
-        McpConnectionManager manager = new McpConnectionManager();
-        McpToolCatalog catalog = new McpToolCatalog(manager);
+        McpConnectionManager manager = manager();
+        McpToolCatalog catalog = new McpToolCatalog(manager, OBJECT_MAPPER);
         manager.publish("semantic", new RecordingClient(), List.of(
                 tool("search_code", "Search code"),
                 tool("search_code", "Search code again"),
@@ -91,8 +94,8 @@ class McpToolCatalogTest {
                         true, URI.create("https://mcp.example/custom/mcp"),
                         Map.of("Authorization", "Bearer secret-token"))),
                 null, null, null, null, null);
-        McpConnectionManager manager = new McpConnectionManager(properties);
-        McpToolCatalog catalog = new McpToolCatalog(manager);
+        McpConnectionManager manager = manager(properties);
+        McpToolCatalog catalog = new McpToolCatalog(manager, OBJECT_MAPPER);
         manager.publish("semantic", new RecordingClient(), List.of(
                 tool("not.valid", "Invalid"),
                 tool("a".repeat(60), "Too long")));
@@ -107,8 +110,8 @@ class McpToolCatalogTest {
 
     @Test
     void preserves_multiple_independent_connections_when_one_has_no_tools() {
-        McpConnectionManager manager = new McpConnectionManager();
-        McpToolCatalog catalog = new McpToolCatalog(manager);
+        McpConnectionManager manager = manager();
+        McpToolCatalog catalog = new McpToolCatalog(manager, OBJECT_MAPPER);
         manager.publish("empty", new RecordingClient(), List.of());
         manager.publish("semantic", new RecordingClient(), List.of(tool("search_code", "Search code")));
         manager.publish("billing", new RecordingClient(), List.of(tool("lookup_invoice", "Lookup invoice")));
@@ -120,8 +123,8 @@ class McpToolCatalogTest {
 
     @Test
     void uses_the_raw_name_when_the_mcp_description_is_absent() {
-        McpConnectionManager manager = new McpConnectionManager();
-        McpToolCatalog catalog = new McpToolCatalog(manager);
+        McpConnectionManager manager = manager();
+        McpToolCatalog catalog = new McpToolCatalog(manager, OBJECT_MAPPER);
         manager.publish("semantic", new RecordingClient(), List.of(tool("get_fact", null)));
 
         assertThat(catalog.snapshot().definitions()).singleElement()
@@ -140,13 +143,38 @@ class McpToolCatalogTest {
                 McpConnectionState.STOPPED);
     }
 
+    @Test
+    void converts_an_unclassified_tool_runtime_failure_to_a_safe_protocol_output() {
+        RecordingClient client = new RecordingClient();
+        client.failToolCall();
+        McpConnectionManager manager = manager();
+        McpToolCatalog catalog = new McpToolCatalog(manager, OBJECT_MAPPER);
+        manager.publish("semantic", client, List.of(tool("search_code", "Search code")));
+
+        assertThat(catalog.snapshot().invoke(new ToolName("semantic_search_code"), Map.of("query", "fees")).asStructuredValue())
+                .isEqualTo(Map.of(
+                        "isError", true,
+                        "result", Map.of("code", "TOOL_PROTOCOL_ERROR", "message", "The tool returned an invalid response.")));
+    }
+
     private static McpSchema.Tool tool(String name, String description) {
         return new McpSchema.Tool(name, null, description, Map.of("type", "object"), Map.of(), null, Map.of());
+    }
+
+    private static McpConnectionManager manager() {
+        return manager(new McpConnectionProperties(Map.of(), null, null, null, null, null));
+    }
+
+    private static McpConnectionManager manager(McpConnectionProperties properties) {
+        return new McpConnectionManager(properties, connection -> {
+            throw new IllegalStateException("MCP lifecycle is not configured");
+        }, new ManualTaskScheduler(), java.time.Clock.systemUTC(), OBJECT_MAPPER, Runnable::run);
     }
 
     private static final class RecordingClient implements McpConnectionClient {
 
         private final AtomicReference<McpSchema.CallToolRequest> lastRequest = new AtomicReference<>();
+        private boolean toolCallFails;
 
         @Override
         public McpSchema.InitializeResult initialize() {
@@ -160,6 +188,9 @@ class McpToolCatalogTest {
 
         @Override
         public McpSchema.CallToolResult callTool(McpSchema.CallToolRequest request) {
+            if (toolCallFails) {
+                throw new IllegalStateException("https://mcp.example/custom/mcp Authorization: Bearer secret-token");
+            }
             lastRequest.set(request);
             return new McpSchema.CallToolResult(List.of(), false, null, Map.of());
         }
@@ -168,8 +199,47 @@ class McpToolCatalogTest {
             return lastRequest.get();
         }
 
+        private void failToolCall() {
+            toolCallFails = true;
+        }
+
         @Override
         public void close() {
+        }
+    }
+
+    private static final class ManualTaskScheduler implements org.springframework.scheduling.TaskScheduler {
+
+        @Override
+        public java.util.concurrent.ScheduledFuture<?> schedule(Runnable task, org.springframework.scheduling.Trigger trigger) {
+            throw new UnsupportedOperationException("MCP lifecycle is not configured");
+        }
+
+        @Override
+        public java.util.concurrent.ScheduledFuture<?> schedule(Runnable task, java.time.Instant startTime) {
+            throw new UnsupportedOperationException("MCP lifecycle is not configured");
+        }
+
+        @Override
+        public java.util.concurrent.ScheduledFuture<?> scheduleAtFixedRate(
+                Runnable task, java.time.Instant startTime, java.time.Duration period) {
+            throw new UnsupportedOperationException("MCP lifecycle is not configured");
+        }
+
+        @Override
+        public java.util.concurrent.ScheduledFuture<?> scheduleAtFixedRate(Runnable task, java.time.Duration period) {
+            throw new UnsupportedOperationException("MCP lifecycle is not configured");
+        }
+
+        @Override
+        public java.util.concurrent.ScheduledFuture<?> scheduleWithFixedDelay(
+                Runnable task, java.time.Instant startTime, java.time.Duration delay) {
+            throw new UnsupportedOperationException("MCP lifecycle is not configured");
+        }
+
+        @Override
+        public java.util.concurrent.ScheduledFuture<?> scheduleWithFixedDelay(Runnable task, java.time.Duration delay) {
+            throw new UnsupportedOperationException("MCP lifecycle is not configured");
         }
     }
 }

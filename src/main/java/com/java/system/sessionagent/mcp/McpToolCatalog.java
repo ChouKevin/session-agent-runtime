@@ -27,10 +27,6 @@ public final class McpToolCatalog implements ToolCatalog {
     private final McpConnectionManager connectionManager;
     private final McpToolResultMapper resultMapper;
 
-    public McpToolCatalog(McpConnectionManager connectionManager) {
-        this(connectionManager, new ObjectMapper());
-    }
-
     public McpToolCatalog(McpConnectionManager connectionManager, ObjectMapper objectMapper) {
         Assert.notNull(connectionManager, "MCP connection manager must not be null");
         Assert.notNull(objectMapper, "Object mapper must not be null");
@@ -107,7 +103,7 @@ public final class McpToolCatalog implements ToolCatalog {
             Optional<McpSchema.CallToolResult> result = Optional.ofNullable(route.client().callTool(request));
             return result.map(resultMapper::map).orElseGet(resultMapper::protocolFailure);
         } catch (RuntimeException exception) {
-            return resultMapper.mapRuntimeFailure(exception).orElseThrow(() -> exception);
+            return resultMapper.mapRuntimeFailure(exception).orElseGet(resultMapper::protocolFailure);
         }
     }
 

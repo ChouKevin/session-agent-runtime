@@ -1,6 +1,7 @@
 package com.java.system.sessionagent.mcp;
 
 import io.modelcontextprotocol.spec.McpSchema;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.springframework.scheduling.TaskScheduler;
 import org.springframework.scheduling.Trigger;
@@ -16,6 +17,8 @@ import java.util.Map;
 import java.util.concurrent.Delayed;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -104,6 +107,61 @@ class McpConnectionManagerTest {
         assertThat(manager.diagnostic("semantic").state()).isEqualTo(McpConnectionState.STOPPED);
     }
 
+    @Test
+    void closes_an_unpublished_client_when_the_initial_tool_listing_fails() {
+        ControlledTaskScheduler scheduler = new ControlledTaskScheduler();
+        RecordingClient client = new RecordingClient(List.of(tool("search_code")));
+        client.failNextList();
+        McpConnectionManager manager = manager(Map.of("semantic", connection()), configuredConnection -> client, scheduler);
+
+        manager.start();
+        scheduler.runDueTasks();
+
+        assertThat(client.closed()).isTrue();
+        assertThat(manager.diagnostic("semantic").state()).isEqualTo(McpConnectionState.UNAVAILABLE);
+    }
+
+    @Test
+    void closes_a_client_that_finishes_initial_listing_after_shutdown() throws InterruptedException {
+        ControlledTaskScheduler scheduler = new ControlledTaskScheduler();
+        BlockingListClient client = new BlockingListClient(List.of(tool("search_code")));
+        McpConnectionManager manager = manager(Map.of("semantic", connection()), configuredConnection -> client, scheduler);
+
+        manager.start();
+        Thread attemptThread = new Thread(scheduler::runDueTasks);
+        attemptThread.start();
+        assertThat(client.listingStarted.await(1, TimeUnit.SECONDS)).isTrue();
+        manager.stop();
+        client.releaseListing.countDown();
+        attemptThread.join(1_000);
+
+        assertThat(client.closed()).isTrue();
+        assertThat(manager.diagnostic("semantic").state()).isEqualTo(McpConnectionState.STOPPED);
+    }
+
+    @Test
+    void offloads_slow_connection_lifecycle_work_without_delaying_another_connection() throws InterruptedException {
+        ControlledTaskScheduler scheduler = new ControlledTaskScheduler();
+        BlockingListClient slowClient = new BlockingListClient(List.of(tool("search_code")));
+        RecordingClient availableClient = new RecordingClient(List.of(tool("lookup_invoice")));
+        Executor concurrentExecutor = command -> Thread.startVirtualThread(command);
+        McpConnectionManager manager = manager(Map.of("slow", slowConnection(), "fast", connection()), configuredConnection -> {
+            if (configuredConnection.url().getHost().equals("slow.example")) {
+                return slowClient;
+            }
+            return availableClient;
+        }, scheduler, Duration.ofSeconds(1), Duration.ofSeconds(60), concurrentExecutor);
+
+        manager.start();
+        scheduler.runDueTasks();
+
+        assertThat(slowClient.listingStarted.await(1, TimeUnit.SECONDS)).isTrue();
+        assertThat(availableClient.listingCompleted.await(1, TimeUnit.SECONDS)).isTrue();
+        assertThat(manager.diagnostic("fast").state()).isEqualTo(McpConnectionState.AVAILABLE);
+        slowClient.releaseListing.countDown();
+        manager.stop();
+    }
+
     private static McpConnectionManager manager(
             Map<String, McpConnectionProperties.Connection> connections,
             McpConnectionClientFactory factory,
@@ -120,7 +178,20 @@ class McpConnectionManagerTest {
         McpConnectionProperties properties = new McpConnectionProperties(connections, Duration.ofSeconds(60),
                 Duration.ofSeconds(1), initialBackoff, maximumBackoff, Duration.ofSeconds(5));
         return new McpConnectionManager(properties, factory, scheduler,
-                Clock.fixed(Instant.parse("2026-09-03T00:00:00Z"), ZoneOffset.UTC));
+                Clock.fixed(Instant.parse("2026-09-03T00:00:00Z"), ZoneOffset.UTC), new ObjectMapper(), Runnable::run);
+    }
+
+    private static McpConnectionManager manager(
+            Map<String, McpConnectionProperties.Connection> connections,
+            McpConnectionClientFactory factory,
+            ControlledTaskScheduler scheduler,
+            Duration initialBackoff,
+            Duration maximumBackoff,
+            Executor executor) {
+        McpConnectionProperties properties = new McpConnectionProperties(connections, Duration.ofSeconds(60),
+                Duration.ofSeconds(1), initialBackoff, maximumBackoff, Duration.ofSeconds(5));
+        return new McpConnectionManager(properties, factory, scheduler,
+                Clock.fixed(Instant.parse("2026-09-03T00:00:00Z"), ZoneOffset.UTC), new ObjectMapper(), executor);
     }
 
     private static McpConnectionProperties.Connection connection() {
@@ -131,17 +202,22 @@ class McpConnectionManagerTest {
         return new McpConnectionProperties.Connection(true, URI.create("https://broken.example/custom/mcp"), Map.of());
     }
 
+    private static McpConnectionProperties.Connection slowConnection() {
+        return new McpConnectionProperties.Connection(true, URI.create("https://slow.example/custom/mcp"), Map.of());
+    }
+
     private static McpSchema.Tool tool(String name) {
         return new McpSchema.Tool(name, null, name, Map.of("type", "object"), Map.of(), null, Map.of());
     }
 
-    private static final class RecordingClient implements McpConnectionClient {
+    private static class RecordingClient implements McpConnectionClient {
 
         private final List<McpSchema.Tool> tools;
         private final AtomicBoolean failNextList = new AtomicBoolean();
         private final AtomicBoolean closed = new AtomicBoolean();
+        private final CountDownLatch listingCompleted = new CountDownLatch(1);
 
-        private RecordingClient(List<McpSchema.Tool> tools) {
+        protected RecordingClient(List<McpSchema.Tool> tools) {
             this.tools = tools;
         }
 
@@ -155,6 +231,7 @@ class McpConnectionManagerTest {
             if (failNextList.compareAndSet(true, false)) {
                 throw new IllegalStateException("connection lost");
             }
+            listingCompleted.countDown();
             return new McpSchema.ListToolsResult(tools, null);
         }
 
@@ -172,8 +249,30 @@ class McpConnectionManagerTest {
             failNextList.set(true);
         }
 
-        private boolean closed() {
+        protected boolean closed() {
             return closed.get();
+        }
+    }
+
+    private static final class BlockingListClient extends RecordingClient {
+
+        private final CountDownLatch listingStarted = new CountDownLatch(1);
+        private final CountDownLatch releaseListing = new CountDownLatch(1);
+
+        private BlockingListClient(List<McpSchema.Tool> tools) {
+            super(tools);
+        }
+
+        @Override
+        public McpSchema.ListToolsResult listTools() {
+            listingStarted.countDown();
+            try {
+                releaseListing.await();
+            } catch (InterruptedException exception) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException("listing interrupted", exception);
+            }
+            return super.listTools();
         }
     }
 

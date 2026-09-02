@@ -17,24 +17,43 @@ interface McpConnectionClientFactory {
 
     static McpConnectionClientFactory sdk(McpConnectionProperties properties) {
         Assert.notNull(properties, "MCP connection properties must not be null");
-        return connection -> createSdkClient(connection, properties);
+        return sdk(properties, transport -> {
+            McpSyncClient client = McpClient.sync(transport)
+                    .requestTimeout(properties.requestTimeout())
+                    .initializationTimeout(properties.requestTimeout())
+                    .build();
+            return new SdkClientAdapter(client);
+        });
+    }
+
+    static McpConnectionClientFactory sdk(McpConnectionProperties properties, SdkClientFactory clientFactory) {
+        Assert.notNull(properties, "MCP connection properties must not be null");
+        Assert.notNull(clientFactory, "MCP SDK client factory must not be null");
+        return connection -> createSdkClient(connection, properties, clientFactory);
     }
 
     private static McpConnectionClient createSdkClient(
             McpConnectionProperties.Connection connection,
-            McpConnectionProperties properties) {
+            McpConnectionProperties properties,
+            SdkClientFactory clientFactory) {
         Endpoint endpoint = splitEndpoint(connection.url());
         HttpClientStreamableHttpTransport transport = HttpClientStreamableHttpTransport.builder(endpoint.origin())
                 .endpoint(endpoint.pathAndQuery())
                 .connectTimeout(properties.requestTimeout())
                 .httpRequestCustomizer((request, method, requestUri, body, context) -> applyHeaders(request, connection.headers()))
                 .build();
-        McpSyncClient client = McpClient.sync(transport)
-                .requestTimeout(properties.requestTimeout())
-                .initializationTimeout(properties.requestTimeout())
-                .build();
-        client.initialize();
-        return new SdkConnectionClient(client);
+        SdkClient client = clientFactory.create(transport);
+        try {
+            client.initialize();
+            return new SdkConnectionClient(client);
+        } catch (RuntimeException exception) {
+            try {
+                client.close();
+            } catch (RuntimeException closeFailure) {
+                exception.addSuppressed(closeFailure);
+            }
+            throw exception;
+        }
     }
 
     static Endpoint splitEndpoint(URI configuredUrl) {
@@ -63,11 +82,57 @@ interface McpConnectionClientFactory {
     record Endpoint(String origin, String pathAndQuery) {
     }
 
-    final class SdkConnectionClient implements McpConnectionClient {
+    @FunctionalInterface
+    interface SdkClientFactory {
+
+        SdkClient create(HttpClientStreamableHttpTransport transport);
+    }
+
+    interface SdkClient {
+
+        McpSchema.InitializeResult initialize();
+
+        McpSchema.ListToolsResult listTools();
+
+        McpSchema.CallToolResult callTool(McpSchema.CallToolRequest request);
+
+        void close();
+    }
+
+    final class SdkClientAdapter implements SdkClient {
 
         private final McpSyncClient client;
 
-        private SdkConnectionClient(McpSyncClient client) {
+        private SdkClientAdapter(McpSyncClient client) {
+            this.client = client;
+        }
+
+        @Override
+        public McpSchema.InitializeResult initialize() {
+            return client.initialize();
+        }
+
+        @Override
+        public McpSchema.ListToolsResult listTools() {
+            return client.listTools();
+        }
+
+        @Override
+        public McpSchema.CallToolResult callTool(McpSchema.CallToolRequest request) {
+            return client.callTool(request);
+        }
+
+        @Override
+        public void close() {
+            client.close();
+        }
+    }
+
+    final class SdkConnectionClient implements McpConnectionClient {
+
+        private final SdkClient client;
+
+        private SdkConnectionClient(SdkClient client) {
             this.client = client;
         }
 

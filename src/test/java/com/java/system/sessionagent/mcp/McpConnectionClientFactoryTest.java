@@ -6,6 +6,7 @@ import java.net.URI;
 import java.net.http.HttpRequest;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException;
@@ -36,5 +37,40 @@ class McpConnectionClientFactoryTest {
 
         assertThat(request.build().headers().map()).containsEntry("Authorization", List.of("Bearer token"))
                 .containsEntry("X-Tenant", List.of("payments"));
+    }
+
+    @Test
+    void closes_the_sdk_client_when_initialization_fails() {
+        AtomicBoolean closed = new AtomicBoolean();
+        McpConnectionProperties properties = new McpConnectionProperties(Map.of(), null, null, null, null, null);
+        McpConnectionClientFactory factory = McpConnectionClientFactory.sdk(properties, transport -> new McpConnectionClientFactory.SdkClient() {
+
+            @Override
+            public io.modelcontextprotocol.spec.McpSchema.InitializeResult initialize() {
+                throw new IllegalStateException("initialization failed");
+            }
+
+            @Override
+            public io.modelcontextprotocol.spec.McpSchema.ListToolsResult listTools() {
+                throw new UnsupportedOperationException();
+            }
+
+            @Override
+            public io.modelcontextprotocol.spec.McpSchema.CallToolResult callTool(
+                    io.modelcontextprotocol.spec.McpSchema.CallToolRequest request) {
+                throw new UnsupportedOperationException();
+            }
+
+            @Override
+            public void close() {
+                closed.set(true);
+            }
+        });
+
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> factory.create(
+                new McpConnectionProperties.Connection(true, URI.create("https://mcp.example/custom/mcp"), Map.of())))
+                .isInstanceOf(IllegalStateException.class);
+
+        assertThat(closed.get()).isTrue();
     }
 }
