@@ -4,7 +4,7 @@ Session Agent Runtime is a standalone, provider-neutral conversation service. It
 
 ## Conversation loop
 
-One submitted user message starts one conversation turn. A turn can make one or more model calls. A model call either returns assistant text or requests tools; tools run sequentially in the model-provided order and their observations are supplied to the next model call.
+One submitted user message starts one conversation turn. A turn can make one or more model calls. A model call either returns assistant text or requests tools. The runtime executes every requested call sequentially in the model-provided order, then atomically appends one `ASSISTANT_TOOL_CALLS` event followed by all paired `TOOL` observations in one batch; those observations are supplied to the next model call.
 
 ```text
 load complete ordered session history and available tools
@@ -15,11 +15,11 @@ load complete ordered session history and available tools
               |                     |
            direct text          tool requests
               |                     |
-     append assistant text   append ASSISTANT_TOOL_CALLS
-     complete the job        run requests in order
-                                    |
-                                    v
-                         append paired TOOL observations
+     append assistant text   run every request in order
+     complete the job                    |
+                                          v
+                         atomically append ASSISTANT_TOOL_CALLS
+                         followed by paired TOOL observations
                                     |
                                     v
                              call model again
