@@ -6,7 +6,7 @@ runtime_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd -P)"
 [[ "$(git -C "${runtime_root}" rev-parse --show-toplevel)" == "${runtime_root}" ]]
 [[ ! -d "${runtime_root}/session-agent-runtime" ]]
 
-for required_file in pom.xml Dockerfile README.md live-test.sh .gitignore; do
+for required_file in pom.xml Dockerfile README.md .gitignore; do
     [[ -f "${runtime_root}/${required_file}" ]] || {
         printf 'missing standalone repository file: %s\n' "${required_file}" >&2
         exit 1

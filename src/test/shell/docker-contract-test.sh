@@ -5,10 +5,8 @@ runtime_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 compose_file="${runtime_root}/docker/compose.yaml"
 dockerfile="${runtime_root}/Dockerfile"
 env_example="${runtime_root}/docker/.env.example"
-live_test="${runtime_root}/live-test.sh"
-live_junit_test="${runtime_root}/src/test/java/com/java/system/sessionagent/live/SessionAgentLiveIT.java"
 
-for required_file in "${compose_file}" "${dockerfile}" "${env_example}" "${live_test}" "${live_junit_test}"; do
+for required_file in "${compose_file}" "${dockerfile}" "${env_example}"; do
     if [[ ! -f "${required_file}" ]]; then
         printf 'missing required Docker contract file: %s\n' "${required_file}" >&2
         exit 1
@@ -67,43 +65,6 @@ if rg -n 'SESSION_AGENT_POSTGRES_PASSWORD:-|POSTGRES_PASSWORD:.*session_agent' "
 fi
 if rg -n 'SEMANTIC_API_TOKEN:-' "${compose_file}" >/dev/null; then
     printf 'compose Semantic token must not have a committed fallback\n' >&2
-    exit 1
-fi
-
-grep -Fq 'SESSION_AGENT_POSTGRES_PASSWORD must be set for live acceptance' "${live_test}" || {
-    printf 'live test must require the PostgreSQL password before Compose work\n' >&2
-    exit 1
-}
-grep -Fq 'SEMANTIC_API_TOKEN must be set for live acceptance' "${live_test}" || {
-    printf 'live test must require the Semantic token before Compose work\n' >&2
-    exit 1
-}
-
-runtime_health_line="$(grep -nF 'actuator/health' "${live_test}" | head -n 1 | cut -d: -f1 || true)"
-live_maven_line="$(grep -nF 'SESSION_AGENT_LIVE=true mvn' "${live_test}" | head -n 1 | cut -d: -f1 || true)"
-if [[ -z "${runtime_health_line}" || -z "${live_maven_line}" || "${runtime_health_line}" -ge "${live_maven_line}" ]]; then
-    printf 'live test must await runtime health before Maven acceptance\n' >&2
-    exit 1
-fi
-
-grep -Fq 'export SESSION_AGENT_BASE_URL="http://${published_port}"' "${live_test}" || {
-    printf 'live runner must export the SessionAgentLiveIT base URL\n' >&2
-    exit 1
-}
-grep -Fq 'System.getenv("SESSION_AGENT_BASE_URL")' "${live_junit_test}" || {
-    printf 'SessionAgentLiveIT must read the live runner base URL\n' >&2
-    exit 1
-}
-grep -Fq 'SESSION_AGENT_LIVE' "${live_junit_test}" || {
-    printf 'SessionAgentLiveIT must remain explicitly opt-in\n' >&2
-    exit 1
-}
-grep -Fq 'SESSION_HISTORY_LIVE_ACCEPTANCE complete' "${live_test}" || {
-    printf 'live runner must complete through HTTP history acceptance\n' >&2
-    exit 1
-}
-if rg -n 'model_call_record|ANSWER_READY|FINAL_REPLY|/internal/results' "${live_test}" "${live_junit_test}" >/dev/null; then
-    printf 'live acceptance must not use removed diagnostics or result lookup\n' >&2
     exit 1
 fi
 

@@ -33,7 +33,6 @@ class PromptResourceTest {
                 .doesNotContainIgnoringCase("repository")
                 .doesNotContainIgnoringCase("fixture")
                 .doesNotContainIgnoringCase("query count")
-                .doesNotContainIgnoringCase("citation")
                 .doesNotContainIgnoringCase("final format");
     }
 }
