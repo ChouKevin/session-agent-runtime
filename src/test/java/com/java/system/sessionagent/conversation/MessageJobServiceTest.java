@@ -38,6 +38,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
@@ -204,8 +205,8 @@ class MessageJobServiceTest {
         ToolCatalog catalog = () -> new ToolSnapshot(List.of(binding("first", supplied -> {
             Map<?, ?> filters = (Map<?, ?>) supplied.get("filters");
             List<?> paths = (List<?>) supplied.get("paths");
-            filters.clear();
-            paths.clear();
+            assertThatThrownBy(filters::clear).isInstanceOf(UnsupportedOperationException.class);
+            assertThatThrownBy(paths::clear).isInstanceOf(UnsupportedOperationException.class);
             return new ToolOutput(false, Map.of());
         })));
         ConversationModel model = (request, reservation, usage) -> {
