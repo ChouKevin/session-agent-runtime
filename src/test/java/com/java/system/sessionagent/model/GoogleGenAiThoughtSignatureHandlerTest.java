@@ -96,6 +96,27 @@ class GoogleGenAiThoughtSignatureHandlerTest {
                 });
     }
 
+    @Test
+    void rejects_a_valid_json_continuation_with_an_invalid_decoded_shape() {
+        ModelContinuation continuation = new ModelContinuation(new ModelRouteId("gemini-primary"),
+                "spring-ai-google-genai-thought-signatures-v1", new byte[] {'[', ']'});
+
+        assertThatThrownBy(() -> handler.restore(continuation))
+                .isInstanceOfSatisfying(ModelCallFailure.class,
+                        failure -> assertThat(failure.kind()).isEqualTo(ModelCallFailure.Kind.TERMINAL));
+    }
+
+    @Test
+    void keeps_invalid_fresh_provider_signature_metadata_correctable() {
+        AssistantMessage providerMessage = AssistantMessage.builder()
+                .properties(Map.of("thoughtSignatures", List.of()))
+                .build();
+
+        assertThatThrownBy(() -> handler.capture(providerMessage))
+                .isInstanceOfSatisfying(ModelCallFailure.class,
+                        failure -> assertThat(failure.kind()).isEqualTo(ModelCallFailure.Kind.CORRECTABLE));
+    }
+
     private static AssistantMessage.ToolCall toolCall(String id, String name) {
         return new AssistantMessage.ToolCall(id, "function", name, "{}");
     }

@@ -60,6 +60,8 @@ public final class GoogleGenAiThoughtSignatureHandler implements SpringAiContinu
         try {
             List<byte[]> signatures = signatures(objectMapper.readValue(continuation.payload(), new TypeReference<List<byte[]>>() { }));
             return Map.of(THOUGHT_SIGNATURES, signatures);
+        } catch (ModelCallFailure exception) {
+            throw ModelCallFailure.terminal();
         } catch (IOException | IllegalArgumentException exception) {
             throw ModelCallFailure.terminal();
         }
