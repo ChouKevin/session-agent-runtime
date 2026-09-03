@@ -233,9 +233,13 @@ public final class McpConnectionManager {
             if (stopped || reconnectWork.get(connectionName) != pendingWork) { // cs-allow identity selects current scheduled work
                 return;
             }
+            if (!inFlightConnections.add(connectionName)) {
+                pendingWork.markDue();
+                return;
+            }
             reconnectWork.remove(connectionName);
         }
-        launchConnectionWork(connectionName, () -> connect(connectionName));
+        executeConnectionWork(connectionName, () -> connect(connectionName));
     }
 
     private void launchConnectionWork(String connectionName, Runnable work) {
@@ -244,14 +248,16 @@ public final class McpConnectionManager {
                 return;
             }
         }
+        executeConnectionWork(connectionName, work);
+    }
+
+    private void executeConnectionWork(String connectionName, Runnable work) {
         try {
             workExecutor.execute(() -> {
                 try {
                     work.run();
                 } finally {
-                    synchronized (McpConnectionManager.this) {
-                        inFlightConnections.remove(connectionName);
-                    }
+                    completeConnectionWork(connectionName);
                 }
             });
         } catch (RuntimeException exception) {
@@ -259,6 +265,15 @@ public final class McpConnectionManager {
                 inFlightConnections.remove(connectionName);
             }
             markUnavailableAndReconnect(connectionName, exception);
+        }
+    }
+
+    private synchronized void completeConnectionWork(String connectionName) {
+        inFlightConnections.remove(connectionName);
+        PendingWork pendingWork = reconnectWork.get(connectionName);
+        if (Objects.nonNull(pendingWork) && pendingWork.isDue()) {
+            int failures = reconnectFailures.getOrDefault(connectionName, 1);
+            scheduleAttempt(connectionName, reconnectDelay(failures));
         }
     }
 
@@ -733,6 +748,7 @@ public final class McpConnectionManager {
     private static final class PendingWork {
 
         private ScheduledFuture<?> future;
+        private boolean due;
 
         private void setFuture(ScheduledFuture<?> future) {
             this.future = future;
@@ -740,6 +756,14 @@ public final class McpConnectionManager {
 
         private void cancel() {
             Optional.ofNullable(future).ifPresent(scheduledFuture -> scheduledFuture.cancel(false));
+        }
+
+        private void markDue() {
+            due = true;
+        }
+
+        private boolean isDue() {
+            return due;
         }
     }
 }

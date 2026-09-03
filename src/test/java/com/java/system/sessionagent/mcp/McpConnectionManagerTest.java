@@ -193,12 +193,28 @@ class McpConnectionManagerTest {
     }
 
     @Test
-    void recovers_after_an_async_refresh_failure_when_the_first_reconnect_schedule_is_rejected() throws InterruptedException {
+    void retains_a_due_fallback_reconnect_until_the_failing_refresh_lifecycle_completes() throws InterruptedException {
         ControlledTaskScheduler scheduler = new ControlledTaskScheduler();
-        RecordingClient original = new RecordingClient(List.of(tool("search_code")));
+        BlockingCloseClient original = new BlockingCloseClient(List.of(tool("search_code")));
         RecordingClient replacement = new RecordingClient(List.of(tool("lookup_invoice")));
         AtomicInteger factoryCalls = new AtomicInteger();
-        Executor asynchronousExecutor = command -> Thread.startVirtualThread(command);
+        AtomicInteger completedLifecycleWork = new AtomicInteger();
+        CountDownLatch initialLifecycleCompleted = new CountDownLatch(1);
+        CountDownLatch refreshLifecycleCompleted = new CountDownLatch(1);
+        CountDownLatch reconnectLifecycleCompleted = new CountDownLatch(1);
+        Executor asynchronousExecutor = command -> Thread.startVirtualThread(() -> {
+            command.run();
+            int completedWork = completedLifecycleWork.incrementAndGet();
+            if (completedWork == 1) { // cs-allow first task is the initial connection lifecycle work
+                initialLifecycleCompleted.countDown();
+            }
+            if (completedWork == 2) { // cs-allow second task is the failed refresh lifecycle work
+                refreshLifecycleCompleted.countDown();
+            }
+            if (completedWork == 3) { // cs-allow third task is the recovered reconnect lifecycle work
+                reconnectLifecycleCompleted.countDown();
+            }
+        });
         McpConnectionManager manager = manager(Map.of("semantic", connection()), configuredConnection -> {
             if (factoryCalls.getAndIncrement() == 0) { // cs-allow first client establishes the refresh failure source
                 return original;
@@ -208,22 +224,23 @@ class McpConnectionManagerTest {
         manager.start();
         scheduler.runDueTasks();
         assertThat(original.listingCompleted.await(1, TimeUnit.SECONDS)).isTrue();
+        assertThat(initialLifecycleCompleted.await(1, TimeUnit.SECONDS)).isTrue();
         original.failNextList();
         scheduler.rejectNextOneShotSchedule();
 
         scheduler.runRecurringTasks();
 
-        assertThat(awaitCondition(() -> original.closeCount() == 1, Duration.ofSeconds(1))).isTrue(); // cs-allow close count confirms refresh failure completed before advancing time
-        assertThat(manager.diagnostic("semantic").state()).isEqualTo(McpConnectionState.UNAVAILABLE);
+        assertThat(original.closeStarted.await(1, TimeUnit.SECONDS)).isTrue();
         scheduler.advanceBy(Duration.ofSeconds(2));
+        assertThat(factoryCalls).hasValue(1);
+        original.releaseClose.countDown();
+        assertThat(refreshLifecycleCompleted.await(1, TimeUnit.SECONDS)).isTrue();
 
-        assertThat(awaitCondition(
-                () -> manager.diagnostic("semantic").state() == McpConnectionState.AVAILABLE,
-                Duration.ofSeconds(1))).isTrue();
+        scheduler.runDueTasks();
+
+        assertThat(reconnectLifecycleCompleted.await(1, TimeUnit.SECONDS)).isTrue();
+        assertThat(manager.diagnostic("semantic").state()).isEqualTo(McpConnectionState.AVAILABLE);
         assertThat(factoryCalls).hasValue(2);
-        assertThat(manager.view().connections().get("semantic").client()).contains(replacement);
-        assertThat(original.closeCount()).isEqualTo(1);
-        assertThat(replacement.closeCount()).isZero();
     }
 
     @Test
@@ -426,7 +443,7 @@ class McpConnectionManagerTest {
         private final AtomicBoolean failNextList = new AtomicBoolean();
         private final AtomicBoolean closed = new AtomicBoolean();
         private final AtomicInteger closeCount = new AtomicInteger();
-        private final CountDownLatch listingCompleted = new CountDownLatch(1);
+        protected final CountDownLatch listingCompleted = new CountDownLatch(1);
 
         protected RecordingClient(List<McpSchema.Tool> tools) {
             this.tools = tools;
@@ -457,7 +474,7 @@ class McpConnectionManagerTest {
             closeCount.incrementAndGet();
         }
 
-        private void failNextList() {
+        protected void failNextList() {
             failNextList.set(true);
         }
 
@@ -515,6 +532,28 @@ class McpConnectionManagerTest {
                 throw new IllegalStateException("stale refresh failed");
             }
             return super.listTools();
+        }
+    }
+
+    private static final class BlockingCloseClient extends RecordingClient {
+
+        private final CountDownLatch closeStarted = new CountDownLatch(1);
+        private final CountDownLatch releaseClose = new CountDownLatch(1);
+
+        private BlockingCloseClient(List<McpSchema.Tool> tools) {
+            super(tools);
+        }
+
+        @Override
+        public void close() {
+            closeStarted.countDown();
+            try {
+                releaseClose.await();
+            } catch (InterruptedException exception) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException("close interrupted", exception);
+            }
+            super.close();
         }
     }
 
