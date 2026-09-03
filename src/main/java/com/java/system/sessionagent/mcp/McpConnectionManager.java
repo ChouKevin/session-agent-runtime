@@ -205,12 +205,27 @@ public final class McpConnectionManager {
     }
 
     private synchronized void scheduleAttempt(String connectionName, Duration delay) {
+        if (scheduleAttemptOnce(connectionName, delay)) {
+            return;
+        }
+        int failures = reconnectFailures.merge(connectionName, 1, Integer::sum);
+        scheduleAttemptOnce(connectionName, reconnectDelay(failures));
+    }
+
+    private boolean scheduleAttemptOnce(String connectionName, Duration delay) {
         cancelPendingWork(reconnectWork.remove(connectionName));
         PendingWork pendingWork = new PendingWork();
         reconnectWork.put(connectionName, pendingWork);
-        ScheduledFuture<?> scheduledTask = scheduler.schedule(
-                () -> attemptDue(connectionName, pendingWork), clock.instant().plus(delay));
+        ScheduledFuture<?> scheduledTask;
+        try {
+            scheduledTask = scheduler.schedule(
+                    () -> attemptDue(connectionName, pendingWork), clock.instant().plus(delay));
+        } catch (RuntimeException exception) {
+            reconnectWork.remove(connectionName);
+            return false;
+        }
         pendingWork.setFuture(scheduledTask);
+        return true;
     }
 
     private void attemptDue(String connectionName, PendingWork pendingWork) {
@@ -344,9 +359,15 @@ public final class McpConnectionManager {
         cancelPendingWork(refreshWork.remove(connectionName));
         PendingWork pendingWork = new PendingWork();
         refreshWork.put(connectionName, pendingWork);
-        ScheduledFuture<?> scheduledTask = scheduler.scheduleAtFixedRate(
-                () -> refreshDue(connectionName, client, pendingWork),
-                clock.instant().plus(properties.refreshInterval()), properties.refreshInterval());
+        ScheduledFuture<?> scheduledTask;
+        try {
+            scheduledTask = scheduler.scheduleAtFixedRate(
+                    () -> refreshDue(connectionName, client, pendingWork),
+                    clock.instant().plus(properties.refreshInterval()), properties.refreshInterval());
+        } catch (RuntimeException exception) {
+            refreshWork.remove(connectionName);
+            throw exception;
+        }
         pendingWork.setFuture(scheduledTask);
     }
 

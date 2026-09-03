@@ -87,32 +87,32 @@ class MessageJobServiceTest {
     void keeps_the_snapshot_open_for_its_tool_batch_then_releases_it() {
         ConversationStore store = mock(ConversationStore.class);
         MessageWorkClaim claim = claim();
-        List<AtomicInteger> releases = List.of(new AtomicInteger(), new AtomicInteger());
+        List<String> releases = new ArrayList<>();
         AtomicInteger snapshots = new AtomicInteger();
+        AtomicInteger modelCalls = new AtomicInteger();
         when(store.loadHistory(claim.sessionId())).thenReturn(List.of(user()), List.of(user()));
         when(store.reserveModelCall(eq(claim), eq(2), any(Instant.class))).thenReturn(OptionalInt.of(1), OptionalInt.of(2));
         ToolCatalog catalog = () -> {
             int snapshotIndex = snapshots.getAndIncrement();
             return new ToolSnapshot(List.of(binding("first", arguments -> {
-                assertThat(releases.get(snapshotIndex)).hasValue(0);
+                assertThat(releases).doesNotContain("snapshot-" + snapshotIndex);
                 return new ToolOutput(false, Map.of());
-            })), () -> releases.get(snapshotIndex).incrementAndGet());
+            })), () -> releases.add("snapshot-" + snapshotIndex));
         };
         ConversationModel model = (request, reservation, usage) -> {
             reservation.reserve();
-            return request.history().size() == 1
-                    ? new ModelReply.UseTools(Optional.empty(), List.of(request("call-1", "first")))
-                    : secondIteration(releases);
+            int modelCall = modelCalls.getAndIncrement();
+            if (modelCall == 0) { // cs-allow first model call has the tool batch
+                return new ModelReply.UseTools(Optional.empty(), List.of(request("call-1", "first")));
+            }
+            assertThat(releases).containsExactly("snapshot-0");
+            return new ModelReply.Text("done");
         };
 
         service(store, model, catalog).process(claim, () -> true);
 
-        assertThat(releases).extracting(AtomicInteger::get).containsExactly(1, 1);
-    }
-
-    private static ModelReply secondIteration(List<AtomicInteger> releases) {
-        assertThat(releases).extracting(AtomicInteger::get).containsExactly(1, 0);
-        return new ModelReply.Text("done");
+        assertThat(modelCalls).hasValue(2);
+        assertThat(releases).containsExactly("snapshot-0", "snapshot-1");
     }
 
     @Test

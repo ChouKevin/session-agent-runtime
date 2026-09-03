@@ -193,19 +193,37 @@ class McpConnectionManagerTest {
     }
 
     @Test
-    void closes_a_retired_client_when_reconnect_scheduling_is_rejected() {
+    void recovers_after_an_async_refresh_failure_when_the_first_reconnect_schedule_is_rejected() throws InterruptedException {
         ControlledTaskScheduler scheduler = new ControlledTaskScheduler();
-        RecordingClient client = new RecordingClient(List.of(tool("search_code")));
-        McpConnectionManager manager = manager(Map.of("semantic", connection()), configuredConnection -> client, scheduler);
+        RecordingClient original = new RecordingClient(List.of(tool("search_code")));
+        RecordingClient replacement = new RecordingClient(List.of(tool("lookup_invoice")));
+        AtomicInteger factoryCalls = new AtomicInteger();
+        Executor asynchronousExecutor = command -> Thread.startVirtualThread(command);
+        McpConnectionManager manager = manager(Map.of("semantic", connection()), configuredConnection -> {
+            if (factoryCalls.getAndIncrement() == 0) { // cs-allow first client establishes the refresh failure source
+                return original;
+            }
+            return replacement;
+        }, scheduler, Duration.ofSeconds(1), Duration.ofSeconds(60), asynchronousExecutor);
         manager.start();
         scheduler.runDueTasks();
-        client.failNextList();
+        assertThat(original.listingCompleted.await(1, TimeUnit.SECONDS)).isTrue();
+        original.failNextList();
         scheduler.rejectNextOneShotSchedule();
 
         scheduler.runRecurringTasks();
 
+        assertThat(awaitCondition(() -> original.closeCount() == 1, Duration.ofSeconds(1))).isTrue(); // cs-allow close count confirms refresh failure completed before advancing time
         assertThat(manager.diagnostic("semantic").state()).isEqualTo(McpConnectionState.UNAVAILABLE);
-        assertThat(client.closeCount()).isEqualTo(1);
+        scheduler.advanceBy(Duration.ofSeconds(2));
+
+        assertThat(awaitCondition(
+                () -> manager.diagnostic("semantic").state() == McpConnectionState.AVAILABLE,
+                Duration.ofSeconds(1))).isTrue();
+        assertThat(factoryCalls).hasValue(2);
+        assertThat(manager.view().connections().get("semantic").client()).contains(replacement);
+        assertThat(original.closeCount()).isEqualTo(1);
+        assertThat(replacement.closeCount()).isZero();
     }
 
     @Test
