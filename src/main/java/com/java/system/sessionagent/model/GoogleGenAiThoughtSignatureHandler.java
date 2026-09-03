@@ -55,13 +55,13 @@ public final class GoogleGenAiThoughtSignatureHandler implements SpringAiContinu
     public Map<String, Object> restore(ModelContinuation continuation) {
         Assert.notNull(continuation, "Model continuation must not be null");
         if (!routeId.equals(continuation.modelRouteId()) || !FORMAT.equals(continuation.format())) {
-            throw ModelCallFailure.correctable();
+            throw ModelCallFailure.terminal();
         }
         try {
             List<byte[]> signatures = signatures(objectMapper.readValue(continuation.payload(), new TypeReference<List<byte[]>>() { }));
             return Map.of(THOUGHT_SIGNATURES, signatures);
         } catch (IOException | IllegalArgumentException exception) {
-            throw ModelCallFailure.correctable();
+            throw ModelCallFailure.terminal();
         }
     }
 

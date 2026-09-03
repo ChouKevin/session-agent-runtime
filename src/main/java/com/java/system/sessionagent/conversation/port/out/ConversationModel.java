@@ -9,9 +9,7 @@ import java.util.function.Consumer;
 
 public interface ConversationModel {
 
-    default ModelRouteId routeId() {
-        return new ModelRouteId("test");
-    }
+    ModelRouteId routeId();
 
     ModelCallResult respond(
             ModelRequest request,

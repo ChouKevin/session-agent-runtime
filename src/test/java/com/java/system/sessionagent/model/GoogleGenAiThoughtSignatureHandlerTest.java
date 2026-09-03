@@ -75,8 +75,12 @@ class GoogleGenAiThoughtSignatureHandlerTest {
         ModelContinuation otherFormat = new ModelContinuation(new ModelRouteId("gemini-primary"),
                 "other-format", new byte[] {1});
 
-        assertThatThrownBy(() -> handler.restore(otherRoute)).isInstanceOf(ModelCallFailure.class);
-        assertThatThrownBy(() -> handler.restore(otherFormat)).isInstanceOf(ModelCallFailure.class);
+        assertThatThrownBy(() -> handler.restore(otherRoute))
+                .isInstanceOfSatisfying(ModelCallFailure.class,
+                        failure -> assertThat(failure.kind()).isEqualTo(ModelCallFailure.Kind.TERMINAL));
+        assertThatThrownBy(() -> handler.restore(otherFormat))
+                .isInstanceOfSatisfying(ModelCallFailure.class,
+                        failure -> assertThat(failure.kind()).isEqualTo(ModelCallFailure.Kind.TERMINAL));
     }
 
     @Test
@@ -86,8 +90,10 @@ class GoogleGenAiThoughtSignatureHandlerTest {
                 "spring-ai-google-genai-thought-signatures-v1", malformed);
 
         assertThatThrownBy(() -> handler.restore(continuation))
-                .isInstanceOf(ModelCallFailure.class)
-                .hasMessageNotContaining("1, 2, 3");
+                .isInstanceOfSatisfying(ModelCallFailure.class, failure -> {
+                    assertThat(failure.kind()).isEqualTo(ModelCallFailure.Kind.TERMINAL);
+                    assertThat(failure).hasMessageNotContaining("1, 2, 3");
+                });
     }
 
     private static AssistantMessage.ToolCall toolCall(String id, String name) {

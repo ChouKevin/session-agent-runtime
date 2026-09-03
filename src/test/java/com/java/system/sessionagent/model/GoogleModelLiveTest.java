@@ -4,6 +4,7 @@ import com.java.system.sessionagent.conversation.domain.MessageJobId;
 import com.java.system.sessionagent.conversation.domain.MessageRole;
 import com.java.system.sessionagent.conversation.domain.ModelReply;
 import com.java.system.sessionagent.conversation.domain.ModelRequest;
+import com.java.system.sessionagent.conversation.domain.ModelRouteId;
 import com.java.system.sessionagent.conversation.domain.SessionId;
 import com.java.system.sessionagent.conversation.domain.SessionSequence;
 import com.java.system.sessionagent.conversation.domain.UserMessage;
@@ -49,8 +50,10 @@ class GoogleModelLiveTest {
                 MessageRole.USER, "tester", "Reply with a short greeting and do not call tools.");
         AtomicInteger reservations = new AtomicInteger();
         CountingChatModel countingModel = new CountingChatModel(provider);
+        ObjectMapper objectMapper = new ObjectMapper();
         SpringAiConversationModel model = new SpringAiConversationModel(
-                countingModel, new PromptResource(), new NoOpConversationTelemetry(), new ObjectMapper());
+                countingModel, new PromptResource(), new NoOpConversationTelemetry(), objectMapper,
+                new GoogleGenAiThoughtSignatureHandler(new ModelRouteId("google-genai"), objectMapper));
 
         ModelReply reply = model.respond(new ModelRequest(List.of(question), new ToolSnapshot(List.of())),
                 reservations::incrementAndGet, usage -> { }).reply();

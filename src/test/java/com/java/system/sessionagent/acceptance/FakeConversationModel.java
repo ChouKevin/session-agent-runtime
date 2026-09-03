@@ -2,6 +2,7 @@ package com.java.system.sessionagent.acceptance;
 
 import com.java.system.sessionagent.conversation.domain.ModelReply;
 import com.java.system.sessionagent.conversation.domain.ModelCallResult;
+import com.java.system.sessionagent.conversation.domain.ModelRouteId;
 import com.java.system.sessionagent.conversation.domain.ModelRequest;
 import com.java.system.sessionagent.conversation.domain.ModelUsage;
 import com.java.system.sessionagent.conversation.port.out.ConversationModel;
@@ -17,14 +18,21 @@ import java.util.function.Consumer;
 final class FakeConversationModel implements ConversationModel {
 
     private final Deque<ModelReply> replies;
+    private final ModelRouteId routeId;
     private final List<ModelRequest> requests = new ArrayList<>();
 
-    FakeConversationModel(List<ModelReply> replies) {
+    FakeConversationModel(ModelRouteId routeId, List<ModelReply> replies) {
+        this.routeId = Objects.requireNonNull(routeId, "Model route ID must not be null");
         this.replies = new ArrayDeque<>(List.copyOf(replies));
     }
 
     List<ModelRequest> requests() {
         return List.copyOf(requests);
+    }
+
+    @Override
+    public ModelRouteId routeId() {
+        return routeId;
     }
 
     @Override

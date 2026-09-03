@@ -58,15 +58,6 @@ public final class SpringAiConversationModel implements ConversationModel {
             ChatModel chatModel,
             PromptResource promptResource,
             ConversationTelemetry telemetry,
-            ObjectMapper objectMapper) {
-        this(chatModel, promptResource, new SpringAiToolCallbackFactory(objectMapper), new ConversationHistoryProjector(objectMapper), telemetry,
-                objectMapper, new GoogleGenAiThoughtSignatureHandler(new ModelRouteId("google-genai"), objectMapper));
-    }
-
-    public SpringAiConversationModel(
-            ChatModel chatModel,
-            PromptResource promptResource,
-            ConversationTelemetry telemetry,
             ObjectMapper objectMapper,
             SpringAiContinuationHandler continuationHandler) {
         this(chatModel, promptResource, new SpringAiToolCallbackFactory(objectMapper), new ConversationHistoryProjector(objectMapper), telemetry,

@@ -113,6 +113,10 @@ public final class MessageJobService implements MessageJobPort {
             List<SessionMessage> history = conversationStore.loadHistory(claim.sessionId());
             Map<SessionSequence, ModelContinuation> continuations = Optional.ofNullable(conversationStore.loadContinuations(claim))
                     .orElseGet(Map::of);
+            if (hasContinuationForAnotherRoute(continuations, routeId)) {
+                appendRuntime(claim, guard, List.of(runtime(MODEL_UNAVAILABLE)), ConversationStore.JobUpdate.COMPLETE);
+                return;
+            }
             try (ToolSnapshot tools = toolCatalog.snapshot()) {
                 ReservationState reservation = new ReservationState();
                 ModelRequest request = new ModelRequest(history, continuations, tools);
@@ -136,6 +140,10 @@ public final class MessageJobService implements MessageJobPort {
                     if (handleModelFailure(claim, guard, reservation, failure, elapsedSince(requestStartedAt))) {
                         continue;
                     }
+                    return;
+                }
+                if (continuation.isPresent() && !routeId.equals(continuation.orElseThrow().modelRouteId())) {
+                    appendRuntime(claim, guard, List.of(runtime(MODEL_UNAVAILABLE)), ConversationStore.JobUpdate.COMPLETE);
                     return;
                 }
                 if (!guard.stillOwned()) {
@@ -162,6 +170,13 @@ public final class MessageJobService implements MessageJobPort {
                 }
             }
         }
+    }
+
+    private static boolean hasContinuationForAnotherRoute(
+            Map<SessionSequence, ModelContinuation> continuations,
+            ModelRouteId routeId) {
+        return continuations.values().stream()
+                .anyMatch(continuation -> !routeId.equals(continuation.modelRouteId()));
     }
 
     private int reserve(MessageWorkClaim claim, WorkGuard guard, ReservationState state) {
