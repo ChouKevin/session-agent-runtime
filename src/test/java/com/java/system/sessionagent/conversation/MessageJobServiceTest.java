@@ -29,6 +29,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -189,6 +190,40 @@ class MessageJobServiceTest {
                         new ConversationStore.ToolCallData(new ToolCallId("call-2"), "second", Map.of()))),
                 new ConversationStore.ToolObservationData(new ToolCallId("call-1"), "first", Map.of("isError", false, "result", Map.of("value", 1))),
                 new ConversationStore.ToolObservationData(new ToolCallId("call-2"), "second", Map.of("isError", true, "result", Map.of("code", "TOOL_TIMEOUT"))));
+    }
+
+    @Test
+    void preserves_nested_tool_arguments_when_an_executor_mutates_them() {
+        ConversationStore store = mock(ConversationStore.class);
+        MessageWorkClaim claim = claim();
+        LinkedHashMap<String, Object> arguments = new LinkedHashMap<>();
+        arguments.put("filters", new LinkedHashMap<>(Map.of("branch", "main")));
+        arguments.put("paths", new ArrayList<>(List.of("src")));
+        when(store.loadHistory(claim.sessionId())).thenReturn(List.of(user()), List.of(user()));
+        when(store.reserveModelCall(eq(claim), eq(2), any(Instant.class))).thenReturn(OptionalInt.of(1), OptionalInt.of(2));
+        ToolCatalog catalog = () -> new ToolSnapshot(List.of(binding("first", supplied -> {
+            Map<?, ?> filters = (Map<?, ?>) supplied.get("filters");
+            List<?> paths = (List<?>) supplied.get("paths");
+            filters.clear();
+            paths.clear();
+            return new ToolOutput(false, Map.of());
+        })));
+        ConversationModel model = (request, reservation, usage) -> {
+            reservation.reserve();
+            return request.history().size() == 1
+                    ? new ModelReply.UseTools(Optional.empty(), List.of(new ToolRequest(
+                    new ToolCallId("call-1"), new ToolName("first"), arguments)))
+                    : new ModelReply.Text("Done");
+        };
+
+        service(store, model, catalog).process(claim, () -> true);
+
+        org.mockito.ArgumentCaptor<ConversationStore.MessageBatch> batches = org.mockito.ArgumentCaptor.forClass(ConversationStore.MessageBatch.class);
+        verify(store, org.mockito.Mockito.times(2)).append(eq(claim), batches.capture(), any(Instant.class));
+        ConversationStore.AssistantToolCallsData calls = (ConversationStore.AssistantToolCallsData) batches.getAllValues().getFirst().messages().getFirst();
+        assertThat(calls.calls().getFirst().arguments()).isEqualTo(Map.of(
+                "filters", Map.of("branch", "main"),
+                "paths", List.of("src")));
     }
 
     @Test

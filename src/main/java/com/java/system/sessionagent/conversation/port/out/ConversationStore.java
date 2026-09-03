@@ -8,6 +8,7 @@ import com.java.system.sessionagent.conversation.domain.MessageWorkClaim;
 import com.java.system.sessionagent.conversation.domain.SessionId;
 import com.java.system.sessionagent.conversation.domain.SessionMessage;
 import com.java.system.sessionagent.conversation.domain.ToolCallId;
+import com.java.system.sessionagent.conversation.domain.ToolRequest;
 import org.springframework.util.Assert;
 
 import java.time.Duration;
@@ -73,7 +74,7 @@ public interface ConversationStore {
             Assert.notNull(toolCallId, "Tool call ID must not be null");
             Assert.hasText(toolName, "Tool name must not be blank");
             Assert.notNull(arguments, "Tool arguments must not be null");
-            arguments = java.util.Collections.unmodifiableMap(new java.util.LinkedHashMap<>(arguments));
+            arguments = ToolRequest.freezeArguments(arguments);
         }
     }
 
