@@ -3,7 +3,9 @@ package com.java.system.sessionagent.storage;
 import com.java.system.sessionagent.conversation.domain.IncomingMessage;
 import com.java.system.sessionagent.conversation.domain.MessageReceipt;
 import com.java.system.sessionagent.conversation.domain.MessageWorkClaim;
+import com.java.system.sessionagent.conversation.domain.ModelRouteId;
 import com.java.system.sessionagent.conversation.port.out.ConversationStore;
+import com.java.system.sessionagent.conversation.port.out.ModelRouteMismatchException;
 import com.java.system.sessionagent.conversation.port.out.StaleWorkClaimException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.flywaydb.core.Flyway;
@@ -123,6 +125,19 @@ class PostgresMessageJobPostgresIT {
                 .isExactlyInstanceOf(StaleWorkClaimException.class);
         assertThat(jdbcTemplate.queryForObject("select count(*) from session_message", Integer.class)).isEqualTo(1);
         assertThat(jdbcTemplate.queryForObject("select next_sequence from conversation_session", Long.class)).isEqualTo(2L);
+    }
+
+    @Test
+    void binds_one_model_route_for_the_complete_job() {
+        ConversationStore store = store();
+        store.receive(new IncomingMessage("thread", "alice", "route-job", "hello"));
+        MessageWorkClaim claim = store.claimNext("worker", Duration.ofSeconds(30)).orElseThrow();
+
+        store.bindModelRoute(claim, new ModelRouteId("gemini-primary"));
+        store.bindModelRoute(claim, new ModelRouteId("gemini-primary"));
+
+        assertThatThrownBy(() -> store.bindModelRoute(claim, new ModelRouteId("codex-primary")))
+                .isExactlyInstanceOf(ModelRouteMismatchException.class);
     }
 
     private <T> List<T> concurrently(Callable<T> action) throws Exception {

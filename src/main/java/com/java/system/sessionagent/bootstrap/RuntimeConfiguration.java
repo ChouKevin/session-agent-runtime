@@ -9,6 +9,8 @@ import com.java.system.sessionagent.conversation.port.in.MessageIntakePort;
 import com.java.system.sessionagent.conversation.port.out.ConversationStore;
 import com.java.system.sessionagent.conversation.port.out.ConversationTelemetry;
 import com.java.system.sessionagent.model.SpringAiConversationModel;
+import com.java.system.sessionagent.model.GoogleGenAiThoughtSignatureHandler;
+import com.java.system.sessionagent.conversation.domain.ModelRouteId;
 import com.java.system.sessionagent.model.PromptResource;
 import com.java.system.sessionagent.storage.PostgresConversationStore;
 import com.java.system.sessionagent.tool.port.ToolCatalog;
@@ -68,8 +70,11 @@ public class RuntimeConfiguration {
             ChatModel chatModel,
             PromptResource promptResource,
             ConversationTelemetry conversationTelemetry,
-            ObjectMapper objectMapper) {
-        return new SpringAiConversationModel(chatModel, promptResource, conversationTelemetry, objectMapper);
+            ObjectMapper objectMapper,
+            RuntimeProperties runtimeProperties) {
+        ModelRouteId routeId = new ModelRouteId(runtimeProperties.model().routeId());
+        return new SpringAiConversationModel(chatModel, promptResource, conversationTelemetry, objectMapper,
+                new GoogleGenAiThoughtSignatureHandler(routeId, objectMapper));
     }
 
     @Bean

@@ -11,6 +11,8 @@ import com.java.system.sessionagent.conversation.domain.MessageJobId;
 import com.java.system.sessionagent.conversation.domain.MessageReceipt;
 import com.java.system.sessionagent.conversation.domain.MessageRole;
 import com.java.system.sessionagent.conversation.domain.MessageWorkClaim;
+import com.java.system.sessionagent.conversation.domain.ModelContinuation;
+import com.java.system.sessionagent.conversation.domain.ModelRouteId;
 import com.java.system.sessionagent.conversation.domain.RuntimeMessage;
 import com.java.system.sessionagent.conversation.domain.SessionId;
 import com.java.system.sessionagent.conversation.domain.SessionMessage;
@@ -23,6 +25,7 @@ import com.java.system.sessionagent.conversation.domain.UserMessage;
 import com.java.system.sessionagent.conversation.port.in.MessageConflictException;
 import com.java.system.sessionagent.conversation.port.out.ConversationStore;
 import com.java.system.sessionagent.conversation.port.out.ConversationStoreFailure;
+import com.java.system.sessionagent.conversation.port.out.ModelRouteMismatchException;
 import com.java.system.sessionagent.conversation.port.out.StaleWorkClaimException;
 import org.springframework.dao.DataAccessResourceFailureException;
 import org.springframework.dao.QueryTimeoutException;
@@ -52,6 +55,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalInt;
@@ -263,6 +267,54 @@ public final class PostgresConversationStore implements ConversationStore {
         }
     }
 
+    @Override
+    public void bindModelRoute(MessageWorkClaim claim, ModelRouteId modelRouteId) {
+        MessageWorkClaim requiredClaim = Objects.requireNonNull(claim, "Message work claim must not be null");
+        ModelRouteId requiredRouteId = Objects.requireNonNull(modelRouteId, "Model route ID must not be null");
+        inTransaction(() -> {
+            requireLiveClaim(requiredClaim);
+            List<Optional<String>> routes = jdbcTemplate.query("""
+                    select model_route_id from message_job
+                    where message_job_id = ? and session_id = ? for update
+                    """, (resultSet, rowNumber) -> Optional.ofNullable(resultSet.getString("model_route_id")),
+                    messageJobId(requiredClaim), sessionId(requiredClaim));
+            Optional<String> storedRoute = routes.stream().findFirst().orElseThrow(StaleWorkClaimException::new);
+            if (storedRoute.isEmpty()) {
+                jdbcTemplate.update("""
+                        update message_job set model_route_id = ?
+                        where message_job_id = ? and session_id = ?
+                        """, requiredRouteId.value(), messageJobId(requiredClaim), sessionId(requiredClaim));
+            } else if (!storedRoute.orElseThrow().equals(requiredRouteId.value())) {
+                throw new ModelRouteMismatchException();
+            }
+            return Boolean.TRUE;
+        });
+    }
+
+    @Override
+    public Map<SessionSequence, ModelContinuation> loadContinuations(MessageWorkClaim claim) {
+        MessageWorkClaim requiredClaim = Objects.requireNonNull(claim, "Message work claim must not be null");
+        try {
+            Map<SessionSequence, ModelContinuation> continuations = jdbcTemplate.query("""
+                    select continuation.assistant_sequence, continuation.model_route_id, continuation.format, continuation.payload
+                    from model_continuation continuation
+                    join message_job job on job.message_job_id = continuation.message_job_id
+                        and job.session_id = continuation.session_id
+                    where continuation.message_job_id = ? and continuation.session_id = ?
+                      and job.status = 'WORKING' and job.worker_id = ? and job.claim_number = ?
+                      and job.locked_until > clock_timestamp()
+                    order by continuation.assistant_sequence
+                    """, (resultSet, rowNumber) -> Map.entry(new SessionSequence(resultSet.getLong("assistant_sequence")),
+                    new ModelContinuation(new ModelRouteId(resultSet.getString("model_route_id")), resultSet.getString("format"),
+                            resultSet.getBytes("payload"))), messageJobId(requiredClaim), sessionId(requiredClaim),
+                    requiredClaim.workerId(), requiredClaim.claimNumber()).stream()
+                    .collect(java.util.stream.Collectors.toUnmodifiableMap(Map.Entry::getKey, Map.Entry::getValue));
+            return Map.copyOf(continuations);
+        } catch (RuntimeException exception) {
+            throw translate(exception);
+        }
+    }
+
     private List<SessionMessage> loadHistoryInSingleSnapshot(SessionId sessionId) {
         UUID parsedSessionId = UUID.fromString(sessionId.value());
         List<SessionMessage> messages = new ArrayList<>();
@@ -302,6 +354,7 @@ public final class PostgresConversationStore implements ConversationStore {
         inTransaction(() -> {
             requireLiveClaim(requiredClaim);
             UUID sessionId = sessionId(requiredClaim);
+            Optional<SessionSequence> continuationSequence = Optional.empty();
             for (MessageData message : requiredBatch.messages()) {
                 long sequence = allocateSequence(sessionId);
                 requireLiveClaim(requiredClaim);
@@ -313,6 +366,7 @@ public final class PostgresConversationStore implements ConversationStore {
                     insertSessionMessage(sessionId, sequence, messageJobId(requiredClaim), "ASSISTANT_TOOL_CALLS", requiredCreatedAt);
                     jdbcTemplate.update("insert into assistant_tool_calls(session_id, sequence, message, calls) values (?, ?, ?, ?::jsonb)",
                             sessionId, sequence, assistantToolCalls.message().orElse(null), json(storedToolCalls(assistantToolCalls.calls()))); // cs-allow nullable database column represents optional assistant text
+                    continuationSequence = Optional.of(new SessionSequence(sequence));
                 } else if (message instanceof ToolObservationData observation) {
                     insertSessionMessage(sessionId, sequence, messageJobId(requiredClaim), "TOOL", requiredCreatedAt);
                     jdbcTemplate.update("""
@@ -326,7 +380,18 @@ public final class PostgresConversationStore implements ConversationStore {
                             sessionId, sequence, runtime.code(), runtime.message());
                 }
             }
+            if (requiredBatch.continuation().isPresent()) {
+                SessionSequence assistantSequence = continuationSequence.orElseThrow();
+                ModelContinuation continuation = requiredBatch.continuation().orElseThrow();
+                jdbcTemplate.update("""
+                        insert into model_continuation(message_job_id, session_id, assistant_sequence, model_route_id, format, payload)
+                        values (?, ?, ?, ?, ?, ?)
+                        """, messageJobId(requiredClaim), sessionId, assistantSequence.value(), continuation.modelRouteId().value(),
+                        continuation.format(), continuation.payload());
+            }
             if (requiredBatch.jobUpdate() == JobUpdate.COMPLETE) {
+                jdbcTemplate.update("delete from model_continuation where message_job_id = ? and session_id = ?",
+                        messageJobId(requiredClaim), sessionId);
                 completeJob(requiredClaim, clock.instant());
             }
             return Boolean.TRUE;
@@ -355,6 +420,8 @@ public final class PostgresConversationStore implements ConversationStore {
         try {
             T result = transactionTemplate.execute(status -> work.get());
             return Objects.requireNonNull(result, "Transaction result must not be null");
+        } catch (ModelRouteMismatchException exception) {
+            throw exception;
         } catch (RuntimeException exception) {
             throw translate(exception);
         }
@@ -549,7 +616,7 @@ public final class PostgresConversationStore implements ConversationStore {
 
     private static RuntimeException translate(RuntimeException exception) {
         if (exception instanceof ConversationStoreFailure || exception instanceof StaleWorkClaimException
-                || exception instanceof MessageConflictException) {
+                || exception instanceof MessageConflictException || exception instanceof ModelRouteMismatchException) {
             return exception;
         }
         if (isTransient(exception)) {

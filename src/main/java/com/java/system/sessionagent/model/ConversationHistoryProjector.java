@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.java.system.sessionagent.conversation.domain.AssistantMessage;
 import com.java.system.sessionagent.conversation.domain.AssistantToolCallsMessage;
+import com.java.system.sessionagent.conversation.domain.ModelContinuation;
 import com.java.system.sessionagent.conversation.domain.RuntimeMessage;
 import com.java.system.sessionagent.conversation.domain.SessionMessage;
 import com.java.system.sessionagent.conversation.domain.ToolObservation;
@@ -29,13 +30,21 @@ public final class ConversationHistoryProjector {
     }
 
     public List<Message> project(List<SessionMessage> history) {
+        return project(history, Map.of(), null);
+    }
+
+    public List<Message> project(
+            List<SessionMessage> history,
+            Map<com.java.system.sessionagent.conversation.domain.SessionSequence, ModelContinuation> continuations,
+            SpringAiContinuationHandler continuationHandler) {
         Assert.notNull(history, "Conversation history must not be null");
+        Assert.notNull(continuations, "Model continuations must not be null");
         List<Message> projected = new ArrayList<>();
         int index = 0;
         while (index < history.size()) {
             SessionMessage message = history.get(index);
             if (message instanceof AssistantToolCallsMessage calls) {
-                index = addToolBatch(projected, history, index, calls);
+                index = addToolBatch(projected, history, index, calls, continuations, continuationHandler);
             } else {
                 addProjection(projected, message);
                 index++;
@@ -48,7 +57,9 @@ public final class ConversationHistoryProjector {
             List<Message> projected,
             List<SessionMessage> history,
             int assistantIndex,
-            AssistantToolCallsMessage calls) {
+            AssistantToolCallsMessage calls,
+            Map<com.java.system.sessionagent.conversation.domain.SessionSequence, ModelContinuation> continuations,
+            SpringAiContinuationHandler continuationHandler) {
         List<ToolObservation> observations = new ArrayList<>();
         Set<String> toolCallIds = new HashSet<>();
         for (int offset = 0; offset < calls.requests().size(); offset++) {
@@ -79,10 +90,15 @@ public final class ConversationHistoryProjector {
         List<org.springframework.ai.chat.messages.AssistantMessage.ToolCall> toolCalls = calls.requests().stream()
                 .map(this::toolCall)
                 .toList();
-        projected.add(org.springframework.ai.chat.messages.AssistantMessage.builder()
+        org.springframework.ai.chat.messages.AssistantMessage.Builder<?> assistantBuilder = org.springframework.ai.chat.messages.AssistantMessage.builder()
                 .content(calls.message().orElse(null)) // cs-allow Spring AI builder accepts absent optional text as null
-                .toolCalls(toolCalls)
-                .build());
+                .toolCalls(toolCalls);
+        ModelContinuation continuation = continuations.get(calls.sequence());
+        if (continuation != null) { // cs-allow continuation is optional map lookup
+            Assert.notNull(continuationHandler, "Continuation handler is required for stored provider state");
+            assistantBuilder.properties(continuationHandler.restore(continuation));
+        }
+        projected.add(assistantBuilder.build());
         projected.add(ToolResponseMessage.builder().responses(observations.stream().map(this::toolResponse).toList()).build());
         return assistantIndex + calls.requests().size() + 1;
     }

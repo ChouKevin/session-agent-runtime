@@ -5,6 +5,9 @@ import com.java.system.sessionagent.conversation.domain.AssistantToolCallsMessag
 import com.java.system.sessionagent.conversation.domain.MessageJobId;
 import com.java.system.sessionagent.conversation.domain.MessageRole;
 import com.java.system.sessionagent.conversation.domain.ModelReply;
+import com.java.system.sessionagent.conversation.domain.ModelCallResult;
+import com.java.system.sessionagent.conversation.domain.ModelContinuation;
+import com.java.system.sessionagent.conversation.domain.ModelRouteId;
 import com.java.system.sessionagent.conversation.domain.ModelRequest;
 import com.java.system.sessionagent.conversation.domain.SessionId;
 import com.java.system.sessionagent.conversation.domain.SessionMessage;
@@ -27,6 +30,7 @@ import org.springframework.ai.model.tool.ToolCallingChatOptions;
 
 import java.time.Instant;
 import java.util.List;
+import java.util.ArrayList;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -43,7 +47,8 @@ class SpringAiConversationModelTest {
                 new AssistantMessage.ToolCall("call-2", "function", "second", "{\"limit\":2}"))).build();
         SpringAiConversationModel model = model(message);
 
-        ModelReply reply = model.respond(new ModelRequest(List.of(), new ToolSnapshot(List.of())), () -> 1, usage -> { });
+        ModelCallResult result = model.respond(new ModelRequest(List.of(), new ToolSnapshot(List.of())), () -> 1, usage -> { });
+        ModelReply reply = result.reply();
 
         assertThat(reply).isEqualTo(new ModelReply.UseTools(Optional.of("I will inspect both."), List.of(
                 new ToolRequest(new ToolCallId("call-1"), new ToolName("first"), Map.of("query", "fees")),
@@ -54,7 +59,8 @@ class SpringAiConversationModelTest {
     void preserves_json_looking_final_text_without_decoding_it() {
         SpringAiConversationModel model = model(new AssistantMessage("{\"message\":\"still plain text\"}"));
 
-        ModelReply reply = model.respond(new ModelRequest(List.of(), new ToolSnapshot(List.of())), () -> 1, usage -> { });
+        ModelCallResult result = model.respond(new ModelRequest(List.of(), new ToolSnapshot(List.of())), () -> 1, usage -> { });
+        ModelReply reply = result.reply();
 
         assertThat(reply).isEqualTo(new ModelReply.Text("{\"message\":\"still plain text\"}"));
     }
@@ -66,7 +72,7 @@ class SpringAiConversationModelTest {
                 new AssistantMessage.ToolCall(" ", "function", "second", "{}"))).build();
 
         ModelReply.UseTools generated = (ModelReply.UseTools) model(withoutIds)
-                .respond(new ModelRequest(List.of(), new ToolSnapshot(List.of())), () -> 1, usage -> { });
+                .respond(new ModelRequest(List.of(), new ToolSnapshot(List.of())), () -> 1, usage -> { }).reply();
         assertThat(generated.requests()).extracting(ToolRequest::toolCallId).doesNotHaveDuplicates();
 
         AssistantMessage duplicateIds = AssistantMessage.builder().toolCalls(List.of(
@@ -90,6 +96,52 @@ class SpringAiConversationModelTest {
         assertThatThrownBy(() -> model.respond(new ModelRequest(malformedHistory, new ToolSnapshot(List.of())), () -> 1, usage -> { }))
                 .isInstanceOf(ModelCallFailure.class);
         assertThat(providerCalled).isFalse();
+    }
+
+    @Test
+    void restores_thought_signatures_only_for_the_next_native_tool_call() {
+        byte[] firstSignature = new byte[] {1, 2, 3};
+        byte[] secondSignature = new byte[] {4, 5};
+        AssistantMessage firstResponse = AssistantMessage.builder().content("Inspecting.")
+                .properties(Map.of("thoughtSignatures", List.of(firstSignature, secondSignature), "finishReason", "STOP"))
+                .toolCalls(List.of(new AssistantMessage.ToolCall("call-1", "function", "first", "{}"))).build();
+        AssistantMessage finalResponse = new AssistantMessage("done");
+        List<Prompt> prompts = new ArrayList<>();
+        AtomicBoolean firstCall = new AtomicBoolean(true);
+        ChatModel chatModel = new ChatModel() {
+            @Override public ChatResponse call(Prompt prompt) {
+                prompts.add(prompt);
+                AssistantMessage response = firstCall.getAndSet(false) ? firstResponse : finalResponse;
+                return new ChatResponse(List.of(new Generation(response)), ChatResponseMetadata.builder().build());
+            }
+            @Override public ToolCallingChatOptions getOptions() { return ToolCallingChatOptions.builder().build(); }
+        };
+        ObjectMapper mapper = new ObjectMapper();
+        ModelRouteId routeId = new ModelRouteId("gemini-primary");
+        SpringAiConversationModel model = new SpringAiConversationModel(chatModel, new PromptResource(), new NoOpConversationTelemetry(),
+                mapper, new GoogleGenAiThoughtSignatureHandler(routeId, mapper));
+
+        ModelCallResult firstResult = model.respond(new ModelRequest(List.of(), new ToolSnapshot(List.of())), () -> 1, usage -> { });
+        ModelContinuation continuation = firstResult.continuation().orElseThrow();
+        List<SessionMessage> history = List.of(
+                new AssistantToolCallsMessage(new SessionId("session-1"), new SessionSequence(2), Optional.of(new MessageJobId("job-1")),
+                        Instant.EPOCH, MessageRole.ASSISTANT_TOOL_CALLS, Optional.of("Inspecting."),
+                        List.of(new ToolRequest(new ToolCallId("call-1"), new ToolName("first"), Map.of()))),
+                new ToolObservation(new SessionId("session-1"), new SessionSequence(3), Optional.of(new MessageJobId("job-1")),
+                        Instant.EPOCH, MessageRole.TOOL, new ToolCallId("call-1"), "first", Map.of("isError", false, "result", Map.of())));
+
+        ModelCallResult secondResult = model.respond(new ModelRequest(history, Map.of(new SessionSequence(2), continuation),
+                new ToolSnapshot(List.of())), () -> 2, usage -> { });
+
+        assertThat(firstResult.reply()).isEqualTo(new ModelReply.UseTools(Optional.of("Inspecting."), List.of(
+                new ToolRequest(new ToolCallId("call-1"), new ToolName("first"), Map.of()))));
+        assertThat(secondResult.reply()).isEqualTo(new ModelReply.Text("done"));
+        assertThat(prompts).hasSize(2);
+        org.springframework.ai.chat.messages.AssistantMessage restored = (org.springframework.ai.chat.messages.AssistantMessage)
+                prompts.get(1).getInstructions().get(1);
+        assertThat(restored.getMetadata()).containsKey("thoughtSignatures").doesNotContainKeys("finishReason", "candidateIndex");
+        assertThat((List<byte[]>) restored.getMetadata().get("thoughtSignatures"))
+                .containsExactly(firstSignature, secondSignature);
     }
 
     private static SpringAiConversationModel model(AssistantMessage message) {

@@ -4,6 +4,8 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.java.system.sessionagent.conversation.domain.ModelReply;
+import com.java.system.sessionagent.conversation.domain.ModelCallResult;
+import com.java.system.sessionagent.conversation.domain.ModelRouteId;
 import com.java.system.sessionagent.conversation.domain.ModelRequest;
 import com.java.system.sessionagent.conversation.domain.ModelUsage;
 import com.java.system.sessionagent.conversation.domain.ToolRequest;
@@ -50,6 +52,7 @@ public final class SpringAiConversationModel implements ConversationModel {
     private final ConversationHistoryProjector historyProjector;
     private final ConversationTelemetry telemetry;
     private final ObjectMapper objectMapper;
+    private final SpringAiContinuationHandler continuationHandler;
 
     public SpringAiConversationModel(
             ChatModel chatModel,
@@ -57,7 +60,17 @@ public final class SpringAiConversationModel implements ConversationModel {
             ConversationTelemetry telemetry,
             ObjectMapper objectMapper) {
         this(chatModel, promptResource, new SpringAiToolCallbackFactory(objectMapper), new ConversationHistoryProjector(objectMapper), telemetry,
-                objectMapper);
+                objectMapper, new GoogleGenAiThoughtSignatureHandler(new ModelRouteId("google-genai"), objectMapper));
+    }
+
+    public SpringAiConversationModel(
+            ChatModel chatModel,
+            PromptResource promptResource,
+            ConversationTelemetry telemetry,
+            ObjectMapper objectMapper,
+            SpringAiContinuationHandler continuationHandler) {
+        this(chatModel, promptResource, new SpringAiToolCallbackFactory(objectMapper), new ConversationHistoryProjector(objectMapper), telemetry,
+                objectMapper, continuationHandler);
     }
 
     SpringAiConversationModel(
@@ -66,23 +79,31 @@ public final class SpringAiConversationModel implements ConversationModel {
             SpringAiToolCallbackFactory callbackFactory,
             ConversationHistoryProjector historyProjector,
             ConversationTelemetry telemetry,
-            ObjectMapper objectMapper) {
+            ObjectMapper objectMapper,
+            SpringAiContinuationHandler continuationHandler) {
         Assert.notNull(chatModel, "Chat model must not be null");
         Assert.notNull(promptResource, "Prompt resource must not be null");
         Assert.notNull(callbackFactory, "Tool callback factory must not be null");
         Assert.notNull(historyProjector, "Conversation history projector must not be null");
         Assert.notNull(telemetry, "Conversation telemetry must not be null");
         Assert.notNull(objectMapper, "Object mapper must not be null");
+        Assert.notNull(continuationHandler, "Spring AI continuation handler must not be null");
         this.chatModel = chatModel;
         this.promptResource = promptResource;
         this.callbackFactory = callbackFactory;
         this.historyProjector = historyProjector;
         this.telemetry = telemetry;
         this.objectMapper = objectMapper;
+        this.continuationHandler = continuationHandler;
     }
 
     @Override
-    public ModelReply respond(
+    public ModelRouteId routeId() {
+        return continuationHandler.routeId();
+    }
+
+    @Override
+    public ModelCallResult respond(
             ModelRequest request,
             ModelCallReservation reservation,
             Consumer<ModelUsage> usageObserver) {
@@ -106,9 +127,9 @@ public final class SpringAiConversationModel implements ConversationModel {
             recordFailure("UNAVAILABLE", requestStartedAt);
             throw failure;
         }
-        ModelReply reply;
+        ModelCallResult result;
         try {
-            reply = normalize(response, objectMapper);
+            result = normalize(response, objectMapper, continuationHandler);
         } catch (ModelCallFailure failure) {
             recordFailure("OUTPUT_INVALID", requestStartedAt);
             throw failure;
@@ -116,14 +137,14 @@ public final class SpringAiConversationModel implements ConversationModel {
         ModelUsage modelUsage = usage(response);
         usageObserver.accept(modelUsage);
         telemetry.model("SUCCESS", Optional.of("RESPONSE"), modelUsage, elapsedSince(requestStartedAt));
-        return reply;
+        return result;
     }
 
     private Prompt promptFor(ModelRequest request) {
         List<ToolCallback> callbacks = callbackFactory.create(request.toolSnapshot());
         List<Message> messages = new ArrayList<>();
         messages.add(new org.springframework.ai.chat.messages.SystemMessage(promptResource.content()));
-        messages.addAll(historyProjector.project(request.history()));
+        messages.addAll(historyProjector.project(request.history(), request.continuations(), continuationHandler));
         if (callbacks.isEmpty()) {
             return new Prompt(List.copyOf(messages));
         }
@@ -137,12 +158,16 @@ public final class SpringAiConversationModel implements ConversationModel {
         return new Prompt(List.copyOf(messages), options);
     }
 
-    private static ModelReply normalize(ChatResponse response, ObjectMapper objectMapper) {
+    private static ModelCallResult normalize(
+            ChatResponse response,
+            ObjectMapper objectMapper,
+            SpringAiContinuationHandler continuationHandler) {
         AssistantMessage message = firstActionableMessage(response).orElseThrow(ModelCallFailure::correctable);
         if (message.hasToolCalls()) {
-            return new ModelReply.UseTools(text(message), toolRequests(message, objectMapper));
+            return new ModelCallResult(new ModelReply.UseTools(text(message), toolRequests(message, objectMapper)),
+                    continuationHandler.capture(message));
         }
-        return new ModelReply.Text(text(message).orElseThrow(ModelCallFailure::correctable));
+        return new ModelCallResult(new ModelReply.Text(text(message).orElseThrow(ModelCallFailure::correctable)), Optional.empty());
     }
 
     private static Optional<AssistantMessage> firstActionableMessage(ChatResponse response) {

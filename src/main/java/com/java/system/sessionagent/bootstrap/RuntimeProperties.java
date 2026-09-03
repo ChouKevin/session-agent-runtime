@@ -22,7 +22,13 @@ public record RuntimeProperties(
         Assert.notNull(worker, "Worker properties must not be null");
     }
 
-    public record Model(@Positive @DefaultValue("12") int maxModelCallsPerMessage) {
+    public record Model(
+            @Positive @DefaultValue("12") int maxModelCallsPerMessage,
+            @NotBlank @DefaultValue("google-genai") String routeId) {
+
+        public Model {
+            Assert.hasText(routeId, "Model route ID must not be blank");
+        }
     }
 
     public record Worker(

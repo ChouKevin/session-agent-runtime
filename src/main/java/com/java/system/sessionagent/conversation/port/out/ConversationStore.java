@@ -5,8 +5,11 @@ import com.java.system.sessionagent.conversation.domain.JobStatus;
 import com.java.system.sessionagent.conversation.domain.MessageJobId;
 import com.java.system.sessionagent.conversation.domain.MessageReceipt;
 import com.java.system.sessionagent.conversation.domain.MessageWorkClaim;
+import com.java.system.sessionagent.conversation.domain.ModelContinuation;
+import com.java.system.sessionagent.conversation.domain.ModelRouteId;
 import com.java.system.sessionagent.conversation.domain.SessionId;
 import com.java.system.sessionagent.conversation.domain.SessionMessage;
+import com.java.system.sessionagent.conversation.domain.SessionSequence;
 import com.java.system.sessionagent.conversation.domain.ToolCallId;
 import com.java.system.sessionagent.conversation.domain.ToolRequest;
 import org.springframework.util.Assert;
@@ -14,6 +17,7 @@ import org.springframework.util.Assert;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalInt;
 
@@ -26,6 +30,10 @@ public interface ConversationStore {
     boolean extendClaim(MessageWorkClaim claim, Duration leaseDuration);
 
     List<SessionMessage> loadHistory(SessionId sessionId);
+
+    void bindModelRoute(MessageWorkClaim claim, ModelRouteId modelRouteId);
+
+    Map<SessionSequence, ModelContinuation> loadContinuations(MessageWorkClaim claim);
 
     OptionalInt reserveModelCall(MessageWorkClaim claim, int maxModelCalls, Instant now);
 
@@ -98,12 +106,20 @@ public interface ConversationStore {
         }
     }
 
-    record MessageBatch(List<MessageData> messages, JobUpdate jobUpdate) {
+    record MessageBatch(List<MessageData> messages, JobUpdate jobUpdate, Optional<ModelContinuation> continuation) {
 
         public MessageBatch {
             Assert.notEmpty(messages, "Message batch must not be empty");
             messages = List.copyOf(messages);
             Assert.notNull(jobUpdate, "Job update must not be null");
+            Assert.notNull(continuation, "Model continuation must not be null");
+            long toolCallEvents = messages.stream().filter(AssistantToolCallsData.class::isInstance).count();
+            Assert.isTrue(continuation.isEmpty() || (jobUpdate == JobUpdate.KEEP_WORKING && toolCallEvents == 1),
+                    "Model continuation requires one working assistant tool call event");
+        }
+
+        public MessageBatch(List<MessageData> messages, JobUpdate jobUpdate) {
+            this(messages, jobUpdate, Optional.empty());
         }
     }
 }

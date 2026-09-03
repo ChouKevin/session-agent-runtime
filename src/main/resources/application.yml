@@ -15,6 +15,7 @@ session-agent:
     shutdown-timeout: ${SESSION_AGENT_MCP_SHUTDOWN_TIMEOUT:5s}
   model:
     max-model-calls-per-message: ${SESSION_AGENT_MAX_MODEL_CALLS_PER_MESSAGE:12}
+    route-id: ${SESSION_AGENT_MODEL_ROUTE_ID:google-genai}
   worker:
     poll-delay: 1s
     lock-duration: 30s

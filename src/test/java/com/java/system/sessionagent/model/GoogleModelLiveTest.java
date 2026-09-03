@@ -53,7 +53,7 @@ class GoogleModelLiveTest {
                 countingModel, new PromptResource(), new NoOpConversationTelemetry(), new ObjectMapper());
 
         ModelReply reply = model.respond(new ModelRequest(List.of(question), new ToolSnapshot(List.of())),
-                reservations::incrementAndGet, usage -> { });
+                reservations::incrementAndGet, usage -> { }).reply();
 
         assertThat(retryProperties.getMaxAttempts()).isEqualTo(1);
         assertThat(reply).isInstanceOf(ModelReply.Text.class);

@@ -2,8 +2,12 @@ package com.java.system.sessionagent.conversation.application;
 
 import com.java.system.sessionagent.conversation.domain.MessageWorkClaim;
 import com.java.system.sessionagent.conversation.domain.ModelReply;
+import com.java.system.sessionagent.conversation.domain.ModelCallResult;
+import com.java.system.sessionagent.conversation.domain.ModelContinuation;
+import com.java.system.sessionagent.conversation.domain.ModelRouteId;
 import com.java.system.sessionagent.conversation.domain.ModelRequest;
 import com.java.system.sessionagent.conversation.domain.SessionMessage;
+import com.java.system.sessionagent.conversation.domain.SessionSequence;
 import com.java.system.sessionagent.conversation.domain.ToolRequest;
 import com.java.system.sessionagent.conversation.port.in.MessageJobPort;
 import com.java.system.sessionagent.conversation.port.in.WorkGuard;
@@ -12,6 +16,7 @@ import com.java.system.sessionagent.conversation.port.out.ConversationStore;
 import com.java.system.sessionagent.conversation.port.out.ConversationStoreFailure;
 import com.java.system.sessionagent.conversation.port.out.ConversationTelemetry;
 import com.java.system.sessionagent.conversation.port.out.ModelCallFailure;
+import com.java.system.sessionagent.conversation.port.out.ModelRouteMismatchException;
 import com.java.system.sessionagent.conversation.port.out.NoOpConversationTelemetry;
 import com.java.system.sessionagent.conversation.port.out.StaleWorkClaimException;
 import com.java.system.sessionagent.tool.port.ToolCatalog;
@@ -26,6 +31,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalInt;
@@ -96,17 +102,29 @@ public final class MessageJobService implements MessageJobPort {
     }
 
     private void processClaim(MessageWorkClaim claim, WorkGuard guard) {
+        ModelRouteId routeId = conversationModel.routeId();
+        try {
+            conversationStore.bindModelRoute(claim, routeId);
+        } catch (ModelRouteMismatchException exception) {
+            appendRuntime(claim, guard, List.of(runtime(MODEL_UNAVAILABLE)), ConversationStore.JobUpdate.COMPLETE);
+            return;
+        }
         while (guard.stillOwned()) {
             List<SessionMessage> history = conversationStore.loadHistory(claim.sessionId());
+            Map<SessionSequence, ModelContinuation> continuations = Optional.ofNullable(conversationStore.loadContinuations(claim))
+                    .orElseGet(Map::of);
             try (ToolSnapshot tools = toolCatalog.snapshot()) {
                 ReservationState reservation = new ReservationState();
-                ModelRequest request = new ModelRequest(history, tools);
+                ModelRequest request = new ModelRequest(history, continuations, tools);
                 ModelReply reply;
+                Optional<ModelContinuation> continuation;
                 long requestStartedAt = System.nanoTime();
                 try {
-                    reply = conversationModel.respond(request, () -> reserveAndLogModelRequest(claim, guard, reservation,
+                    ModelCallResult result = conversationModel.respond(request, () -> reserveAndLogModelRequest(claim, guard, reservation,
                                     history.size(), tools.definitions().size()),
                             usage -> { });
+                    reply = result.reply();
+                    continuation = result.continuation();
                 } catch (BudgetExhausted exception) {
                     appendRuntime(claim, guard, List.of(runtime(MODEL_CALL_LIMIT_REACHED)), ConversationStore.JobUpdate.COMPLETE);
                     return;
@@ -139,7 +157,7 @@ public final class MessageJobService implements MessageJobPort {
                 if (!guard.stillOwned()) {
                     return;
                 }
-                if (!appendRuntime(claim, guard, messages, ConversationStore.JobUpdate.KEEP_WORKING)) {
+                if (!appendRuntime(claim, guard, messages, ConversationStore.JobUpdate.KEEP_WORKING, continuation)) {
                     return;
                 }
             }
@@ -264,11 +282,20 @@ public final class MessageJobService implements MessageJobPort {
             WorkGuard guard,
             List<ConversationStore.MessageData> messages,
             ConversationStore.JobUpdate update) {
+        return appendRuntime(claim, guard, messages, update, Optional.empty());
+    }
+
+    private boolean appendRuntime(
+            MessageWorkClaim claim,
+            WorkGuard guard,
+            List<ConversationStore.MessageData> messages,
+            ConversationStore.JobUpdate update,
+            Optional<ModelContinuation> continuation) {
         if (!guard.stillOwned()) {
             return false;
         }
         try {
-            conversationStore.append(claim, new ConversationStore.MessageBatch(messages, update), clock.instant());
+            conversationStore.append(claim, new ConversationStore.MessageBatch(messages, update, continuation), clock.instant());
             for (ConversationStore.MessageData message : messages) {
                 if (message instanceof ConversationStore.RuntimeData runtime) {
                     telemetry.feedback(runtime.code());

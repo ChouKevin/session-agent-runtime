@@ -6,6 +6,9 @@ import com.java.system.sessionagent.conversation.domain.MessageJobId;
 import com.java.system.sessionagent.conversation.domain.MessageRole;
 import com.java.system.sessionagent.conversation.domain.MessageWorkClaim;
 import com.java.system.sessionagent.conversation.domain.ModelReply;
+import com.java.system.sessionagent.conversation.domain.ModelCallResult;
+import com.java.system.sessionagent.conversation.domain.ModelContinuation;
+import com.java.system.sessionagent.conversation.domain.ModelRouteId;
 import com.java.system.sessionagent.conversation.domain.ToolCallId;
 import com.java.system.sessionagent.conversation.domain.ToolRequest;
 import com.java.system.sessionagent.conversation.domain.UserMessage;
@@ -15,6 +18,7 @@ import com.java.system.sessionagent.conversation.port.out.ConversationModel;
 import com.java.system.sessionagent.conversation.port.out.ConversationStore;
 import com.java.system.sessionagent.conversation.port.out.ConversationStoreFailure;
 import com.java.system.sessionagent.conversation.port.out.ModelCallFailure;
+import com.java.system.sessionagent.conversation.port.out.ModelRouteMismatchException;
 import com.java.system.sessionagent.conversation.port.out.NoOpConversationTelemetry;
 import com.java.system.sessionagent.tool.domain.ToolName;
 import com.java.system.sessionagent.tool.port.ToolBinding;
@@ -55,7 +59,7 @@ class MessageJobServiceTest {
         when(store.reserveModelCall(eq(claim), eq(2), any(Instant.class))).thenReturn(OptionalInt.of(1));
         ConversationModel model = (request, reservation, usage) -> {
             reservation.reserve();
-            return new ModelReply.Text("```json\n{\"answer\":\"plain completion\"}\n```");
+            return result(new ModelReply.Text("```json\n{\"answer\":\"plain completion\"}\n```"));
         };
 
         service(store, model, catalog()).process(claim, () -> true);
@@ -76,7 +80,7 @@ class MessageJobServiceTest {
         when(store.reserveModelCall(eq(claim), eq(2), any(Instant.class))).thenReturn(OptionalInt.of(1));
         ConversationModel model = (request, reservation, usage) -> {
             reservation.reserve();
-            return new ModelReply.Text("done");
+            return result(new ModelReply.Text("done"));
         };
         ToolCatalog catalog = () -> trackedSnapshot(releases);
 
@@ -105,10 +109,10 @@ class MessageJobServiceTest {
             reservation.reserve();
             int modelCall = modelCalls.getAndIncrement();
             if (modelCall == 0) { // cs-allow first model call has the tool batch
-                return new ModelReply.UseTools(Optional.empty(), List.of(request("call-1", "first")));
+                return result(new ModelReply.UseTools(Optional.empty(), List.of(request("call-1", "first"))));
             }
             assertThat(releases).containsExactly("snapshot-0");
-            return new ModelReply.Text("done");
+            return result(new ModelReply.Text("done"));
         };
 
         service(store, model, catalog).process(claim, () -> true);
@@ -141,7 +145,7 @@ class MessageJobServiceTest {
         ConversationModel model = (request, reservation, usage) -> {
             reservation.reserve();
             owned.set(false);
-            return new ModelReply.Text("ignored after ownership loss");
+            return result(new ModelReply.Text("ignored after ownership loss"));
         };
 
         service(store, model, () -> trackedSnapshot(releases)).process(claim, owned::get);
@@ -158,7 +162,7 @@ class MessageJobServiceTest {
         when(store.reserveModelCall(eq(claim), eq(1), any(Instant.class))).thenReturn(OptionalInt.of(1));
         ConversationModel model = (request, reservation, usage) -> {
             reservation.reserve();
-            return new ModelReply.UseTools(Optional.empty(), List.of(request("call-1", "first")));
+            return result(new ModelReply.UseTools(Optional.empty(), List.of(request("call-1", "first"))));
         };
 
         service(store, model, () -> trackedSnapshot(releases), 1).process(claim, () -> true);
@@ -174,11 +178,11 @@ class MessageJobServiceTest {
         when(store.reserveModelCall(eq(claim), eq(2), any(Instant.class))).thenReturn(OptionalInt.of(1), OptionalInt.of(2));
         ConversationModel model = (request, reservation, usage) -> {
             reservation.reserve();
-            return request.history().size() == 1
+            return result(request.history().size() == 1
                     ? new ModelReply.UseTools(Optional.of("Checking."), List.of(
                     new ToolRequest(new ToolCallId("call-1"), new ToolName("first"), Map.of("query", "fees")),
                     new ToolRequest(new ToolCallId("call-2"), new ToolName("second"), Map.of())))
-                    : new ModelReply.Text("Done");
+                    : new ModelReply.Text("Done"));
         };
 
         service(store, model, catalog()).process(claim, () -> true);
@@ -191,6 +195,33 @@ class MessageJobServiceTest {
                         new ConversationStore.ToolCallData(new ToolCallId("call-2"), "second", Map.of()))),
                 new ConversationStore.ToolObservationData(new ToolCallId("call-1"), "first", Map.of("isError", false, "result", Map.of("value", 1))),
                 new ConversationStore.ToolObservationData(new ToolCallId("call-2"), "second", Map.of("isError", true, "result", Map.of("code", "TOOL_TIMEOUT"))));
+    }
+
+    @Test
+    void reloads_the_committed_continuation_for_the_next_model_call() {
+        ConversationStore store = mock(ConversationStore.class);
+        MessageWorkClaim claim = claim();
+        ModelContinuation continuation = new ModelContinuation(new ModelRouteId("gemini-primary"), "opaque-v1", new byte[] {1, 2, 3});
+        List<com.java.system.sessionagent.conversation.domain.ModelRequest> requests = new ArrayList<>();
+        when(store.loadHistory(claim.sessionId())).thenReturn(List.of(user()), List.of(user()));
+        when(store.loadContinuations(claim)).thenReturn(Map.of(), Map.of(new SessionSequence(2), continuation));
+        when(store.reserveModelCall(eq(claim), eq(2), any(Instant.class))).thenReturn(OptionalInt.of(1), OptionalInt.of(2));
+        ConversationModel model = (request, reservation, usage) -> {
+            requests.add(request);
+            reservation.reserve();
+            return requests.size() == 1
+                    ? new ModelCallResult(new ModelReply.UseTools(Optional.empty(), List.of(request("call-1", "first"))),
+                    Optional.of(continuation))
+                    : result(new ModelReply.Text("done"));
+        };
+
+        service(store, model, catalog()).process(claim, () -> true);
+
+        assertThat(requests).hasSize(2);
+        assertThat(requests.get(1).continuations()).containsExactly(Map.entry(new SessionSequence(2), continuation));
+        org.mockito.ArgumentCaptor<ConversationStore.MessageBatch> batches = org.mockito.ArgumentCaptor.forClass(ConversationStore.MessageBatch.class);
+        verify(store, org.mockito.Mockito.times(2)).append(eq(claim), batches.capture(), any(Instant.class));
+        assertThat(batches.getAllValues().getFirst().continuation()).contains(continuation);
     }
 
     @Test
@@ -211,10 +242,10 @@ class MessageJobServiceTest {
         })));
         ConversationModel model = (request, reservation, usage) -> {
             reservation.reserve();
-            return request.history().size() == 1
+            return result(request.history().size() == 1
                     ? new ModelReply.UseTools(Optional.empty(), List.of(new ToolRequest(
                     new ToolCallId("call-1"), new ToolName("first"), arguments)))
-                    : new ModelReply.Text("Done");
+                    : new ModelReply.Text("Done"));
         };
 
         service(store, model, catalog).process(claim, () -> true);
@@ -240,10 +271,10 @@ class MessageJobServiceTest {
                 binding("third", arguments -> { executed.add("third"); return new ToolOutput(false, Map.of("value", 3)); })));
         ConversationModel model = (request, reservation, usage) -> {
             reservation.reserve();
-            return request.history().size() == 1
+            return result(request.history().size() == 1
                     ? new ModelReply.UseTools(Optional.empty(), List.of(
                     request("call-1", "first"), request("call-2", "second"), request("call-3", "third")))
-                    : new ModelReply.Text("done");
+                    : new ModelReply.Text("done"));
         };
 
         service(store, model, catalog).process(claim, () -> true);
@@ -275,7 +306,7 @@ class MessageJobServiceTest {
         })));
         ConversationModel model = (request, reservation, usage) -> {
             reservation.reserve();
-            return new ModelReply.UseTools(Optional.of("intermediate"), List.of(request("call-1", "first")));
+            return result(new ModelReply.UseTools(Optional.of("intermediate"), List.of(request("call-1", "first"))));
         };
 
         service(store, model, catalog, 1).process(claim, () -> true);
@@ -303,9 +334,9 @@ class MessageJobServiceTest {
         ConversationModel model = (request, reservation, usage) -> {
             requests.add(request);
             reservation.reserve();
-            return requests.size() == 1
+            return result(requests.size() == 1
                     ? new ModelReply.UseTools(Optional.of("Checking."), List.of(request("call-1", "first")))
-                    : new ModelReply.Text("done");
+                    : new ModelReply.Text("done"));
         };
 
         service(store, model, catalog).process(claim, () -> true);
@@ -354,6 +385,26 @@ class MessageJobServiceTest {
                 ConversationStore.JobUpdate.COMPLETE));
     }
 
+    @Test
+    void completes_model_unavailable_without_provider_or_tool_calls_when_the_job_route_differs() {
+        ConversationStore store = mock(ConversationStore.class);
+        MessageWorkClaim claim = claim();
+        ConversationModel model = mock(ConversationModel.class);
+        when(model.routeId()).thenReturn(new ModelRouteId("codex-primary"));
+        org.mockito.Mockito.doThrow(new ModelRouteMismatchException()).when(store)
+                .bindModelRoute(claim, new ModelRouteId("codex-primary"));
+
+        service(store, model, catalog()).process(claim, () -> true);
+
+        org.mockito.ArgumentCaptor<ConversationStore.MessageBatch> batch = org.mockito.ArgumentCaptor.forClass(ConversationStore.MessageBatch.class);
+        verify(store).append(eq(claim), batch.capture(), any(Instant.class));
+        verify(store, org.mockito.Mockito.never()).loadHistory(any());
+        verify(model, org.mockito.Mockito.never()).respond(any(), any(), any());
+        assertThat(batch.getValue()).isEqualTo(new ConversationStore.MessageBatch(List.of(
+                new ConversationStore.RuntimeData("MODEL_UNAVAILABLE", "Runtime model is unavailable.")),
+                ConversationStore.JobUpdate.COMPLETE));
+    }
+
     private static MessageJobService service(ConversationStore store, ConversationModel model, ToolCatalog catalog) {
         return service(store, model, catalog, 2);
     }
@@ -367,6 +418,10 @@ class MessageJobServiceTest {
         return () -> new ToolSnapshot(List.of(
                 new ToolBinding(new ToolDefinition(new ToolName("first"), "first", Map.of()), arguments -> new ToolOutput(false, Map.of("value", 1))),
                 new ToolBinding(new ToolDefinition(new ToolName("second"), "second", Map.of()), arguments -> new ToolOutput(true, Map.of("code", "TOOL_TIMEOUT")))));
+    }
+
+    private static ModelCallResult result(ModelReply reply) {
+        return new ModelCallResult(reply, Optional.empty());
     }
 
     private static ToolSnapshot trackedSnapshot(AtomicInteger releases) {

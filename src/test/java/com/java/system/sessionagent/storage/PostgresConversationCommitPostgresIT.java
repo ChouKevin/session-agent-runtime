@@ -4,6 +4,8 @@ import com.java.system.sessionagent.conversation.domain.IncomingMessage;
 import com.java.system.sessionagent.conversation.domain.JobStatus;
 import com.java.system.sessionagent.conversation.domain.MessageReceipt;
 import com.java.system.sessionagent.conversation.domain.MessageWorkClaim;
+import com.java.system.sessionagent.conversation.domain.ModelContinuation;
+import com.java.system.sessionagent.conversation.domain.ModelRouteId;
 import com.java.system.sessionagent.conversation.domain.ToolCallId;
 import com.java.system.sessionagent.conversation.domain.AssistantToolCallsMessage;
 import com.java.system.sessionagent.conversation.domain.ToolObservation;
@@ -92,9 +94,9 @@ class PostgresConversationCommitPostgresIT {
                 """, String.class);
 
         assertThat(tables).containsExactlyInAnyOrder("conversation_session", "source_message", "session_message", "user_message",
-                "message_job", "assistant_message", "assistant_tool_calls", "tool_observation", "runtime_message");
+                "message_job", "assistant_message", "assistant_tool_calls", "model_continuation", "tool_observation", "runtime_message");
         assertThat(observationColumns).containsExactlyInAnyOrder("session_id", "sequence", "role", "tool_call_id", "tool_name", "output");
-        assertThat(jobColumns).doesNotContain("reply_sequence");
+        assertThat(jobColumns).contains("model_route_id").doesNotContain("reply_sequence");
         assertThat(roleChecks).contains("USER", "TOOL", "ASSISTANT", "ASSISTANT_TOOL_CALLS", "RUNTIME").doesNotContain("FEEDBACK");
         assertThat(jobChecks).contains("model_calls >= 0").doesNotContain("between 0 and 12");
     }
@@ -134,6 +136,35 @@ class PostgresConversationCommitPostgresIT {
                 java.util.UUID.fromString(receipt.messageJobId().value()))).isEqualTo("DONE");
         assertThat(jdbcTemplate.queryForObject("select count(*) from tool_observation", Integer.class)).isEqualTo(2);
         assertThat(restartedStore.claimNext("recovery-worker", Duration.ofSeconds(30))).isEmpty();
+    }
+
+    @Test
+    void restores_current_job_continuation_after_runtime_reconstruction_and_removes_it_on_completion() {
+        ConversationStore originalStore = store();
+        MessageReceipt receipt = originalStore.receive(new IncomingMessage("thread", "alice", "continuation", "hello"));
+        MessageWorkClaim claim = originalStore.claimNext("worker", Duration.ofSeconds(30)).orElseThrow();
+        ModelContinuation continuation = new ModelContinuation(new ModelRouteId("gemini-primary"), "opaque-v1", new byte[] {1, 2, 3});
+        originalStore.bindModelRoute(claim, continuation.modelRouteId());
+        originalStore.append(claim, new ConversationStore.MessageBatch(List.of(
+                new ConversationStore.AssistantToolCallsData(java.util.Optional.empty(), List.of(
+                        new ConversationStore.ToolCallData(new ToolCallId("call-1"), "mcp_lookup", Map.of()))),
+                new ConversationStore.ToolObservationData(new ToolCallId("call-1"), "mcp_lookup", Map.of("isError", false, "result", Map.of()))),
+                ConversationStore.JobUpdate.KEEP_WORKING, java.util.Optional.of(continuation)), NOW);
+
+        ConversationStore reconstructedStore = store();
+        assertThat(reconstructedStore.loadContinuations(claim)).containsOnlyKeys(new com.java.system.sessionagent.conversation.domain.SessionSequence(2));
+        assertThat(reconstructedStore.loadContinuations(claim).get(new com.java.system.sessionagent.conversation.domain.SessionSequence(2)))
+                .isEqualTo(continuation);
+
+        reconstructedStore.append(claim, new ConversationStore.MessageBatch(List.of(new ConversationStore.AssistantData("done")),
+                ConversationStore.JobUpdate.COMPLETE), NOW.plusSeconds(1));
+
+        assertThat(reconstructedStore.loadContinuations(claim)).isEmpty();
+        assertThat(reconstructedStore.loadHistory(receipt.sessionId())).extracting(message -> message.role())
+                .containsExactly(com.java.system.sessionagent.conversation.domain.MessageRole.USER,
+                        com.java.system.sessionagent.conversation.domain.MessageRole.ASSISTANT_TOOL_CALLS,
+                        com.java.system.sessionagent.conversation.domain.MessageRole.TOOL,
+                        com.java.system.sessionagent.conversation.domain.MessageRole.ASSISTANT);
     }
 
     @Test
@@ -199,18 +230,21 @@ class PostgresConversationCommitPostgresIT {
                     for each row execute function fail_test_tool_detail();
                 """);
 
+        ModelContinuation continuation = new ModelContinuation(new ModelRouteId("gemini-primary"), "opaque-v1", new byte[] {1, 2, 3});
+        store.bindModelRoute(claim, continuation.modelRouteId());
         assertThatThrownBy(() -> store.append(claim, new ConversationStore.MessageBatch(List.of(
                 new ConversationStore.AssistantToolCallsData(java.util.Optional.of("Checking."), List.of(
                         new ConversationStore.ToolCallData(new ToolCallId("call-1"), "mcp_lookup", Map.of()),
                         new ConversationStore.ToolCallData(new ToolCallId("call-2"), "mcp_entries", Map.of()))),
                 new ConversationStore.ToolObservationData(new ToolCallId("call-1"), "mcp_lookup", Map.of("isError", false, "result", Map.of())),
                 new ConversationStore.ToolObservationData(new ToolCallId("call-2"), "mcp_entries", Map.of("isError", false, "result", Map.of()))),
-                ConversationStore.JobUpdate.KEEP_WORKING), NOW)).isInstanceOf(RuntimeException.class);
+                ConversationStore.JobUpdate.KEEP_WORKING, java.util.Optional.of(continuation)), NOW)).isInstanceOf(RuntimeException.class);
 
         assertThat(jdbcTemplate.queryForObject("select count(*) from session_message", Integer.class)).isEqualTo(1);
         assertThat(jdbcTemplate.queryForObject("select count(*) from assistant_message", Integer.class)).isZero();
         assertThat(jdbcTemplate.queryForObject("select count(*) from assistant_tool_calls", Integer.class)).isZero();
         assertThat(jdbcTemplate.queryForObject("select count(*) from tool_observation", Integer.class)).isZero();
+        assertThat(jdbcTemplate.queryForObject("select count(*) from model_continuation", Integer.class)).isZero();
         assertThat(jdbcTemplate.queryForObject("select next_sequence from conversation_session", Long.class)).isEqualTo(2L);
         assertThat(jdbcTemplate.queryForObject("select status from message_job where message_job_id = ?", String.class,
                 java.util.UUID.fromString(receipt.messageJobId().value()))).isEqualTo("WORKING");

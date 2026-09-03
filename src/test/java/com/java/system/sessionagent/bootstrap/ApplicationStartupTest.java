@@ -3,6 +3,7 @@ package com.java.system.sessionagent.bootstrap;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.java.system.sessionagent.conversation.port.out.ConversationStore;
 import com.java.system.sessionagent.mcp.McpConnectionManager;
+import com.java.system.sessionagent.model.SpringAiConversationModel;
 import com.java.system.sessionagent.tool.port.ToolCatalog;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.Test;
@@ -31,6 +32,7 @@ class ApplicationStartupTest {
             assertThat(context).hasSingleBean(McpConnectionManager.class);
             assertThat(context).hasSingleBean(ToolCatalog.class);
             assertThat(context).hasSingleBean(ConversationStore.class);
+            assertThat(context.getBean(SpringAiConversationModel.class).routeId().value()).isEqualTo("google-genai");
         });
     }
 
@@ -40,6 +42,13 @@ class ApplicationStartupTest {
                 "session-agent.mcp.connections.remote.enabled=true",
                 "session-agent.mcp.connections.remote.url=http://127.0.0.1:1/mcp")
                 .run(context -> assertThat(context).hasNotFailed());
+    }
+
+    @Test
+    void binds_the_configured_model_route_without_inferring_it_from_the_provider() {
+        contextRunner.withPropertyValues("session-agent.model.route-id=gemini-primary")
+                .run(context -> assertThat(context.getBean(SpringAiConversationModel.class).routeId().value())
+                        .isEqualTo("gemini-primary"));
     }
 
     @Configuration(proxyBeanMethods = false)

@@ -49,6 +49,7 @@ create table message_job (
     user_message_sequence bigint not null,
     status varchar(16) not null check (status in ('PENDING', 'WORKING', 'RETRY', 'DONE')),
     model_calls integer not null default 0 check (model_calls >= 0),
+    model_route_id varchar(64),
     retry_count integer not null default 0 check (retry_count >= 0),
     available_at timestamptz not null,
     claim_number bigint not null default 0 check (claim_number >= 0),
@@ -84,6 +85,20 @@ create table assistant_tool_calls (
     calls jsonb not null check (jsonb_typeof(calls) = 'array' and jsonb_array_length(calls) > 0),
     primary key (session_id, sequence),
     foreign key (session_id, sequence, role) references session_message(session_id, sequence, role)
+);
+
+create table model_continuation (
+    message_job_id uuid not null,
+    session_id uuid not null,
+    assistant_sequence bigint not null,
+    model_route_id varchar(64) not null,
+    format varchar(128) not null,
+    payload bytea not null check (octet_length(payload) > 0),
+    primary key (message_job_id, assistant_sequence),
+    foreign key (message_job_id, session_id)
+        references message_job(message_job_id, session_id),
+    foreign key (session_id, assistant_sequence)
+        references assistant_tool_calls(session_id, sequence)
 );
 
 create table tool_observation (

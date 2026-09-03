@@ -1,6 +1,7 @@
 package com.java.system.sessionagent.acceptance;
 
 import com.java.system.sessionagent.conversation.domain.ModelReply;
+import com.java.system.sessionagent.conversation.domain.ModelCallResult;
 import com.java.system.sessionagent.conversation.domain.ModelRequest;
 import com.java.system.sessionagent.conversation.domain.ModelUsage;
 import com.java.system.sessionagent.conversation.port.out.ConversationModel;
@@ -27,12 +28,12 @@ final class FakeConversationModel implements ConversationModel {
     }
 
     @Override
-    public ModelReply respond(
+    public ModelCallResult respond(
             ModelRequest request,
             ModelCallReservation reservation,
             Consumer<ModelUsage> usageObserver) {
         requests.add(request);
         reservation.reserve();
-        return Objects.requireNonNull(replies.pollFirst(), "No queued model reply is available");
+        return new ModelCallResult(Objects.requireNonNull(replies.pollFirst(), "No queued model reply is available"), java.util.Optional.empty());
     }
 }

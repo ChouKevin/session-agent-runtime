@@ -27,7 +27,7 @@ class RuntimeConfigurationTest {
         RuntimeProperties.Worker worker = new RuntimeProperties.Worker(
                 Duration.ofSeconds(1), Duration.ofSeconds(30), 3, Duration.ofSeconds(60));
         RuntimeConfiguration configuration = new RuntimeConfiguration();
-        RuntimeProperties properties = new RuntimeProperties(new RuntimeProperties.Model(12), worker);
+        RuntimeProperties properties = new RuntimeProperties(new RuntimeProperties.Model(12, "google-genai"), worker);
 
         WorkerProperties workerProperties = configuration.workerProperties(properties);
         MessageJobRetryPolicy retryPolicy = configuration.messageJobRetryPolicy(properties);
