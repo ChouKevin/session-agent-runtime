@@ -2,6 +2,21 @@
 
 Session Agent Runtime is a standalone, provider-neutral conversation service. It owns durable conversation history, conversation-job ordering, model calls, MCP tool execution, and PostgreSQL storage. Tool providers connect through named MCP streamable-HTTP endpoints; the runtime treats each tool definition and result as opaque provider data.
 
+## Where changes belong
+
+| Change | Location |
+| --- | --- |
+| Session, message, job, or history rules | `src/main/java/com/java/system/sessionagent/conversation` |
+| Chat-model contract or provider integration | `src/main/java/com/java/system/sessionagent/model` |
+| MCP discovery, routing, connection lifecycle, or diagnostics | `src/main/java/com/java/system/sessionagent/mcp` |
+| Generic tool calls and observations | `src/main/java/com/java/system/sessionagent/tool` |
+| PostgreSQL persistence or migrations | `src/main/java/com/java/system/sessionagent/storage` and `src/main/resources/db/migration` |
+| Message, job, history, or actuator HTTP endpoints | `src/main/java/com/java/system/sessionagent/web` |
+
+Keep provider SDK details inside model adapters and keep MCP provider data opaque.
+Runtime must not acquire provider-specific tool DTOs or business rules. Coding-agent
+guidance is in [AGENTS.md](AGENTS.md).
+
 ## Conversation loop
 
 One submitted user message starts one conversation turn. A turn can make one or more model calls. A model call either returns assistant text or requests tools. The runtime executes every requested call sequentially in the model-provided order, then atomically appends one `ASSISTANT_TOOL_CALLS` event followed by all paired `TOOL` observations in one batch; those observations are supplied to the next model call.
@@ -68,7 +83,7 @@ session-agent:
 
 Headers are optional. Omit the header entry when a provider does not require it; otherwise source the value from the environment as shown, rather than committing a credential. Runtime defaults are a 60-second catalog refresh, 30-second request timeout, reconnect backoff from 1 to 60 seconds, and a 5-second shutdown timeout.
 
-Docker Compose starts with zero MCP connections when `SESSION_AGENT_MCP_CONFIGURATION_JSON` is unset. To configure one through Compose, set that environment variable to the equivalent generic configuration, for example `{"session-agent":{"mcp":{"connections":{"semantic":{"enabled":true,"url":"https://host/custom/mcp"}}}}}`. Supply any optional header values through the deployment environment or secret manager; the exact URL and headers are passed to Runtime without Semantic-specific behavior.
+Docker Compose starts with zero MCP connections when `SESSION_AGENT_MCP_CONFIGURATION_JSON` is unset. To configure one through Compose, set that environment variable to the equivalent generic configuration, for example `{"session-agent":{"mcp":{"connections":{"catalog":{"enabled":true,"url":"https://host/custom/mcp"}}}}}`. Supply any optional header values through the deployment environment or secret manager; the exact URL and headers are passed to Runtime without provider-specific behavior.
 
 Startup is safe with no configured connections or when every configured server is unavailable. Each connection reconnects and refreshes independently, so a failed provider does not hide tools from an available provider. `GET /actuator/mcpConnections` reports safe per-connection diagnostics: state (`DISABLED`, `CONNECTING`, `AVAILABLE`, `DEGRADED`, `UNAVAILABLE`, or `STOPPED`), discovered tool count, and when applicable a safe failure code/message. It never exposes endpoint URLs, headers, tokens, raw provider responses, or exception details.
 
@@ -100,4 +115,5 @@ JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64 \
 mvn --batch-mode --no-transfer-progress -Ppostgres-it verify
 ```
 
-Starter owns opt-in deployed live verification across real model and MCP services. Runtime keeps offline fake-backed and model-adapter coverage; it does not own a deployed live acceptance profile.
+Keep deployed live acceptance outside this repository. Runtime owns offline
+fake-backed tests and focused model-adapter coverage.
