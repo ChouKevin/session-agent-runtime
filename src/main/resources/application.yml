@@ -1,13 +1,21 @@
 server:
   address: 127.0.0.1
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,mcpConnections
 session-agent:
-  semantic:
-    base-url: ${SEMANTIC_BASE_URL:http://localhost:8080}
-    api-token: ${SEMANTIC_API_TOKEN}
-    connect-timeout: ${SEMANTIC_CONNECT_TIMEOUT:2s}
-    response-timeout: ${SEMANTIC_RESPONSE_TIMEOUT:120s}
+  mcp:
+    connections: {}
+    refresh-interval: ${SESSION_AGENT_MCP_REFRESH_INTERVAL:60s}
+    request-timeout: ${SESSION_AGENT_MCP_REQUEST_TIMEOUT:30s}
+    initial-backoff: ${SESSION_AGENT_MCP_INITIAL_BACKOFF:1s}
+    maximum-backoff: ${SESSION_AGENT_MCP_MAXIMUM_BACKOFF:60s}
+    shutdown-timeout: ${SESSION_AGENT_MCP_SHUTDOWN_TIMEOUT:5s}
   model:
     max-model-calls-per-message: ${SESSION_AGENT_MAX_MODEL_CALLS_PER_MESSAGE:12}
+    route-id: ${SESSION_AGENT_MODEL_ROUTE_ID:google-genai}
   worker:
     poll-delay: 1s
     lock-duration: 30s

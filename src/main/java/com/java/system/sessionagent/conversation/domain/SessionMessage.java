@@ -4,7 +4,7 @@ import java.time.Instant;
 import java.util.Optional;
 
 public sealed interface SessionMessage
-        permits UserMessage, ToolObservation, AssistantMessage, RuntimeMessage {
+        permits UserMessage, ToolObservation, AssistantMessage, AssistantToolCallsMessage, RuntimeMessage {
 
     SessionId sessionId();
 

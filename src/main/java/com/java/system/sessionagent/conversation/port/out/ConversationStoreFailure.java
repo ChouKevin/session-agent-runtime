@@ -6,6 +6,7 @@ public final class ConversationStoreFailure extends RuntimeException {
 
     public enum Kind {
         CONTRACT,
+        INVALID_HISTORY,
         TRANSIENT
     }
 
@@ -22,6 +23,10 @@ public final class ConversationStoreFailure extends RuntimeException {
 
     public static ConversationStoreFailure transientFailure(Throwable cause) {
         return new ConversationStoreFailure(Kind.TRANSIENT, cause);
+    }
+
+    public static ConversationStoreFailure invalidHistory(Throwable cause) {
+        return new ConversationStoreFailure(Kind.INVALID_HISTORY, cause);
     }
 
     public Kind kind() {

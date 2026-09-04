@@ -1,3 +1,3 @@
 @org.springframework.modulith.ApplicationModule(
-        allowedDependencies = {"tool :: domain", "tool :: application"})
+        allowedDependencies = {"tool :: domain", "tool :: port"})
 package com.java.system.sessionagent.conversation;

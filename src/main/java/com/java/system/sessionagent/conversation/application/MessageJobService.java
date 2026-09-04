@@ -2,9 +2,12 @@ package com.java.system.sessionagent.conversation.application;
 
 import com.java.system.sessionagent.conversation.domain.MessageWorkClaim;
 import com.java.system.sessionagent.conversation.domain.ModelReply;
+import com.java.system.sessionagent.conversation.domain.ModelCallResult;
+import com.java.system.sessionagent.conversation.domain.ModelContinuation;
+import com.java.system.sessionagent.conversation.domain.ModelRouteId;
 import com.java.system.sessionagent.conversation.domain.ModelRequest;
-import com.java.system.sessionagent.conversation.domain.ObservationId;
 import com.java.system.sessionagent.conversation.domain.SessionMessage;
+import com.java.system.sessionagent.conversation.domain.SessionSequence;
 import com.java.system.sessionagent.conversation.domain.ToolRequest;
 import com.java.system.sessionagent.conversation.port.in.MessageJobPort;
 import com.java.system.sessionagent.conversation.port.in.WorkGuard;
@@ -13,12 +16,12 @@ import com.java.system.sessionagent.conversation.port.out.ConversationStore;
 import com.java.system.sessionagent.conversation.port.out.ConversationStoreFailure;
 import com.java.system.sessionagent.conversation.port.out.ConversationTelemetry;
 import com.java.system.sessionagent.conversation.port.out.ModelCallFailure;
+import com.java.system.sessionagent.conversation.port.out.ModelRouteMismatchException;
 import com.java.system.sessionagent.conversation.port.out.NoOpConversationTelemetry;
 import com.java.system.sessionagent.conversation.port.out.StaleWorkClaimException;
-import com.java.system.sessionagent.tool.application.DirectToolRegistry;
-import com.java.system.sessionagent.tool.application.ToolExecutionFailure;
-import com.java.system.sessionagent.tool.application.ToolFailureOutput;
-import com.java.system.sessionagent.tool.application.ToolSnapshot;
+import com.java.system.sessionagent.tool.port.ToolCatalog;
+import com.java.system.sessionagent.tool.port.ToolOutput;
+import com.java.system.sessionagent.tool.port.ToolSnapshot;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.util.Assert;
@@ -28,10 +31,10 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalInt;
-import java.util.UUID;
 
 public final class MessageJobService implements MessageJobPort {
 
@@ -40,10 +43,11 @@ public final class MessageJobService implements MessageJobPort {
     private static final String MODEL_OUTPUT_INVALID = "MODEL_OUTPUT_INVALID";
     private static final String MODEL_UNAVAILABLE = "MODEL_UNAVAILABLE";
     private static final String CONTEXT_TOO_LARGE = "CONTEXT_TOO_LARGE";
+    private static final String INVALID_CONVERSATION_HISTORY = "INVALID_CONVERSATION_HISTORY";
 
     private final ConversationStore conversationStore;
     private final ConversationModel conversationModel;
-    private final DirectToolRegistry toolRegistry;
+    private final ToolCatalog toolCatalog;
     private final Clock clock;
     private final int maxModelCalls;
     private final MessageJobRetryPolicy retryPolicy;
@@ -52,33 +56,33 @@ public final class MessageJobService implements MessageJobPort {
     public MessageJobService(
             ConversationStore conversationStore,
             ConversationModel conversationModel,
-            DirectToolRegistry toolRegistry,
+            ToolCatalog toolCatalog,
             Clock clock) {
-        this(conversationStore, conversationModel, toolRegistry, clock, Integer.MAX_VALUE,
+        this(conversationStore, conversationModel, toolCatalog, clock, Integer.MAX_VALUE,
                 new MessageJobRetryPolicy(3, Duration.ofSeconds(60)), new NoOpConversationTelemetry());
     }
 
     public MessageJobService(
             ConversationStore conversationStore,
             ConversationModel conversationModel,
-            DirectToolRegistry toolRegistry,
+            ToolCatalog toolCatalog,
             Clock clock,
             MessageJobRetryPolicy retryPolicy,
             ConversationTelemetry telemetry) {
-        this(conversationStore, conversationModel, toolRegistry, clock, Integer.MAX_VALUE, retryPolicy, telemetry);
+        this(conversationStore, conversationModel, toolCatalog, clock, Integer.MAX_VALUE, retryPolicy, telemetry);
     }
 
     public MessageJobService(
             ConversationStore conversationStore,
             ConversationModel conversationModel,
-            DirectToolRegistry toolRegistry,
+            ToolCatalog toolCatalog,
             Clock clock,
             int maxModelCalls,
             MessageJobRetryPolicy retryPolicy,
             ConversationTelemetry telemetry) {
         this.conversationStore = Objects.requireNonNull(conversationStore, "Conversation store must not be null");
         this.conversationModel = Objects.requireNonNull(conversationModel, "Conversation model must not be null");
-        this.toolRegistry = Objects.requireNonNull(toolRegistry, "Tool registry must not be null");
+        this.toolCatalog = Objects.requireNonNull(toolCatalog, "Tool catalog must not be null");
         this.clock = Objects.requireNonNull(clock, "Clock must not be null");
         Assert.isTrue(maxModelCalls > 0, "Maximum model calls must be positive");
         this.maxModelCalls = maxModelCalls;
@@ -98,52 +102,81 @@ public final class MessageJobService implements MessageJobPort {
     }
 
     private void processClaim(MessageWorkClaim claim, WorkGuard guard) {
+        ModelRouteId routeId = conversationModel.routeId();
+        try {
+            conversationStore.bindModelRoute(claim, routeId);
+        } catch (ModelRouteMismatchException exception) {
+            appendRuntime(claim, guard, List.of(runtime(MODEL_UNAVAILABLE)), ConversationStore.JobUpdate.COMPLETE);
+            return;
+        }
         while (guard.stillOwned()) {
             List<SessionMessage> history = conversationStore.loadHistory(claim.sessionId());
-            ToolSnapshot tools = toolRegistry.snapshot();
-            ReservationState reservation = new ReservationState();
-            ModelRequest request = new ModelRequest(history, tools);
-            ModelReply reply;
-            long requestStartedAt = System.nanoTime();
-            try {
-                reply = conversationModel.respond(request, () -> reserveAndLogModelRequest(claim, guard, reservation,
-                                history.size(), tools.definitions().size()),
-                        usage -> { });
-            } catch (BudgetExhausted exception) {
-                appendRuntime(claim, guard, List.of(runtime(MODEL_CALL_LIMIT_REACHED)), ConversationStore.JobUpdate.COMPLETE);
+            Map<SessionSequence, ModelContinuation> continuations = Optional.ofNullable(conversationStore.loadContinuations(claim))
+                    .orElseGet(Map::of);
+            if (hasContinuationForAnotherRoute(continuations, routeId)) {
+                appendRuntime(claim, guard, List.of(runtime(MODEL_UNAVAILABLE)), ConversationStore.JobUpdate.COMPLETE);
                 return;
-            } catch (ModelCallFailure failure) {
-                if (handleModelFailure(claim, guard, reservation, failure, elapsedSince(requestStartedAt))) {
-                    continue;
+            }
+            try (ToolSnapshot tools = toolCatalog.snapshot()) {
+                ReservationState reservation = new ReservationState();
+                ModelRequest request = new ModelRequest(history, continuations, tools);
+                ModelReply reply;
+                Optional<ModelContinuation> continuation;
+                long requestStartedAt = System.nanoTime();
+                try {
+                    ModelCallResult result = conversationModel.respond(request, () -> reserveAndLogModelRequest(claim, guard, reservation,
+                                    history.size(), tools.definitions().size()),
+                            usage -> { });
+                    reply = result.reply();
+                    continuation = result.continuation();
+                } catch (BudgetExhausted exception) {
+                    appendRuntime(claim, guard, List.of(runtime(MODEL_CALL_LIMIT_REACHED)), ConversationStore.JobUpdate.COMPLETE);
+                    return;
+                } catch (ModelCallFailure failure) {
+                    if (failure.kind() == ModelCallFailure.Kind.INVALID_HISTORY) {
+                        appendRuntime(claim, guard, List.of(runtime(INVALID_CONVERSATION_HISTORY)), ConversationStore.JobUpdate.COMPLETE);
+                        return;
+                    }
+                    if (handleModelFailure(claim, guard, reservation, failure, elapsedSince(requestStartedAt))) {
+                        continue;
+                    }
+                    return;
                 }
-                return;
-            }
-            if (!guard.stillOwned()) {
-                return;
-            }
-            int ordinal = reservation.ordinal();
-            logModelResponse(claim, ordinal, reply, elapsedSince(requestStartedAt));
-            if (reply instanceof ModelReply.Text text) {
-                appendRuntime(claim, guard, List.of(new ConversationStore.AssistantData(text.message())),
-                        ConversationStore.JobUpdate.COMPLETE);
-                return;
-            }
-            ModelReply.UseTools useTools = (ModelReply.UseTools) reply;
-            if (ordinal == maxModelCalls) {
-                List<ConversationStore.MessageData> messages = new ArrayList<>();
-                useTools.message().ifPresent(text -> messages.add(new ConversationStore.AssistantData(text)));
-                messages.add(runtime(MODEL_CALL_LIMIT_REACHED));
-                appendRuntime(claim, guard, messages, ConversationStore.JobUpdate.COMPLETE);
-                return;
-            }
-            List<ConversationStore.MessageData> messages = toolBatch(claim, guard, ordinal, useTools, tools);
-            if (!guard.stillOwned()) {
-                return;
-            }
-            if (!appendRuntime(claim, guard, messages, ConversationStore.JobUpdate.KEEP_WORKING)) {
-                return;
+                if (continuation.isPresent() && !routeId.equals(continuation.orElseThrow().modelRouteId())) {
+                    appendRuntime(claim, guard, List.of(runtime(MODEL_UNAVAILABLE)), ConversationStore.JobUpdate.COMPLETE);
+                    return;
+                }
+                if (!guard.stillOwned()) {
+                    return;
+                }
+                int ordinal = reservation.ordinal();
+                logModelResponse(claim, ordinal, reply, elapsedSince(requestStartedAt));
+                if (reply instanceof ModelReply.Text text) {
+                    appendRuntime(claim, guard, List.of(new ConversationStore.AssistantData(text.message())),
+                            ConversationStore.JobUpdate.COMPLETE);
+                    return;
+                }
+                ModelReply.UseTools useTools = (ModelReply.UseTools) reply;
+                if (ordinal == maxModelCalls) {
+                    appendRuntime(claim, guard, List.of(runtime(MODEL_CALL_LIMIT_REACHED)), ConversationStore.JobUpdate.COMPLETE);
+                    return;
+                }
+                List<ConversationStore.MessageData> messages = toolBatch(claim, guard, ordinal, useTools, tools);
+                if (!guard.stillOwned()) {
+                    return;
+                }
+                if (!appendRuntime(claim, guard, messages, ConversationStore.JobUpdate.KEEP_WORKING, continuation)) {
+                    return;
+                }
             }
         }
+    }
+
+    private static boolean hasContinuationForAnotherRoute(
+            Map<SessionSequence, ModelContinuation> continuations,
+            ModelRouteId routeId) {
+        return continuations.values().stream()
+                .anyMatch(continuation -> !routeId.equals(continuation.modelRouteId()));
     }
 
     private int reserve(MessageWorkClaim claim, WorkGuard guard, ReservationState state) {
@@ -176,7 +209,10 @@ public final class MessageJobService implements MessageJobPort {
             ModelReply.UseTools reply,
             ToolSnapshot tools) {
         List<ConversationStore.MessageData> messages = new ArrayList<>();
-        reply.message().ifPresent(text -> messages.add(new ConversationStore.AssistantData(text)));
+        List<ConversationStore.ToolCallData> calls = reply.requests().stream()
+                .map(request -> new ConversationStore.ToolCallData(request.toolCallId(), request.toolName().value(), request.arguments()))
+                .toList();
+        messages.add(new ConversationStore.AssistantToolCallsData(reply.message(), calls));
         for (ToolRequest request : reply.requests()) {
             if (!guard.stillOwned()) {
                 return List.of();
@@ -192,23 +228,19 @@ public final class MessageJobService implements MessageJobPort {
             ToolSnapshot tools,
             ToolRequest request) {
         long executionStartedAt = System.nanoTime();
-        String output;
+        ToolOutput output;
         String outcome;
         try {
-            output = toolRegistry.invoke(tools, request.toolName(), request.input());
-            outcome = "SUCCESS";
-        } catch (IllegalArgumentException failure) {
-            output = ToolFailureOutput.format(new ToolExecutionFailure("TOOL_INPUT_INVALID", "The tool input is invalid."));
-            outcome = "INVALID_INPUT";
-        } catch (ToolExecutionFailure failure) {
-            output = ToolFailureOutput.format(failure);
+            output = tools.invoke(request.toolName(), request.arguments());
+            outcome = output.isError() ? "FAILURE" : "SUCCESS";
+        } catch (RuntimeException failure) {
+            output = ToolOutput.runtimeFailure("TOOL_PROTOCOL_ERROR", "The tool could not be executed.");
             outcome = "FAILURE";
         }
         Duration duration = elapsedSince(executionStartedAt);
         telemetry.tool(request.toolName().value(), outcome, duration);
         logToolExecution(claim, ordinal, outcome, duration);
-        return new ConversationStore.ToolObservationData(new ObservationId(UUID.randomUUID().toString()),
-                request.toolName().value(), request.input(), output);
+        return new ConversationStore.ToolObservationData(request.toolCallId(), request.toolName().value(), output.asStructuredValue());
     }
 
     private boolean handleModelFailure(
@@ -265,11 +297,20 @@ public final class MessageJobService implements MessageJobPort {
             WorkGuard guard,
             List<ConversationStore.MessageData> messages,
             ConversationStore.JobUpdate update) {
+        return appendRuntime(claim, guard, messages, update, Optional.empty());
+    }
+
+    private boolean appendRuntime(
+            MessageWorkClaim claim,
+            WorkGuard guard,
+            List<ConversationStore.MessageData> messages,
+            ConversationStore.JobUpdate update,
+            Optional<ModelContinuation> continuation) {
         if (!guard.stillOwned()) {
             return false;
         }
         try {
-            conversationStore.append(claim, new ConversationStore.MessageBatch(messages, update), clock.instant());
+            conversationStore.append(claim, new ConversationStore.MessageBatch(messages, update, continuation), clock.instant());
             for (ConversationStore.MessageData message : messages) {
                 if (message instanceof ConversationStore.RuntimeData runtime) {
                     telemetry.feedback(runtime.code());
@@ -283,6 +324,10 @@ public final class MessageJobService implements MessageJobPort {
 
     private void recoverStorageFailure(MessageWorkClaim claim, WorkGuard guard, ConversationStoreFailure failure) {
         if (!guard.stillOwned()) {
+            return;
+        }
+        if (failure.kind() == ConversationStoreFailure.Kind.INVALID_HISTORY) {
+            appendRuntime(claim, guard, List.of(runtime(INVALID_CONVERSATION_HISTORY)), ConversationStore.JobUpdate.COMPLETE);
             return;
         }
         try {
@@ -308,6 +353,7 @@ public final class MessageJobService implements MessageJobPort {
             case MODEL_OUTPUT_INVALID -> new ConversationStore.RuntimeData(code, "Runtime model output is invalid.");
             case MODEL_UNAVAILABLE -> new ConversationStore.RuntimeData(code, "Runtime model is unavailable.");
             case CONTEXT_TOO_LARGE -> new ConversationStore.RuntimeData(code, "Runtime model context is too large.");
+            case INVALID_CONVERSATION_HISTORY -> new ConversationStore.RuntimeData(code, "Runtime conversation history is invalid.");
             default -> throw new IllegalArgumentException("Unsupported runtime code");
         };
     }
@@ -346,6 +392,7 @@ public final class MessageJobService implements MessageJobPort {
             case CORRECTABLE -> "OUTPUT_INVALID";
             case CONTEXT_TOO_LARGE -> "CONTEXT_TOO_LARGE";
             case TRANSIENT, TERMINAL -> "UNAVAILABLE";
+            case INVALID_HISTORY -> "INVALID_HISTORY";
         };
     }
 

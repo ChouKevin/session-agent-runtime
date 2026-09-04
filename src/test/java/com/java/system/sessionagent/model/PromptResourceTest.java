@@ -19,33 +19,21 @@ class PromptResourceTest {
     }
 
     @Test
-    void defines_provider_neutral_multi_tool_execution_rules() {
+    void defines_only_the_durable_provider_neutral_tool_rules() {
         PromptResource promptResource = new PromptResource();
 
         assertThat(promptResource.content())
-                .contains("Follow each tool")
-                .contains("description and input schema")
-                .contains("one or more tools")
-                .contains("run sequentially in the order")
-                .contains("One tool failure does not cancel")
-                .contains("must be independent")
-                .contains("Stop querying and answer")
-                .contains("For multi-part questions")
-                .contains("investigate only unanswered parts")
-                .contains("Do not repeat")
-                .contains("equivalent request")
-                .contains("external-service values")
-                .contains("Do not use code-inspection tools to search for live values")
-                .contains("no live-data tool is available")
-                .doesNotContain("one tool call per")
-                .doesNotContainIgnoringCase("planning")
-                .doesNotContainIgnoringCase("final reply")
-                .doesNotContain("`list_repositories`")
-                .doesNotContain("`codebase_search_code_facts`")
-                .doesNotContain("totalCount:0")
-                .doesNotContain("REVISION_OUTDATED")
+                .contains("external or codebase facts")
+                .contains("identifiers exactly")
+                .contains("sequentially")
+                .contains("cannot depend on earlier results")
+                .contains("failures are feedback")
+                .contains("Do not invent facts")
+                .doesNotContainIgnoringCase("schema")
+                .doesNotContainIgnoringCase("repository")
+                .doesNotContainIgnoringCase("fixture")
+                .doesNotContainIgnoringCase("query count")
                 .doesNotContainIgnoringCase("citation")
-                .doesNotContainIgnoringCase("citeable")
-                .doesNotContain("\"message\":\"<answer>\"");
+                .doesNotContainIgnoringCase("final format");
     }
 }

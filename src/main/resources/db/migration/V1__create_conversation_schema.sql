@@ -22,7 +22,7 @@ create table session_message (
     session_id uuid not null references conversation_session(session_id),
     sequence bigint not null check (sequence >= 1),
     message_job_id uuid,
-    role varchar(16) not null check (role in ('USER', 'TOOL', 'ASSISTANT', 'RUNTIME')),
+    role varchar(32) not null check (role in ('USER', 'TOOL', 'ASSISTANT_TOOL_CALLS', 'ASSISTANT', 'RUNTIME')),
     created_at timestamptz not null,
     primary key (session_id, sequence),
     unique (session_id, sequence, role),
@@ -49,6 +49,7 @@ create table message_job (
     user_message_sequence bigint not null,
     status varchar(16) not null check (status in ('PENDING', 'WORKING', 'RETRY', 'DONE')),
     model_calls integer not null default 0 check (model_calls >= 0),
+    model_route_id varchar(64),
     retry_count integer not null default 0 check (retry_count >= 0),
     available_at timestamptz not null,
     claim_number bigint not null default 0 check (claim_number >= 0),
@@ -76,14 +77,37 @@ create table assistant_message (
     foreign key (session_id, sequence, role) references session_message(session_id, sequence, role)
 );
 
+create table assistant_tool_calls (
+    session_id uuid not null,
+    sequence bigint not null,
+    role varchar(32) not null default 'ASSISTANT_TOOL_CALLS' check (role = 'ASSISTANT_TOOL_CALLS'),
+    message text check (message is null or length(message) > 0),
+    calls jsonb not null check (jsonb_typeof(calls) = 'array' and jsonb_array_length(calls) > 0),
+    primary key (session_id, sequence),
+    foreign key (session_id, sequence, role) references session_message(session_id, sequence, role)
+);
+
+create table model_continuation (
+    message_job_id uuid not null,
+    session_id uuid not null,
+    assistant_sequence bigint not null,
+    model_route_id varchar(64) not null,
+    format varchar(128) not null,
+    payload bytea not null check (octet_length(payload) > 0),
+    primary key (message_job_id, assistant_sequence),
+    foreign key (message_job_id, session_id)
+        references message_job(message_job_id, session_id),
+    foreign key (session_id, assistant_sequence)
+        references assistant_tool_calls(session_id, sequence)
+);
+
 create table tool_observation (
     session_id uuid not null,
     sequence bigint not null,
     role varchar(16) not null default 'TOOL' check (role = 'TOOL'),
-    observation_id uuid not null unique,
+    tool_call_id text not null check (tool_call_id ~ '[^[:space:]]'),
     tool_name varchar(128) not null check (tool_name ~ '[^[:space:]]'),
-    input text not null,
-    output text not null,
+    output jsonb not null,
     primary key (session_id, sequence),
     foreign key (session_id, sequence, role) references session_message(session_id, sequence, role)
 );
@@ -115,6 +139,8 @@ create trigger session_message_append_only before update or delete on session_me
 create trigger user_message_append_only before update or delete on user_message
     for each row execute function reject_committed_row_change();
 create trigger assistant_message_append_only before update or delete on assistant_message
+    for each row execute function reject_committed_row_change();
+create trigger assistant_tool_calls_append_only before update or delete on assistant_tool_calls
     for each row execute function reject_committed_row_change();
 create trigger tool_observation_append_only before update or delete on tool_observation
     for each row execute function reject_committed_row_change();
@@ -160,6 +186,7 @@ begin
     select case new.role
         when 'USER' then (select count(*) from user_message where session_id = new.session_id and sequence = new.sequence)
         when 'TOOL' then (select count(*) from tool_observation where session_id = new.session_id and sequence = new.sequence)
+        when 'ASSISTANT_TOOL_CALLS' then (select count(*) from assistant_tool_calls where session_id = new.session_id and sequence = new.sequence)
         when 'ASSISTANT' then (select count(*) from assistant_message where session_id = new.session_id and sequence = new.sequence)
         when 'RUNTIME' then (select count(*) from runtime_message where session_id = new.session_id and sequence = new.sequence)
     end into detail_count;

@@ -25,6 +25,9 @@ class StandaloneProjectTest {
 
     private static final String FORBIDDEN_TRANSPORT_TOKEN = "sla" + "ck";
     private static final String RESERVED_TRANSPORT_CONTRACT_FILE = "src/test/shell/docker-contract-test.sh";
+    private static final Set<String> FORBIDDEN_RUNTIME_REMNANTS = Set.of(
+            "Observation" + "Id", "StrictJson" + "Codec", "ToolSchema" + "Factory", "DirectTool" + "Registry",
+            "reply" + "Only", "FINAL" + "_REPLY", "cita" + "tion");
 
     @Test
     void isAnIndependentBuildProjectWithLockedTooling() throws Exception {
@@ -47,6 +50,8 @@ class StandaloneProjectTest {
 
         assertLockedBuildConfiguration(project);
         assertNoForbiddenDependencies(project);
+        assertNoObsoleteLiveVerification(projectPom);
+        assertNoSemanticOrTypedToolRemnants(projectPom);
         assertNoForbiddenTransportReferenceInProjectFiles(projectPom);
     }
 
@@ -60,15 +65,18 @@ class StandaloneProjectTest {
     private static void assertLockedBuildConfiguration(Element project) {
         Element properties = child(project, "properties");
         assertEquals("21", childText(properties, "java.version"));
-        assertEquals("2.0.0", childText(properties, "spring-ai.version"));
+        assertEquals("2.0.1", childText(properties, "spring-ai.version"));
         assertEquals("2.1.0", childText(properties, "spring-modulith.version"));
-        assertEquals("5.0.0", childText(properties, "victools.version"));
         assertEquals("1.4.2", childText(properties, "archunit.version"));
 
         Element managedDependencies = child(child(project, "dependencyManagement"), "dependencies");
         assertImportedBom(managedDependencies, "org.springframework.ai", "spring-ai-bom", "${spring-ai.version}");
         assertImportedBom(managedDependencies, "org.springframework.modulith", "spring-modulith-bom", "${spring-modulith.version}");
-        assertDeclaredDependency(child(project, "dependencies"), "org.springframework.ai", "spring-ai-starter-model-google-genai");
+        Element dependencies = child(project, "dependencies");
+        assertDeclaredDependency(dependencies, "org.springframework.ai", "spring-ai-starter-model-google-genai");
+        assertBomManagedDependency(dependencies, "org.springframework.ai", "spring-ai-mcp");
+        assertNoDeclaredDependency(dependencies, "io.modelcontextprotocol.sdk");
+        assertNoDeclaredDependency(dependencies, "com.github.victools");
 
         Element build = child(project, "build");
         Element surefire = pluginByArtifactId(build, "maven-surefire-plugin");
@@ -79,11 +87,7 @@ class StandaloneProjectTest {
         assertEquals(Set.of("**/*PostgresIT.java"), elementText(child(child(failsafe, "configuration"), "includes"), "include"));
         assertEquals(Set.of("integration-test", "verify"), elementText(child(failsafe, "executions"), "goal"));
 
-        Element liveProfile = profileById(child(project, "profiles"), "live-it");
-        Element liveSurefire = pluginByArtifactId(child(liveProfile, "build"), "maven-surefire-plugin");
-        Element liveIncludes = child(child(liveSurefire, "configuration"), "includes");
-        assertEquals("override", liveIncludes.getAttribute("combine.self"));
-        assertEquals(Set.of("**/SessionAgentLiveIT.java"), elementText(liveIncludes, "include"));
+        assertFalse(hasProfileById(child(project, "profiles"), "live-it"));
     }
 
     private static void assertNoForbiddenDependencies(Element project) {
@@ -96,6 +100,35 @@ class StandaloneProjectTest {
 
             assertFalse(containsForbiddenTransportReference(coordinate),
                     () -> "Standalone project must not declare forbidden transport dependency " + coordinate);
+        }
+    }
+
+    private static void assertNoObsoleteLiveVerification(Path projectPom) {
+        Path projectRoot = projectPom.getParent();
+        assertFalse(Files.exists(projectRoot.resolve("live-test.sh")));
+        assertFalse(Files.exists(projectRoot.resolve("src/test/java/com/java/system/sessionagent/live/SessionAgentLiveAssertionTest.java")));
+        assertFalse(Files.exists(projectRoot.resolve("src/test/java/com/java/system/sessionagent/live/SessionAgentLiveIT.java")));
+    }
+
+    private static void assertNoSemanticOrTypedToolRemnants(Path projectPom) throws Exception {
+        Path productionSources = projectPom.getParent().resolve("src/main");
+        List<Path> productionFiles;
+        try (Stream<Path> paths = Files.walk(productionSources)) {
+            productionFiles = paths.filter(Files::isRegularFile).toList();
+        }
+        for (Path productionFile : productionFiles) {
+            String relativePath = productionSources.relativize(productionFile).toString().replace(File.separatorChar, '/');
+            String content = Files.readString(productionFile);
+            assertFalse(relativePath.toLowerCase(Locale.ROOT).contains("semantic"),
+                    () -> "Production path must not contain semantic: " + relativePath);
+            assertFalse(content.contains("com.java.system.sessionagent.semantic"),
+                    () -> "Production code must not reference the Semantic package: " + relativePath);
+            assertFalse(content.contains("com.github.victools"),
+                    () -> "Production code must not directly use Victools: " + relativePath);
+            for (String remnant : FORBIDDEN_RUNTIME_REMNANTS) {
+                assertFalse(content.contains(remnant),
+                        () -> "Production code must not retain obsolete runtime remnant " + remnant + " in " + relativePath);
+            }
         }
     }
 
@@ -136,6 +169,20 @@ class StandaloneProjectTest {
 
     private static void assertDeclaredDependency(Element dependencies, String groupId, String artifactId) {
         dependencyByCoordinate(dependencies, groupId, artifactId);
+    }
+
+    private static void assertBomManagedDependency(Element dependencies, String groupId, String artifactId) {
+        Element dependency = dependencyByCoordinate(dependencies, groupId, artifactId);
+        assertFalse(hasChild(dependency, "version"));
+    }
+
+    private static void assertNoDeclaredDependency(Element dependencies, String forbiddenGroupId) {
+        NodeList dependencyNodes = dependencies.getElementsByTagNameNS("*", "dependency");
+        for (int index = 0; index < dependencyNodes.getLength(); index++) {
+            Element dependency = (Element) dependencyNodes.item(index);
+            assertFalse(forbiddenGroupId.equals(childText(dependency, "groupId")),
+                    () -> "Runtime must not directly declare dependencies from " + forbiddenGroupId);
+        }
     }
 
     private static Element dependencyByCoordinate(Element dependencies, String groupId, String artifactId) {
@@ -227,5 +274,16 @@ class StandaloneProjectTest {
             }
         }
         throw new AssertionError("Missing " + profileId + " profile");
+    }
+
+    private static boolean hasProfileById(Element profiles, String profileId) {
+        NodeList profileNodes = profiles.getElementsByTagNameNS("*", "profile");
+        for (int index = 0; index < profileNodes.getLength(); index++) {
+            Element profile = (Element) profileNodes.item(index);
+            if (profileId.equals(childText(profile, "id"))) {
+                return true;
+            }
+        }
+        return false;
     }
 }

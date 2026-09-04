@@ -1,256 +1,193 @@
 package com.java.system.sessionagent.model;
 
-import com.java.system.sessionagent.bootstrap.MicrometerConversationTelemetry;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.java.system.sessionagent.conversation.domain.AssistantToolCallsMessage;
+import com.java.system.sessionagent.conversation.domain.MessageJobId;
+import com.java.system.sessionagent.conversation.domain.MessageRole;
 import com.java.system.sessionagent.conversation.domain.ModelReply;
+import com.java.system.sessionagent.conversation.domain.ModelCallResult;
+import com.java.system.sessionagent.conversation.domain.ModelContinuation;
+import com.java.system.sessionagent.conversation.domain.ModelRouteId;
 import com.java.system.sessionagent.conversation.domain.ModelRequest;
-import com.java.system.sessionagent.conversation.domain.ModelUsage;
-import com.java.system.sessionagent.conversation.port.out.ModelCallFailure;
+import com.java.system.sessionagent.conversation.domain.SessionId;
+import com.java.system.sessionagent.conversation.domain.SessionMessage;
+import com.java.system.sessionagent.conversation.domain.SessionSequence;
+import com.java.system.sessionagent.conversation.domain.ToolCallId;
+import com.java.system.sessionagent.conversation.domain.ToolObservation;
 import com.java.system.sessionagent.conversation.domain.ToolRequest;
-import com.java.system.sessionagent.tool.application.DirectToolRegistry;
-import com.java.system.sessionagent.tool.application.ToolRegistration;
-import com.java.system.sessionagent.tool.application.ToolSnapshot;
-import com.java.system.sessionagent.tool.domain.ToolDefinition;
+import com.java.system.sessionagent.conversation.port.out.NoOpConversationTelemetry;
+import com.java.system.sessionagent.conversation.port.out.ModelCallFailure;
 import com.java.system.sessionagent.tool.domain.ToolName;
-import io.micrometer.core.instrument.Counter;
-import io.micrometer.core.instrument.Timer;
-import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import com.java.system.sessionagent.tool.port.ToolSnapshot;
 import org.junit.jupiter.api.Test;
-import org.springframework.ai.chat.metadata.ChatResponseMetadata;
-import org.springframework.ai.chat.metadata.DefaultUsage;
 import org.springframework.ai.chat.messages.AssistantMessage;
+import org.springframework.ai.chat.prompt.Prompt;
+import org.springframework.ai.chat.metadata.ChatResponseMetadata;
 import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.model.Generation;
-import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.ai.model.tool.ToolCallingChatOptions;
 
-import java.util.ArrayList;
+import java.time.Instant;
 import java.util.List;
+import java.util.ArrayList;
+import java.util.Map;
 import java.util.Optional;
-import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class SpringAiConversationModelTest {
 
-    @Test
-    void preserves_text_only_generation_without_interpreting_its_content() {
-        String message = "## Answer\n\n{\"source\":\"opaque\"}";
-        RecordingChatModel chatModel = new RecordingChatModel(response(new AssistantMessage(message)));
-        SpringAiConversationModel model = new SpringAiConversationModel(chatModel, new PromptResource());
-        AtomicReference<ModelUsage> observedUsage = new AtomicReference<>();
-
-        ModelReply reply = model.respond(request(), () -> 1, observedUsage::set);
-
-        assertThat(reply).isEqualTo(new ModelReply.Text(message));
-        assertThat(observedUsage.get()).isEqualTo(new ModelUsage(7, 3, 10, true));
-    }
+    private static final ModelRouteId GOOGLE_ROUTE_ID = new ModelRouteId("google-genai");
 
     @Test
-    void omits_tool_calling_options_when_no_tools_are_visible() {
-        RecordingChatModel chatModel = new RecordingChatModel(response(new AssistantMessage("answer")));
-        SpringAiConversationModel model = new SpringAiConversationModel(chatModel, new PromptResource());
-        ModelRequest request = new ModelRequest(List.of(), new DirectToolRegistry(List.of()).snapshot());
+    void preserves_nonblank_provider_ids_and_generic_arguments_for_mixed_text_calls() {
+        AssistantMessage message = AssistantMessage.builder().content("I will inspect both.").toolCalls(List.of(
+                new AssistantMessage.ToolCall("call-1", "function", "first", "{\"query\":\"fees\"}"),
+                new AssistantMessage.ToolCall("call-2", "function", "second", "{\"limit\":2}"))).build();
+        SpringAiConversationModel model = model(message, GOOGLE_ROUTE_ID);
 
-        model.respond(request, () -> 1, usage -> { });
+        ModelCallResult result = model.respond(new ModelRequest(List.of(), new ToolSnapshot(List.of())), () -> 1, usage -> { });
+        ModelReply reply = result.reply();
 
-        assertThat(chatModel.prompt.getOptions()).isNull();
+        assertThat(reply).isEqualTo(new ModelReply.UseTools(Optional.of("I will inspect both."), List.of(
+                new ToolRequest(new ToolCallId("call-1"), new ToolName("first"), Map.of("query", "fees")),
+                new ToolRequest(new ToolCallId("call-2"), new ToolName("second"), Map.of("limit", 2)))));
     }
 
     @Test
-    void keeps_same_generation_text_and_ordered_tool_requests_together() {
-        AssistantMessage message = AssistantMessage.builder()
-                .content("I will inspect both sources.")
-                .toolCalls(List.of(
-                        new AssistantMessage.ToolCall("provider-1", "function", "first", "{}"),
-                        new AssistantMessage.ToolCall("provider-2", "function", "second", "{\"id\":2}")))
-                .build();
-        RecordingChatModel chatModel = new RecordingChatModel(response(message));
-        SpringAiConversationModel model = new SpringAiConversationModel(chatModel, new PromptResource());
+    void preserves_json_looking_final_text_without_decoding_it() {
+        SpringAiConversationModel model = model(new AssistantMessage("{\"message\":\"still plain text\"}"), GOOGLE_ROUTE_ID);
 
-        ModelReply reply = model.respond(request(), () -> 1, usage -> { });
+        ModelCallResult result = model.respond(new ModelRequest(List.of(), new ToolSnapshot(List.of())), () -> 1, usage -> { });
+        ModelReply reply = result.reply();
 
-        assertThat(reply).isEqualTo(new ModelReply.UseTools(
-                Optional.of("I will inspect both sources."),
-                List.of(
-                        new ToolRequest(new ToolName("first"), "{}"),
-                        new ToolRequest(new ToolName("second"), "{\"id\":2}"))));
-        assertThat(chatModel.prompt.getInstructions().getFirst())
-                .isInstanceOf(org.springframework.ai.chat.messages.SystemMessage.class);
-        assertThat(((ToolCallingChatOptions) chatModel.prompt.getOptions()).getToolCallbacks())
-                .extracting(callback -> callback.getToolDefinition().name())
-                .containsExactly("first");
+        assertThat(reply).isEqualTo(new ModelReply.Text("{\"message\":\"still plain text\"}"));
     }
 
     @Test
-    void derives_tool_calling_options_from_the_chat_model_defaults() {
-        ToolCallingChatOptions defaults = ToolCallingChatOptions.builder()
-                .model("configured-provider-model")
-                .temperature(0.25)
-                .build();
-        RecordingChatModel chatModel = new RecordingChatModel(
-                response(new AssistantMessage("answer")), defaults);
-        SpringAiConversationModel model = new SpringAiConversationModel(chatModel, new PromptResource());
+    void generates_unique_ids_for_missing_provider_ids_and_rejects_duplicate_provider_ids() {
+        AssistantMessage withoutIds = AssistantMessage.builder().content("Checking.").toolCalls(List.of(
+                new AssistantMessage.ToolCall("", "function", "first", "{}"),
+                new AssistantMessage.ToolCall(" ", "function", "second", "{}"))).build();
 
-        model.respond(request(), () -> 1, usage -> { });
+        ModelReply.UseTools generated = (ModelReply.UseTools) model(withoutIds, GOOGLE_ROUTE_ID)
+                .respond(new ModelRequest(List.of(), new ToolSnapshot(List.of())), () -> 1, usage -> { }).reply();
+        assertThat(generated.requests()).extracting(ToolRequest::toolCallId).doesNotHaveDuplicates();
 
-        ToolCallingChatOptions promptOptions = (ToolCallingChatOptions) chatModel.prompt.getOptions();
-        assertThat(promptOptions.getModel()).isEqualTo("configured-provider-model");
-        assertThat(promptOptions.getTemperature()).isEqualTo(0.25);
-        assertThat(promptOptions.getToolCallbacks()).hasSize(1);
+        AssistantMessage duplicateIds = AssistantMessage.builder().toolCalls(List.of(
+                new AssistantMessage.ToolCall("call-1", "function", "first", "{}"),
+                new AssistantMessage.ToolCall("call-1", "function", "second", "{}"))).build();
+        assertThatThrownBy(() -> model(duplicateIds, GOOGLE_ROUTE_ID).respond(new ModelRequest(List.of(), new ToolSnapshot(List.of())),
+                () -> 1, usage -> { })).isInstanceOf(ModelCallFailure.class);
     }
 
     @Test
-    void selects_the_first_actionable_generation_and_ignores_later_candidates() {
-        SpringAiConversationModel model = new SpringAiConversationModel(new RecordingChatModel(response(
-                new AssistantMessage(""),
-                new AssistantMessage("first answer"),
-                toolMessage("later", "{}"))), new PromptResource());
+    void rejects_cross_job_native_tool_history_before_calling_the_provider() {
+        AtomicBoolean providerCalled = new AtomicBoolean();
+        SpringAiConversationModel model = model(new AssistantMessage("unreachable"), providerCalled, GOOGLE_ROUTE_ID);
+        List<SessionMessage> malformedHistory = List.of(
+                new AssistantToolCallsMessage(new SessionId("session-1"), new SessionSequence(1), Optional.of(new MessageJobId("job-1")),
+                        Instant.EPOCH, MessageRole.ASSISTANT_TOOL_CALLS, Optional.empty(),
+                        List.of(new ToolRequest(new ToolCallId("call-1"), new ToolName("first"), Map.of()))),
+                new ToolObservation(new SessionId("session-1"), new SessionSequence(2), Optional.of(new MessageJobId("job-2")),
+                        Instant.EPOCH, MessageRole.TOOL, new ToolCallId("call-1"), "first", Map.of("isError", false, "result", Map.of())));
 
-        ModelReply reply = model.respond(request(), () -> 1, usage -> { });
-
-        assertThat(reply).isEqualTo(new ModelReply.Text("first answer"));
+        assertThatThrownBy(() -> model.respond(new ModelRequest(malformedHistory, new ToolSnapshot(List.of())), () -> 1, usage -> { }))
+                .isInstanceOf(ModelCallFailure.class);
+        assertThat(providerCalled).isFalse();
     }
 
     @Test
-    void does_not_merge_tool_requests_from_separate_generations() {
-        SpringAiConversationModel model = new SpringAiConversationModel(new RecordingChatModel(response(
-                toolMessage("first", "{}"),
-                toolMessage("second", "{\"id\":2}"))), new PromptResource());
-
-        ModelReply reply = model.respond(request(), () -> 1, usage -> { });
-
-        assertThat(reply).isEqualTo(new ModelReply.UseTools(Optional.empty(),
-                List.of(new ToolRequest(new ToolName("first"), "{}"))));
-    }
-
-    @Test
-    void rejects_generations_without_nonblank_text_or_tool_requests() {
-        SpringAiConversationModel model = new SpringAiConversationModel(
-                new RecordingChatModel(response(new AssistantMessage("   "))), new PromptResource());
-
-        assertThatThrownBy(() -> model.respond(request(), () -> 1, usage -> { }))
-                .isInstanceOf(ModelCallFailure.class)
-                .extracting(exception -> ((ModelCallFailure) exception).kind())
-                .isEqualTo(ModelCallFailure.Kind.CORRECTABLE);
-    }
-
-    @Test
-    void records_one_failure_counter_and_duration_for_an_unusable_provider_response() {
-        SimpleMeterRegistry registry = new SimpleMeterRegistry();
-        RecordingChatModel chatModel = new RecordingChatModel(response(new AssistantMessage("   ")));
-        SpringAiConversationModel model = new SpringAiConversationModel(chatModel, new PromptResource(),
-                new MicrometerConversationTelemetry(registry));
-
-        assertThatThrownBy(() -> model.respond(request(), () -> 1, usage -> { }))
-                .isInstanceOf(ModelCallFailure.class)
-                .extracting(exception -> ((ModelCallFailure) exception).kind())
-                .isEqualTo(ModelCallFailure.Kind.CORRECTABLE);
-
-        Counter failureCounter = registry.find("session_agent.model").tags(
-                "outcome", "FAILURE", "category", "OUTPUT_INVALID", "usage_available", "false").counter();
-        Timer failureDuration = registry.find("session_agent.model.duration").tags(
-                "outcome", "FAILURE", "category", "OUTPUT_INVALID", "usage_available", "false").timer();
-        assertThat(chatModel.callCount).isEqualTo(1);
-        assertThat(failureCounter).isNotNull();
-        assertThat(failureCounter.count()).isEqualTo(1.0);
-        assertThat(failureDuration).isNotNull();
-        assertThat(failureDuration.count()).isEqualTo(1);
-    }
-
-    @Test
-    void reserves_before_the_single_provider_call_and_consumes_reservation_when_provider_fails() {
-        List<String> events = new ArrayList<>();
-        RuntimeException failure = new IllegalStateException("provider rejected request");
-        RecordingChatModel chatModel = new RecordingChatModel(failure, events);
-        SpringAiConversationModel model = new SpringAiConversationModel(chatModel, new PromptResource());
-
-        assertThatThrownBy(() -> model.respond(request(), () -> {
-            events.add("reserve");
-            return 1;
-        }, usage -> { })).isInstanceOf(ModelCallFailure.class);
-
-        assertThat(events).containsExactly("reserve", "call");
-        assertThat(chatModel.callCount).isEqualTo(1);
-    }
-
-    @Test
-    void does_not_call_the_provider_when_reservation_is_denied() {
-        RecordingChatModel chatModel = new RecordingChatModel(response(new AssistantMessage("unused")));
-        SpringAiConversationModel model = new SpringAiConversationModel(chatModel, new PromptResource());
-
-        assertThatThrownBy(() -> model.respond(request(), () -> {
-            throw new IllegalStateException("budget exhausted");
-        }, usage -> { })).isInstanceOf(IllegalStateException.class)
-                .hasMessage("budget exhausted");
-
-        assertThat(chatModel.callCount).isZero();
-    }
-
-    private static ModelRequest request() {
-        return new ModelRequest(List.of(), snapshot());
-    }
-
-    private static ToolSnapshot snapshot() {
-        ToolDefinition definition = new ToolDefinition(new ToolName("first"), "First tool", "{\"type\":\"object\"}");
-        ToolRegistration<String> registration = new ToolRegistration<>(definition, String.class,
-                ignored -> "{}");
-        return new DirectToolRegistry(List.of(registration)).snapshot();
-    }
-
-    private static AssistantMessage toolMessage(String name, String arguments) {
-        return AssistantMessage.builder()
-                .toolCalls(List.of(new AssistantMessage.ToolCall("provider-call", "function", name, arguments)))
-                .build();
-    }
-
-    private static ChatResponse response(AssistantMessage... messages) {
-        ChatResponseMetadata metadata = ChatResponseMetadata.builder().usage(new DefaultUsage(7, 3, 10)).build();
-        return new ChatResponse(List.of(messages).stream().map(Generation::new).toList(), metadata);
-    }
-
-    private static final class RecordingChatModel implements ChatModel {
-
-        private final Optional<ChatResponse> response;
-        private final Optional<RuntimeException> failure;
-        private final List<String> events;
-        private final ToolCallingChatOptions options;
-        private Prompt prompt;
-        private int callCount;
-
-        private RecordingChatModel(ChatResponse response) {
-            this(response, ToolCallingChatOptions.builder().build());
-        }
-
-        private RecordingChatModel(ChatResponse response, ToolCallingChatOptions options) {
-            this.response = Optional.of(response);
-            this.failure = Optional.empty();
-            this.events = new ArrayList<>();
-            this.options = options;
-        }
-
-        private RecordingChatModel(RuntimeException failure, List<String> events) {
-            this.response = Optional.empty();
-            this.failure = Optional.of(failure);
-            this.events = events;
-            this.options = ToolCallingChatOptions.builder().build();
-        }
-
-        @Override
-        public ChatResponse call(Prompt prompt) {
-            this.prompt = prompt;
-            callCount++;
-            events.add("call");
-            if (failure.isPresent()) {
-                throw failure.orElseThrow();
+    void restores_thought_signatures_only_for_the_next_native_tool_call() {
+        byte[] firstSignature = new byte[] {1, 2, 3};
+        byte[] secondSignature = new byte[] {4, 5};
+        AssistantMessage firstResponse = AssistantMessage.builder().content("Inspecting.")
+                .properties(Map.of("thoughtSignatures", List.of(firstSignature, secondSignature), "finishReason", "STOP"))
+                .toolCalls(List.of(new AssistantMessage.ToolCall("call-1", "function", "first", "{}"))).build();
+        AssistantMessage finalResponse = new AssistantMessage("done");
+        List<Prompt> prompts = new ArrayList<>();
+        AtomicBoolean firstCall = new AtomicBoolean(true);
+        ChatModel chatModel = new ChatModel() {
+            @Override public ChatResponse call(Prompt prompt) {
+                prompts.add(prompt);
+                AssistantMessage response = firstCall.getAndSet(false) ? firstResponse : finalResponse;
+                return new ChatResponse(List.of(new Generation(response)), ChatResponseMetadata.builder().build());
             }
-            return response.orElseThrow();
-        }
+            @Override public ToolCallingChatOptions getOptions() { return ToolCallingChatOptions.builder().build(); }
+        };
+        ObjectMapper mapper = new ObjectMapper();
+        ModelRouteId routeId = new ModelRouteId("gemini-primary");
+        SpringAiConversationModel model = new SpringAiConversationModel(chatModel, new PromptResource(), new NoOpConversationTelemetry(),
+                mapper, new GoogleGenAiThoughtSignatureHandler(routeId, mapper));
 
-        @Override
-        public ToolCallingChatOptions getOptions() {
-            return options;
-        }
+        ModelCallResult firstResult = model.respond(new ModelRequest(List.of(), new ToolSnapshot(List.of())), () -> 1, usage -> { });
+        ModelContinuation continuation = firstResult.continuation().orElseThrow();
+        List<SessionMessage> history = List.of(
+                new AssistantToolCallsMessage(new SessionId("session-1"), new SessionSequence(2), Optional.of(new MessageJobId("job-1")),
+                        Instant.EPOCH, MessageRole.ASSISTANT_TOOL_CALLS, Optional.of("Inspecting."),
+                        List.of(new ToolRequest(new ToolCallId("call-1"), new ToolName("first"), Map.of()))),
+                new ToolObservation(new SessionId("session-1"), new SessionSequence(3), Optional.of(new MessageJobId("job-1")),
+                        Instant.EPOCH, MessageRole.TOOL, new ToolCallId("call-1"), "first", Map.of("isError", false, "result", Map.of())));
+
+        ModelCallResult secondResult = model.respond(new ModelRequest(history, Map.of(new SessionSequence(2), continuation),
+                new ToolSnapshot(List.of())), () -> 2, usage -> { });
+
+        assertThat(firstResult.reply()).isEqualTo(new ModelReply.UseTools(Optional.of("Inspecting."), List.of(
+                new ToolRequest(new ToolCallId("call-1"), new ToolName("first"), Map.of()))));
+        assertThat(secondResult.reply()).isEqualTo(new ModelReply.Text("done"));
+        assertThat(prompts).hasSize(2);
+        org.springframework.ai.chat.messages.AssistantMessage restored = (org.springframework.ai.chat.messages.AssistantMessage)
+                prompts.get(1).getInstructions().get(1);
+        assertThat(restored.getMetadata()).containsKey("thoughtSignatures").doesNotContainKeys("finishReason", "candidateIndex");
+        assertThat((List<byte[]>) restored.getMetadata().get("thoughtSignatures"))
+                .containsExactly(firstSignature, secondSignature);
+    }
+
+    @Test
+    void rejects_a_malformed_continuation_before_reserving_or_calling_the_provider() {
+        AtomicBoolean providerCalled = new AtomicBoolean();
+        AtomicBoolean reserved = new AtomicBoolean();
+        ModelRouteId routeId = new ModelRouteId("gemini-primary");
+        SpringAiConversationModel model = model(new AssistantMessage("unreachable"), providerCalled, routeId);
+        List<SessionMessage> history = List.of(
+                new AssistantToolCallsMessage(new SessionId("session-1"), new SessionSequence(2), Optional.of(new MessageJobId("job-1")),
+                        Instant.EPOCH, MessageRole.ASSISTANT_TOOL_CALLS, Optional.empty(),
+                        List.of(new ToolRequest(new ToolCallId("call-1"), new ToolName("first"), Map.of()))),
+                new ToolObservation(new SessionId("session-1"), new SessionSequence(3), Optional.of(new MessageJobId("job-1")),
+                        Instant.EPOCH, MessageRole.TOOL, new ToolCallId("call-1"), "first",
+                        Map.of("isError", false, "result", Map.of())));
+        ModelContinuation malformed = new ModelContinuation(routeId,
+                "spring-ai-google-genai-thought-signatures-v1", new byte[] {1, 2, 3});
+
+        assertThatThrownBy(() -> model.respond(new ModelRequest(history, Map.of(new SessionSequence(2), malformed), new ToolSnapshot(List.of())),
+                () -> { reserved.set(true); return 1; }, usage -> { }))
+                .isInstanceOfSatisfying(ModelCallFailure.class,
+                        failure -> assertThat(failure.kind()).isEqualTo(ModelCallFailure.Kind.TERMINAL));
+
+        assertThat(reserved).isFalse();
+        assertThat(providerCalled).isFalse();
+    }
+
+    private static SpringAiConversationModel model(AssistantMessage message, ModelRouteId routeId) {
+        return model(message, new AtomicBoolean(), routeId);
+    }
+
+    private static SpringAiConversationModel model(
+            AssistantMessage message,
+            AtomicBoolean providerCalled,
+            ModelRouteId routeId) {
+        ChatModel chatModel = new ChatModel() {
+            @Override public ChatResponse call(Prompt prompt) {
+                providerCalled.set(true);
+                return new ChatResponse(List.of(new Generation(message)), ChatResponseMetadata.builder().build());
+            }
+            @Override public ToolCallingChatOptions getOptions() { return ToolCallingChatOptions.builder().build(); }
+        };
+        ObjectMapper mapper = new ObjectMapper();
+        return new SpringAiConversationModel(chatModel, new PromptResource(), new NoOpConversationTelemetry(), mapper,
+                new GoogleGenAiThoughtSignatureHandler(routeId, mapper));
     }
 }

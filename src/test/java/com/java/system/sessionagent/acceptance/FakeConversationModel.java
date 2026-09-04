@@ -1,6 +1,8 @@
 package com.java.system.sessionagent.acceptance;
 
 import com.java.system.sessionagent.conversation.domain.ModelReply;
+import com.java.system.sessionagent.conversation.domain.ModelCallResult;
+import com.java.system.sessionagent.conversation.domain.ModelRouteId;
 import com.java.system.sessionagent.conversation.domain.ModelRequest;
 import com.java.system.sessionagent.conversation.domain.ModelUsage;
 import com.java.system.sessionagent.conversation.port.out.ConversationModel;
@@ -16,9 +18,11 @@ import java.util.function.Consumer;
 final class FakeConversationModel implements ConversationModel {
 
     private final Deque<ModelReply> replies;
+    private final ModelRouteId routeId;
     private final List<ModelRequest> requests = new ArrayList<>();
 
-    FakeConversationModel(List<ModelReply> replies) {
+    FakeConversationModel(ModelRouteId routeId, List<ModelReply> replies) {
+        this.routeId = Objects.requireNonNull(routeId, "Model route ID must not be null");
         this.replies = new ArrayDeque<>(List.copyOf(replies));
     }
 
@@ -27,12 +31,17 @@ final class FakeConversationModel implements ConversationModel {
     }
 
     @Override
-    public ModelReply respond(
+    public ModelRouteId routeId() {
+        return routeId;
+    }
+
+    @Override
+    public ModelCallResult respond(
             ModelRequest request,
             ModelCallReservation reservation,
             Consumer<ModelUsage> usageObserver) {
         requests.add(request);
         reservation.reserve();
-        return Objects.requireNonNull(replies.pollFirst(), "No queued model reply is available");
+        return new ModelCallResult(Objects.requireNonNull(replies.pollFirst(), "No queued model reply is available"), java.util.Optional.empty());
     }
 }

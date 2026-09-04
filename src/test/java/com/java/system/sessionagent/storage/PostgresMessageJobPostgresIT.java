@@ -3,8 +3,11 @@ package com.java.system.sessionagent.storage;
 import com.java.system.sessionagent.conversation.domain.IncomingMessage;
 import com.java.system.sessionagent.conversation.domain.MessageReceipt;
 import com.java.system.sessionagent.conversation.domain.MessageWorkClaim;
+import com.java.system.sessionagent.conversation.domain.ModelRouteId;
 import com.java.system.sessionagent.conversation.port.out.ConversationStore;
+import com.java.system.sessionagent.conversation.port.out.ModelRouteMismatchException;
 import com.java.system.sessionagent.conversation.port.out.StaleWorkClaimException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -93,6 +96,21 @@ class PostgresMessageJobPostgresIT {
     }
 
     @Test
+    void consumes_a_reserved_ordinal_across_reclaim_while_leaving_uncommitted_tool_work_replayable() {
+        ConversationStore store = store();
+        MessageReceipt receipt = store.receive(new IncomingMessage("thread", "alice", "source", "hello"));
+        MessageWorkClaim original = store.claimNext("worker", Duration.ofSeconds(30)).orElseThrow();
+
+        assertThat(store.reserveModelCall(original, 2, NOW)).hasValue(1);
+        jdbcTemplate.update("update message_job set locked_until = clock_timestamp() - interval '1 millisecond' where message_job_id = ?",
+                UUID.fromString(original.messageJobId().value()));
+
+        MessageWorkClaim recovered = store.claimNext("recovery-worker", Duration.ofSeconds(30)).orElseThrow();
+        assertThat(store.loadHistory(receipt.sessionId())).extracting(message -> message.sequence().value()).containsExactly(1L);
+        assertThat(store.reserveModelCall(recovered, 2, NOW)).hasValue(2);
+    }
+
+    @Test
     void rejects_an_aba_stale_claim_without_allocating_or_appending_a_message() {
         ConversationStore store = store();
         MessageReceipt receipt = store.receive(new IncomingMessage("thread", "alice", "source", "hello"));
@@ -107,6 +125,19 @@ class PostgresMessageJobPostgresIT {
                 .isExactlyInstanceOf(StaleWorkClaimException.class);
         assertThat(jdbcTemplate.queryForObject("select count(*) from session_message", Integer.class)).isEqualTo(1);
         assertThat(jdbcTemplate.queryForObject("select next_sequence from conversation_session", Long.class)).isEqualTo(2L);
+    }
+
+    @Test
+    void binds_one_model_route_for_the_complete_job() {
+        ConversationStore store = store();
+        store.receive(new IncomingMessage("thread", "alice", "route-job", "hello"));
+        MessageWorkClaim claim = store.claimNext("worker", Duration.ofSeconds(30)).orElseThrow();
+
+        store.bindModelRoute(claim, new ModelRouteId("gemini-primary"));
+        store.bindModelRoute(claim, new ModelRouteId("gemini-primary"));
+
+        assertThatThrownBy(() -> store.bindModelRoute(claim, new ModelRouteId("codex-primary")))
+                .isExactlyInstanceOf(ModelRouteMismatchException.class);
     }
 
     private <T> List<T> concurrently(Callable<T> action) throws Exception {
@@ -130,7 +161,7 @@ class PostgresMessageJobPostgresIT {
     }
 
     private ConversationStore store() {
-        return new PostgresConversationStore(dataSource(), Clock.fixed(NOW, ZoneOffset.UTC));
+        return new PostgresConversationStore(dataSource(), Clock.fixed(NOW, ZoneOffset.UTC), new ObjectMapper());
     }
 
     private DriverManagerDataSource dataSource() {

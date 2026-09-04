@@ -2,16 +2,18 @@ package com.java.system.sessionagent.web;
 
 import com.java.system.sessionagent.bootstrap.RuntimeConfiguration;
 import com.java.system.sessionagent.conversation.domain.AssistantMessage;
+import com.java.system.sessionagent.conversation.domain.AssistantToolCallsMessage;
 import com.java.system.sessionagent.conversation.domain.IncomingMessage;
 import com.java.system.sessionagent.conversation.domain.JobStatus;
 import com.java.system.sessionagent.conversation.domain.MessageJobId;
 import com.java.system.sessionagent.conversation.domain.MessageReceipt;
 import com.java.system.sessionagent.conversation.domain.MessageRole;
-import com.java.system.sessionagent.conversation.domain.ObservationId;
 import com.java.system.sessionagent.conversation.domain.RuntimeMessage;
 import com.java.system.sessionagent.conversation.domain.SessionId;
 import com.java.system.sessionagent.conversation.domain.SessionSequence;
 import com.java.system.sessionagent.conversation.domain.ToolObservation;
+import com.java.system.sessionagent.conversation.domain.ToolCallId;
+import com.java.system.sessionagent.conversation.domain.ToolRequest;
 import com.java.system.sessionagent.conversation.domain.UserMessage;
 import com.java.system.sessionagent.conversation.port.in.ConversationQueryPort;
 import com.java.system.sessionagent.conversation.port.in.MessageIntakePort;
@@ -26,6 +28,7 @@ import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
+import java.util.Map;
 
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
@@ -49,11 +52,14 @@ class MessageControllerTest {
         when(queries.messages(SESSION_ID)).thenReturn(Optional.of(List.of(
                 new UserMessage(new SessionId(SESSION_ID), new SessionSequence(1), Optional.of(new MessageJobId(JOB_ID)), CREATED_AT,
                         MessageRole.USER, "alice", "hello"),
-                new ToolObservation(new SessionId(SESSION_ID), new SessionSequence(2), Optional.of(new MessageJobId(JOB_ID)), CREATED_AT,
-                        MessageRole.TOOL, new ObservationId("4455b5ba-7b93-44cf-bd76-0d756e325eb5"), "lookup", "{}", "plain output"),
-                new AssistantMessage(new SessionId(SESSION_ID), new SessionSequence(3), Optional.of(new MessageJobId(JOB_ID)), CREATED_AT,
+                new AssistantToolCallsMessage(new SessionId(SESSION_ID), new SessionSequence(2), Optional.of(new MessageJobId(JOB_ID)), CREATED_AT,
+                        MessageRole.ASSISTANT_TOOL_CALLS, Optional.of("I will inspect it."), List.of(
+                        new ToolRequest(new ToolCallId("call-1"), new com.java.system.sessionagent.tool.domain.ToolName("lookup"), Map.of("query", "fees")))),
+                new ToolObservation(new SessionId(SESSION_ID), new SessionSequence(3), Optional.of(new MessageJobId(JOB_ID)), CREATED_AT,
+                        MessageRole.TOOL, new ToolCallId("call-1"), "lookup", Map.of("isError", false, "result", Map.of())),
+                new AssistantMessage(new SessionId(SESSION_ID), new SessionSequence(4), Optional.of(new MessageJobId(JOB_ID)), CREATED_AT,
                         MessageRole.ASSISTANT, "answer"),
-                new RuntimeMessage(new SessionId(SESSION_ID), new SessionSequence(4), Optional.of(new MessageJobId(JOB_ID)), CREATED_AT,
+                new RuntimeMessage(new SessionId(SESSION_ID), new SessionSequence(5), Optional.of(new MessageJobId(JOB_ID)), CREATED_AT,
                         MessageRole.RUNTIME, "MODEL_UNAVAILABLE", "retry later"))));
         MockMvc mvc = mvc(intake, queries);
 
@@ -64,12 +70,17 @@ class MessageControllerTest {
                 .andExpect(jsonPath("$[0].toolName").doesNotExist())
                 .andExpect(jsonPath("$[1].sequence").value(2))
                 .andExpect(jsonPath("$[1].createdAt").exists())
-                .andExpect(jsonPath("$[1].type").value("TOOL"))
+                .andExpect(jsonPath("$[1].type").value("ASSISTANT_TOOL_CALLS"))
                 .andExpect(jsonPath("$[1].messageJobId").value(JOB_ID))
-                .andExpect(jsonPath("$[1].observationId").value("4455b5ba-7b93-44cf-bd76-0d756e325eb5"))
-                .andExpect(jsonPath("$[1].toolName").value("lookup"))
-                .andExpect(jsonPath("$[1].input").value("{}"))
-                .andExpect(jsonPath("$[1].output").value("plain output"))
+                .andExpect(jsonPath("$[1].calls[0].toolCallId").value("call-1"))
+                .andExpect(jsonPath("$[1].calls[0].toolName").value("lookup"))
+                .andExpect(jsonPath("$[1].calls[0].arguments.query").value("fees"))
+                .andExpect(jsonPath("$[1].observationId").doesNotExist())
+                .andExpect(jsonPath("$[2].type").value("TOOL"))
+                .andExpect(jsonPath("$[2].toolCallId").value("call-1"))
+                .andExpect(jsonPath("$[2].toolName").value("lookup"))
+                .andExpect(jsonPath("$[2].output.isError").value(false))
+                .andExpect(jsonPath("$[2].input").doesNotExist())
                 .andExpect(jsonPath("$[1].resultId").doesNotExist())
                 .andExpect(jsonPath("$[1].toolVersion").doesNotExist())
                 .andExpect(jsonPath("$[1].repositoryId").doesNotExist())
@@ -77,10 +88,15 @@ class MessageControllerTest {
                 .andExpect(jsonPath("$[1].feedbackCode").doesNotExist())
                 .andExpect(jsonPath("$[1].terminal").doesNotExist())
                 .andExpect(jsonPath("$[1].rejectedArguments").doesNotExist())
-                .andExpect(jsonPath("$[2].type").value("ASSISTANT"))
-                .andExpect(jsonPath("$[2].message").value("answer"))
-                .andExpect(jsonPath("$[3].type").value("RUNTIME"))
-                .andExpect(jsonPath("$[3].code").value("MODEL_UNAVAILABLE"));
+                .andExpect(jsonPath("$..continuation").doesNotExist())
+                .andExpect(jsonPath("$..modelRouteId").doesNotExist())
+                .andExpect(jsonPath("$..format").doesNotExist())
+                .andExpect(jsonPath("$..payload").doesNotExist())
+                .andExpect(jsonPath("$..thoughtSignatures").doesNotExist())
+                .andExpect(jsonPath("$[3].type").value("ASSISTANT"))
+                .andExpect(jsonPath("$[3].message").value("answer"))
+                .andExpect(jsonPath("$[4].type").value("RUNTIME"))
+                .andExpect(jsonPath("$[4].code").value("MODEL_UNAVAILABLE"));
         mvc.perform(get("/internal/message-jobs/{messageJobId}", JOB_ID))
                 .andExpect(status().isOk()).andExpect(jsonPath("$.replySequence").doesNotExist());
     }
