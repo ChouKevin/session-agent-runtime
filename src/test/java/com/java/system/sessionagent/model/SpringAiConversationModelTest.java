@@ -2,6 +2,7 @@ package com.java.system.sessionagent.model;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.java.system.sessionagent.conversation.domain.AssistantToolCallsMessage;
+import com.java.system.sessionagent.conversation.domain.ContextCompactionRequest;
 import com.java.system.sessionagent.conversation.domain.MessageJobId;
 import com.java.system.sessionagent.conversation.domain.MessageRole;
 import com.java.system.sessionagent.conversation.domain.ModelReply;
@@ -16,12 +17,14 @@ import com.java.system.sessionagent.conversation.domain.SessionSequence;
 import com.java.system.sessionagent.conversation.domain.ToolCallId;
 import com.java.system.sessionagent.conversation.domain.ToolObservation;
 import com.java.system.sessionagent.conversation.domain.ToolRequest;
+import com.java.system.sessionagent.conversation.domain.UserMessage;
 import com.java.system.sessionagent.conversation.port.out.NoOpConversationTelemetry;
 import com.java.system.sessionagent.conversation.port.out.ModelCallFailure;
 import com.java.system.sessionagent.tool.domain.ToolName;
 import com.java.system.sessionagent.tool.port.ToolSnapshot;
 import org.junit.jupiter.api.Test;
 import org.springframework.ai.chat.messages.AssistantMessage;
+import org.springframework.ai.chat.prompt.ChatOptions;
 import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.ai.chat.metadata.ChatResponseMetadata;
 import org.springframework.ai.chat.metadata.Usage;
@@ -29,6 +32,7 @@ import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.model.Generation;
 import org.springframework.ai.model.tool.ToolCallingChatOptions;
+import org.springframework.ai.tool.ToolCallback;
 
 import java.time.Instant;
 import java.util.List;
@@ -39,6 +43,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.Mockito.mock;
 
 class SpringAiConversationModelTest {
 
@@ -92,6 +97,41 @@ class SpringAiConversationModelTest {
 
         assertThat(result.reply()).isEqualTo(new ModelReply.Text("done"));
         assertThat(result.usage()).isEqualTo(new ModelUsage(0, 0, 0, false));
+    }
+
+    @Test
+    void summarize_uses_explicit_no_tool_options_instead_of_model_defaults() {
+        ToolCallback defaultToolCallback = mock(ToolCallback.class);
+        ToolCallingChatOptions defaultOptions = ToolCallingChatOptions.builder()
+                .toolCallbacks(List.of(defaultToolCallback))
+                .build();
+        List<Prompt> prompts = new ArrayList<>();
+        ChatModel chatModel = new ChatModel() {
+            @Override public ChatResponse call(Prompt prompt) {
+                prompts.add(prompt);
+                return new ChatResponse(List.of(new Generation(new AssistantMessage("summary"))),
+                        ChatResponseMetadata.builder().build());
+            }
+
+            @Override public ToolCallingChatOptions getOptions() {
+                return defaultOptions;
+            }
+        };
+        ObjectMapper mapper = new ObjectMapper();
+        SpringAiConversationModel model = new SpringAiConversationModel(chatModel, new PromptResource(), new NoOpConversationTelemetry(), mapper,
+                new GoogleGenAiThoughtSignatureHandler(GOOGLE_ROUTE_ID, mapper));
+        UserMessage history = new UserMessage(new SessionId("session-1"), new SessionSequence(1), Optional.of(new MessageJobId("job-1")),
+                Instant.EPOCH, MessageRole.USER, "user", "history");
+
+        String summary = model.summarize(new ContextCompactionRequest(Optional.empty(), List.of(history)), () -> 1);
+
+        assertThat(summary).isEqualTo("summary");
+        assertThat(prompts).hasSize(1);
+        ChatOptions promptOptions = prompts.getFirst().getOptions();
+        assertThat(promptOptions).isInstanceOf(ToolCallingChatOptions.class);
+        ToolCallingChatOptions noToolOptions = (ToolCallingChatOptions) promptOptions;
+        assertThat(noToolOptions).isNotSameAs(defaultOptions);
+        assertThat(noToolOptions.getToolCallbacks()).isEmpty();
     }
 
     @Test

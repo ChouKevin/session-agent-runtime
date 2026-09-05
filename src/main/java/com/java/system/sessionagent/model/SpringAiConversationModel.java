@@ -183,11 +183,19 @@ public final class SpringAiConversationModel implements ConversationModel {
         } catch (InvalidConversationHistoryException exception) {
             throw ModelCallFailure.invalidHistory();
         }
+        ChatOptions chatOptions = chatModel.getOptions();
+        Assert.isInstanceOf(ToolCallingChatOptions.class, chatOptions,
+                "Chat model options must support tool calling");
+        ToolCallingChatOptions noToolOptions = ((ToolCallingChatOptions) chatOptions)
+                .mutate()
+                .toolCallbacks(List.of())
+                .build();
+        Prompt prompt = new Prompt(List.copyOf(messages), noToolOptions);
         reservation.reserve();
         long requestStartedAt = System.nanoTime();
         ChatResponse response;
         try {
-            response = chatModel.call(new Prompt(List.copyOf(messages)));
+            response = chatModel.call(prompt);
         } catch (RuntimeException exception) {
             ModelCallFailure failure = classifyProviderFailure(exception);
             recordFailure("UNAVAILABLE", requestStartedAt);
