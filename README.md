@@ -99,6 +99,25 @@ Tool execution has no runtime deduplication layer. A read-only tool can run agai
 
 The shipped schema is a fresh V1 schema. Reset a disposable PostgreSQL database before starting this version; do not reuse a database from an earlier schema. The Compose service binds the runtime HTTP port to loopback only. Required local credentials are intentionally not committed.
 
+## Slack Socket Mode (optional)
+
+Slack is disabled when `SLACK_APP_TOKEN`, `SLACK_BOT_TOKEN`, and
+`SLACK_BOT_USER_ID` are all unset. Configure all three together to enable Socket
+Mode; a partial configuration prevents startup. Tokens belong in the deployment
+environment or secret manager and must not be committed.
+
+Configure the Slack app for Socket Mode and subscribe to `app_mention` plus
+message events for public channels, private channels, MPIMs, and direct
+messages. Grant the matching read scopes (`app_mentions:read`,
+`channels:history`, `groups:history`, `mpim:history`, and `im:history`) and the
+bot write scope needed for the later outbound-response integration. Runtime has
+no public Slack callback endpoint, signing secret, OAuth flow, or polling loop.
+
+An addressed top-level channel, private-channel, or MPIM message starts a
+conversation after its bot mention is removed. A top-level DM needs no textual
+mention. Slack connection failures leave Runtime, storage, and MCP startup
+available; the Socket Mode client reconnects asynchronously.
+
 ## Verification
 
 Default Runtime tests use fakes and require neither model quota nor a live MCP server:

@@ -14,6 +14,13 @@ import com.java.system.sessionagent.conversation.domain.ModelRouteId;
 import com.java.system.sessionagent.conversation.domain.ModelDescriptor;
 import com.java.system.sessionagent.model.PromptResource;
 import com.java.system.sessionagent.storage.PostgresConversationStore;
+import com.java.system.sessionagent.slack.SlackBoltSocketClient;
+import com.java.system.sessionagent.slack.SlackEventAdapter;
+import com.java.system.sessionagent.slack.SlackPostgresRootIntake;
+import com.java.system.sessionagent.slack.SlackProperties;
+import com.java.system.sessionagent.slack.SlackRootIntakePort;
+import com.java.system.sessionagent.slack.SlackSocketClient;
+import com.java.system.sessionagent.slack.SlackSocketLifecycle;
 import com.java.system.sessionagent.tool.port.ToolCatalog;
 import com.java.system.sessionagent.worker.MessageJobWorker;
 import com.java.system.sessionagent.worker.WorkerProperties;
@@ -43,7 +50,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 
 @Configuration(proxyBeanMethods = false)
-@EnableConfigurationProperties({RuntimeProperties.class, RuntimeProperties.Datasource.class})
+@EnableConfigurationProperties({RuntimeProperties.class, RuntimeProperties.Datasource.class, SlackProperties.class})
 public class RuntimeConfiguration {
 
     @Bean
@@ -129,6 +136,27 @@ public class RuntimeConfiguration {
     @Bean
     MessageIntakePort messageIntakePort(ConversationStore conversationStore, ConversationTelemetry conversationTelemetry) {
         return new ConversationMessageService(conversationStore, conversationTelemetry);
+    }
+
+    @Bean
+    SlackRootIntakePort slackRootIntakePort(DataSource dataSource, MessageIntakePort messageIntakePort, Clock runtimeClock) {
+        return new SlackPostgresRootIntake(dataSource, messageIntakePort, runtimeClock);
+    }
+
+    @Bean
+    SlackEventAdapter slackEventAdapter(SlackProperties properties, SlackRootIntakePort slackRootIntakePort) {
+        return new SlackEventAdapter(properties.botUserId(), slackRootIntakePort);
+    }
+
+    @Bean
+    @ConditionalOnMissingBean(SlackSocketClient.class)
+    SlackSocketClient slackSocketClient(SlackProperties properties, SlackEventAdapter slackEventAdapter) {
+        return new SlackBoltSocketClient(properties, slackEventAdapter);
+    }
+
+    @Bean
+    SlackSocketLifecycle slackSocketLifecycle(SlackSocketClient slackSocketClient, SlackProperties properties) {
+        return new SlackSocketLifecycle(slackSocketClient, properties);
     }
 
     @Bean

@@ -49,10 +49,9 @@ class StandaloneProjectTest {
         assertEquals("", childText(parent, "relativePath"));
 
         assertLockedBuildConfiguration(project);
-        assertNoForbiddenDependencies(project);
+        assertSlackSocketModeDependencies(project);
         assertNoObsoleteLiveVerification(projectPom);
         assertNoSemanticOrTypedToolRemnants(projectPom);
-        assertNoForbiddenTransportReferenceInProjectFiles(projectPom);
     }
 
     @Test
@@ -90,17 +89,10 @@ class StandaloneProjectTest {
         assertFalse(hasProfileById(child(project, "profiles"), "live-it"));
     }
 
-    private static void assertNoForbiddenDependencies(Element project) {
-        NodeList dependencies = project.getElementsByTagNameNS("*", "dependency");
-        for (int index = 0; index < dependencies.getLength(); index++) {
-            Element dependency = (Element) dependencies.item(index);
-            String groupId = childText(dependency, "groupId");
-            String artifactId = childText(dependency, "artifactId");
-            String coordinate = groupId + ":" + artifactId;
-
-            assertFalse(containsForbiddenTransportReference(coordinate),
-                    () -> "Standalone project must not declare forbidden transport dependency " + coordinate);
-        }
+    private static void assertSlackSocketModeDependencies(Element project) {
+        Element dependencies = child(project, "dependencies");
+        assertDeclaredDependency(dependencies, "com.slack.api", "bolt");
+        assertDeclaredDependency(dependencies, "com.slack.api", "bolt-socket-mode");
     }
 
     private static void assertNoObsoleteLiveVerification(Path projectPom) {

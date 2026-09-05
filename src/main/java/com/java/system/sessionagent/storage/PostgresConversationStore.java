@@ -68,8 +68,6 @@ import java.util.function.Supplier;
 
 public final class PostgresConversationStore implements ConversationStore {
 
-    private static final String SOURCE_TYPE = "http";
-
     private final JdbcTemplate jdbcTemplate;
     private final TransactionTemplate transactionTemplate;
     private final TransactionTemplate historyTransactionTemplate;
@@ -81,7 +79,7 @@ public final class PostgresConversationStore implements ConversationStore {
         this.jdbcTemplate = new JdbcTemplate(requiredDataSource);
         DataSourceTransactionManager transactionManager = new DataSourceTransactionManager(requiredDataSource);
         this.transactionTemplate = new TransactionTemplate(transactionManager);
-        this.transactionTemplate.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+        this.transactionTemplate.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRED);
         this.historyTransactionTemplate = new TransactionTemplate(transactionManager);
         this.historyTransactionTemplate.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
         this.historyTransactionTemplate.setIsolationLevel(TransactionDefinition.ISOLATION_REPEATABLE_READ);
@@ -94,7 +92,7 @@ public final class PostgresConversationStore implements ConversationStore {
     public MessageReceipt receive(IncomingMessage incomingMessage) {
         IncomingMessage requiredIncomingMessage = Objects.requireNonNull(incomingMessage, "Incoming message must not be null");
         try {
-            MessageReceipt receipt = transactionTemplate.execute(status -> receiveInNewTransaction(requiredIncomingMessage));
+            MessageReceipt receipt = transactionTemplate.execute(status -> receiveInTransaction(requiredIncomingMessage));
             return Objects.requireNonNull(receipt, "Message receipt must not be null");
         } catch (ConversationStoreFailure exception) {
             throw exception;
@@ -103,10 +101,11 @@ public final class PostgresConversationStore implements ConversationStore {
         }
     }
 
-    private MessageReceipt receiveInNewTransaction(IncomingMessage incomingMessage) {
-        lockSourceIdentity(incomingMessage.sourceMessageId());
+    private MessageReceipt receiveInTransaction(IncomingMessage incomingMessage) {
+        String sourceType = incomingMessage.source().storageValue();
+        lockSourceIdentity(sourceType, incomingMessage.sourceMessageId());
         String contentHash = contentHash(incomingMessage.participantId(), incomingMessage.message());
-        Optional<StoredSourceMessage> existing = findSourceMessage(incomingMessage.sourceMessageId());
+        Optional<StoredSourceMessage> existing = findSourceMessage(sourceType, incomingMessage.sourceMessageId());
         if (existing.isPresent()) {
             StoredSourceMessage stored = existing.orElseThrow();
             if (stored.contentHash().equals(contentHash)) {
@@ -114,19 +113,19 @@ public final class PostgresConversationStore implements ConversationStore {
             }
             throw new MessageConflictException();
         }
-        StoredSession session = lockOrCreateSession(incomingMessage.sessionKey());
+        StoredSession session = lockOrCreateSession(sourceType, incomingMessage.sessionKey());
         long sequence = allocateSequence(session.sessionId());
         UUID jobId = UUID.randomUUID();
         Instant now = clock.instant();
-        insertSourceMessage(incomingMessage.sourceMessageId(), session.sessionId(), sequence, contentHash, now);
+        insertSourceMessage(sourceType, incomingMessage.sourceMessageId(), session.sessionId(), sequence, contentHash, now);
         insertUserSessionMessage(session.sessionId(), sequence, now);
         insertUserMessage(incomingMessage, session.sessionId(), sequence);
         insertMessageJob(jobId, session.sessionId(), sequence, now);
         return new MessageReceipt(new SessionId(session.sessionId().toString()), new MessageJobId(jobId.toString()));
     }
 
-    private void lockSourceIdentity(String sourceMessageId) {
-        ByteBuffer buffer = ByteBuffer.wrap(sha256(SOURCE_TYPE, sourceMessageId));
+    private void lockSourceIdentity(String sourceType, String sourceMessageId) {
+        ByteBuffer buffer = ByteBuffer.wrap(sha256(sourceType, sourceMessageId));
         int firstLockKey = buffer.getInt();
         int secondLockKey = buffer.getInt();
         jdbcTemplate.execute("select pg_advisory_xact_lock(?, ?)", (PreparedStatementCallback<Void>) statement -> {
@@ -137,22 +136,22 @@ public final class PostgresConversationStore implements ConversationStore {
         });
     }
 
-    private StoredSession lockOrCreateSession(String sessionKey) {
+    private StoredSession lockOrCreateSession(String sourceType, String sessionKey) {
         UUID generatedSessionId = UUID.randomUUID();
         jdbcTemplate.update("""
                 insert into conversation_session(session_id, source_type, session_key, created_at)
                 values (?, ?, ?, ?)
                 on conflict (source_type, session_key) do nothing
-                """, generatedSessionId, SOURCE_TYPE, sessionKey, timestamp(clock.instant()));
+                """, generatedSessionId, sourceType, sessionKey, timestamp(clock.instant()));
         return jdbcTemplate.query("""
                 select session_id from conversation_session
                 where source_type = ? and session_key = ? for update
-                """, (resultSet, rowNumber) -> new StoredSession(resultSet.getObject("session_id", UUID.class)), SOURCE_TYPE, sessionKey)
+                """, (resultSet, rowNumber) -> new StoredSession(resultSet.getObject("session_id", UUID.class)), sourceType, sessionKey)
                 .stream().findFirst().orElseThrow(() -> ConversationStoreFailure.contract(
                         new IllegalStateException("Conversation session was not created")));
     }
 
-    private Optional<StoredSourceMessage> findSourceMessage(String sourceMessageId) {
+    private Optional<StoredSourceMessage> findSourceMessage(String sourceType, String sourceMessageId) {
         return jdbcTemplate.query("""
                 select source.session_id, source.content_hash, job.message_job_id
                 from source_message source
@@ -161,7 +160,7 @@ public final class PostgresConversationStore implements ConversationStore {
                 where source.source_type = ? and source.source_message_id = ?
                 """, (resultSet, rowNumber) -> new StoredSourceMessage(
                 resultSet.getObject("session_id", UUID.class), resultSet.getString("content_hash"),
-                resultSet.getObject("message_job_id", UUID.class)), SOURCE_TYPE, sourceMessageId).stream().findFirst();
+                resultSet.getObject("message_job_id", UUID.class)), sourceType, sourceMessageId).stream().findFirst();
     }
 
     private long allocateSequence(UUID sessionId) {
@@ -172,11 +171,11 @@ public final class PostgresConversationStore implements ConversationStore {
         return Objects.requireNonNull(sequence, "Session sequence must not be null");
     }
 
-    private void insertSourceMessage(String sourceMessageId, UUID sessionId, long sequence, String contentHash, Instant createdAt) {
+    private void insertSourceMessage(String sourceType, String sourceMessageId, UUID sessionId, long sequence, String contentHash, Instant createdAt) {
         jdbcTemplate.update("""
                 insert into source_message(source_type, source_message_id, session_id, user_message_sequence, content_hash, created_at)
                 values (?, ?, ?, ?, ?, ?)
-                """, SOURCE_TYPE, sourceMessageId, sessionId, sequence, contentHash, timestamp(createdAt));
+                """, sourceType, sourceMessageId, sessionId, sequence, contentHash, timestamp(createdAt));
     }
 
     private void insertUserSessionMessage(UUID sessionId, long sequence, Instant createdAt) {
@@ -190,7 +189,7 @@ public final class PostgresConversationStore implements ConversationStore {
         jdbcTemplate.update("""
                 insert into user_message(session_id, sequence, participant_id, source_type, source_message_id, message)
                 values (?, ?, ?, ?, ?, ?)
-                """, sessionId, sequence, message.participantId(), SOURCE_TYPE, message.sourceMessageId(), message.message());
+                """, sessionId, sequence, message.participantId(), message.source().storageValue(), message.sourceMessageId(), message.message());
     }
 
     private void insertMessageJob(UUID jobId, UUID sessionId, long sequence, Instant createdAt) {

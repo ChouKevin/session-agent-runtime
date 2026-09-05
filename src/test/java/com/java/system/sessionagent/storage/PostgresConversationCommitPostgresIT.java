@@ -86,7 +86,7 @@ class PostgresConversationCommitPostgresIT {
     }
 
     @Test
-    void creates_only_the_final_provider_neutral_conversation_schema() {
+    void creates_the_fresh_conversation_and_slack_intake_schema() {
         Set<String> tables = Set.copyOf(jdbcTemplate.queryForList("""
                 select table_name from information_schema.tables
                 where table_schema = 'public' and table_type = 'BASE TABLE' and table_name <> 'flyway_schema_history'
@@ -112,7 +112,7 @@ class PostgresConversationCommitPostgresIT {
 
         assertThat(tables).containsExactlyInAnyOrder("conversation_session", "source_message", "session_message", "user_message",
                 "message_job", "assistant_message", "assistant_tool_calls", "model_continuation", "tool_observation", "runtime_message",
-                "context_usage_checkpoint", "session_compaction");
+                "context_usage_checkpoint", "session_compaction", "slack_thread_binding", "slack_event_receipt");
         assertThat(observationColumns).containsExactlyInAnyOrder("session_id", "sequence", "role", "tool_call_id", "tool_name", "output");
         assertThat(jobColumns).contains("model_route_id").doesNotContain("reply_sequence");
         assertThat(roleChecks).contains("USER", "TOOL", "ASSISTANT", "ASSISTANT_TOOL_CALLS", "RUNTIME").doesNotContain("FEEDBACK");

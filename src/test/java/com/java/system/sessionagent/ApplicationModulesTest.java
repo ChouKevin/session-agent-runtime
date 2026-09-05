@@ -3,6 +3,8 @@ package com.java.system.sessionagent;
 import org.junit.jupiter.api.Test;
 import org.springframework.modulith.core.ApplicationModule;
 import org.springframework.modulith.core.ApplicationModules;
+import com.tngtech.archunit.core.importer.ClassFileImporter;
+import com.tngtech.archunit.lang.syntax.ArchRuleDefinition;
 
 import java.util.Map;
 import java.util.Set;
@@ -18,7 +20,7 @@ class ApplicationModulesTest {
         ApplicationModules modules = ApplicationModules.of(SessionAgentRuntimeApplication.class);
 
         assertEquals(
-                Set.of("tool", "conversation", "mcp", "model", "storage", "web", "worker", "bootstrap"),
+                Set.of("tool", "conversation", "mcp", "model", "storage", "web", "worker", "slack", "bootstrap"),
                 modules.stream().map(module -> module.getIdentifier().toString()).collect(Collectors.toSet()));
         modules.verify();
     }
@@ -34,9 +36,10 @@ class ApplicationModulesTest {
                         "mcp", Set.of("tool"),
                         "model", Set.of("conversation", "tool"),
                         "storage", Set.of("conversation", "tool"),
+                        "slack", Set.of("conversation"),
                         "web", Set.of("conversation", "tool"),
                         "worker", Set.of("conversation"),
-                        "bootstrap", Set.of("tool", "conversation", "mcp", "model", "storage", "web", "worker")),
+                        "bootstrap", Set.of("tool", "conversation", "mcp", "model", "storage", "web", "worker", "slack")),
                 modules.stream().collect(Collectors.toMap(
                         module -> module.getIdentifier().toString(),
                         module -> allowedModuleNames(module, modules))));
@@ -62,6 +65,9 @@ class ApplicationModulesTest {
                 Set.of("conversation :: domain", "conversation :: port.in", "conversation :: port.out", "tool :: domain"),
                 allowedNamedDependencies("storage", modules));
         assertEquals(
+                Set.of("conversation :: domain", "conversation :: port.in"),
+                allowedNamedDependencies("slack", modules));
+        assertEquals(
                 Set.of("conversation :: domain", "conversation :: port.in", "tool :: domain"),
                 allowedNamedDependencies("web", modules));
         assertEquals(
@@ -71,6 +77,16 @@ class ApplicationModulesTest {
                 Set.of("tool :: port", "conversation :: application", "conversation :: domain",
                         "conversation :: port.in", "conversation :: port.out"),
                 allowedNamedDependencies("bootstrap", modules));
+    }
+
+    @Test
+    void keeps_slack_sdk_types_out_of_the_provider_neutral_core() {
+        ArchRuleDefinition.noClasses()
+                .should()
+                .dependOnClassesThat().resideInAnyPackage("com.slack.api..")
+                .check(new ClassFileImporter().importPackages(
+                        "com.java.system.sessionagent.conversation",
+                        "com.java.system.sessionagent.storage"));
     }
 
     private static Set<String> allowedModuleNames(ApplicationModule module, ApplicationModules modules) {

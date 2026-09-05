@@ -22,6 +22,7 @@
         <spring-ai.version>2.0.1</spring-ai.version>
         <spring-modulith.version>2.1.0</spring-modulith.version>
         <archunit.version>1.4.2</archunit.version>
+        <slack.sdk.version>1.49.0</slack.sdk.version>
     </properties>
 
     <dependencyManagement>
@@ -91,6 +92,16 @@
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-jackson2</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.slack.api</groupId>
+            <artifactId>bolt</artifactId>
+            <version>${slack.sdk.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>com.slack.api</groupId>
+            <artifactId>bolt-socket-mode</artifactId>
+            <version>${slack.sdk.version}</version>
         </dependency>
         <dependency>
             <groupId>org.springframework.boot</groupId>

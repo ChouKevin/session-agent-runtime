@@ -5,6 +5,9 @@ import com.java.system.sessionagent.conversation.domain.ModelDescriptor;
 import com.java.system.sessionagent.conversation.domain.ModelRouteId;
 import com.java.system.sessionagent.conversation.port.out.ConversationStore;
 import com.java.system.sessionagent.mcp.McpConnectionManager;
+import com.java.system.sessionagent.slack.SlackLifecycleState;
+import com.java.system.sessionagent.slack.SlackSocketClient;
+import com.java.system.sessionagent.slack.SlackSocketLifecycle;
 import com.java.system.sessionagent.model.SpringAiConversationModel;
 import com.java.system.sessionagent.tool.port.ToolCatalog;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
@@ -24,6 +27,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 class ApplicationStartupTest {
 
     private final ApplicationContextRunner contextRunner = new ApplicationContextRunner()
+            .withBean(SlackSocketClient.class, UnreachableSocketClient::new)
             .withUserConfiguration(RuntimeConfiguration.class, McpConfiguration.class, TestDependencies.class)
             .withPropertyValues(
                     "spring.datasource.url=jdbc:postgresql://localhost:5432/session_agent",
@@ -68,6 +72,28 @@ class ApplicationStartupTest {
                 .run(context -> assertThat(context).hasFailed());
     }
 
+    @Test
+    void keeps_runtime_startup_nonfatal_when_complete_slack_configuration_is_unreachable() {
+        contextRunner.withPropertyValues(
+                        "session-agent.slack.app-token=xapp-unreachable",
+                        "session-agent.slack.bot-token=xoxb-unreachable",
+                        "session-agent.slack.bot-user-id=UBOT",
+                        "session-agent.slack.reconnect-delay=10ms")
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    SlackSocketLifecycle lifecycle = context.getBean(SlackSocketLifecycle.class);
+                    awaitState(lifecycle, SlackLifecycleState.DEGRADED);
+                    assertThat(lifecycle.state()).isEqualTo(SlackLifecycleState.DEGRADED);
+                });
+    }
+
+    private static void awaitState(SlackSocketLifecycle lifecycle, SlackLifecycleState expected) {
+        long deadline = System.nanoTime() + 1_000_000_000L;
+        while (lifecycle.state() != expected && System.nanoTime() < deadline) { // cs-allow Enum identity comparison is intentional.
+            Thread.onSpinWait();
+        }
+    }
+
     @Configuration(proxyBeanMethods = false)
     static class TestDependencies {
         @Bean
@@ -91,6 +117,18 @@ class ApplicationStartupTest {
         @Bean
         ObjectMapper objectMapper() {
             return new ObjectMapper();
+        }
+
+    }
+
+    static class UnreachableSocketClient implements SlackSocketClient {
+        @Override
+        public void start() {
+            throw new IllegalStateException("unreachable");
+        }
+
+        @Override
+        public void stop() {
         }
     }
 }

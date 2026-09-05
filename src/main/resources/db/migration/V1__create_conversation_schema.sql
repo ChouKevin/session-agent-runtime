@@ -253,3 +253,26 @@ $$;
 
 create constraint trigger source_message_requires_user after insert on source_message
     deferrable initially deferred for each row execute function require_source_user();
+
+create table slack_thread_binding (
+    team_id varchar(128) not null check (team_id ~ '[^[:space:]]'),
+    channel_id varchar(128) not null check (channel_id ~ '[^[:space:]]'),
+    root_thread_ts varchar(64) not null check (root_thread_ts ~ '[^[:space:]]'),
+    session_id uuid not null references conversation_session(session_id),
+    created_at timestamptz not null,
+    primary key (team_id, channel_id, root_thread_ts)
+);
+
+create table slack_event_receipt (
+    team_id varchar(128) not null check (team_id ~ '[^[:space:]]'),
+    channel_id varchar(128) not null check (channel_id ~ '[^[:space:]]'),
+    message_ts varchar(64) not null check (message_ts ~ '[^[:space:]]'),
+    session_id uuid not null references conversation_session(session_id),
+    created_at timestamptz not null,
+    primary key (team_id, channel_id, message_ts)
+);
+
+create trigger slack_thread_binding_append_only before update or delete on slack_thread_binding
+    for each row execute function reject_committed_row_change();
+create trigger slack_event_receipt_append_only before update or delete on slack_event_receipt
+    for each row execute function reject_committed_row_change();
