@@ -22,11 +22,12 @@ class SlackEventAdapterTest {
         SlackEventAdapter adapter = new SlackEventAdapter("UBOT", intakePort);
 
         SlackEventOutcome outcome = adapter.handle(new SlackRootEvent(
-                "T1", "C1", "1.000001", "", "U1", "", "channel", "<@UBOT> hello", ""));
+                "T1", "C1", "1.000001", "", "U1", "", "channel",
+                "<@UBOT> explain the literal token <@UBOT>", ""));
 
         assertThat(outcome).isEqualTo(SlackEventOutcome.ACCEPTED);
         assertThat(accepted.get().rootThreadTs()).isEqualTo("1.000001");
-        assertThat(accepted.get().message().message()).isEqualTo("hello");
+        assertThat(accepted.get().message().message()).isEqualTo("explain the literal token <@UBOT>");
         assertThat(accepted.get().message().source().storageValue()).isEqualTo("slack");
     }
 

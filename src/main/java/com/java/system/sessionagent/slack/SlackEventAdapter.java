@@ -54,10 +54,12 @@ public final class SlackEventAdapter {
             return event.text().trim();
         }
         String addressingMention = "<@" + botUserId + ">";
-        if (!event.text().contains(addressingMention)) {
+        int addressingIndex = event.text().indexOf(addressingMention);
+        if (addressingIndex < 0) {
             return "";
         }
-        return event.text().replace(addressingMention, "").trim();
+        return (event.text().substring(0, addressingIndex)
+                + event.text().substring(addressingIndex + addressingMention.length())).trim();
     }
 
     private static String boundedKey(String prefix, String... parts) {
