@@ -6,6 +6,7 @@ import com.java.system.sessionagent.conversation.domain.MessageReceipt;
 import com.java.system.sessionagent.conversation.domain.MessageWorkClaim;
 import com.java.system.sessionagent.conversation.domain.ModelContinuation;
 import com.java.system.sessionagent.conversation.domain.ModelRouteId;
+import com.java.system.sessionagent.conversation.domain.ModelDescriptor;
 import com.java.system.sessionagent.conversation.domain.ToolCallId;
 import com.java.system.sessionagent.conversation.domain.AssistantToolCallsMessage;
 import com.java.system.sessionagent.conversation.domain.ToolObservation;
@@ -94,7 +95,8 @@ class PostgresConversationCommitPostgresIT {
                 """, String.class);
 
         assertThat(tables).containsExactlyInAnyOrder("conversation_session", "source_message", "session_message", "user_message",
-                "message_job", "assistant_message", "assistant_tool_calls", "model_continuation", "tool_observation", "runtime_message");
+                "message_job", "assistant_message", "assistant_tool_calls", "model_continuation", "tool_observation", "runtime_message",
+                "context_usage_checkpoint");
         assertThat(observationColumns).containsExactlyInAnyOrder("session_id", "sequence", "role", "tool_call_id", "tool_name", "output");
         assertThat(jobColumns).contains("model_route_id").doesNotContain("reply_sequence");
         assertThat(roleChecks).contains("USER", "TOOL", "ASSISTANT", "ASSISTANT_TOOL_CALLS", "RUNTIME").doesNotContain("FEEDBACK");
@@ -232,19 +234,23 @@ class PostgresConversationCommitPostgresIT {
 
         ModelContinuation continuation = new ModelContinuation(new ModelRouteId("gemini-primary"), "opaque-v1", new byte[] {1, 2, 3});
         store.bindModelRoute(claim, continuation.modelRouteId());
+        ModelDescriptor descriptor = new ModelDescriptor(continuation.modelRouteId(), "gemini-3.1-flash-lite", 1_048_576);
         assertThatThrownBy(() -> store.append(claim, new ConversationStore.MessageBatch(List.of(
                 new ConversationStore.AssistantToolCallsData(java.util.Optional.of("Checking."), List.of(
                         new ConversationStore.ToolCallData(new ToolCallId("call-1"), "mcp_lookup", Map.of()),
                         new ConversationStore.ToolCallData(new ToolCallId("call-2"), "mcp_entries", Map.of()))),
                 new ConversationStore.ToolObservationData(new ToolCallId("call-1"), "mcp_lookup", Map.of("isError", false, "result", Map.of())),
                 new ConversationStore.ToolObservationData(new ToolCallId("call-2"), "mcp_entries", Map.of("isError", false, "result", Map.of()))),
-                ConversationStore.JobUpdate.KEEP_WORKING, java.util.Optional.of(continuation)), NOW)).isInstanceOf(RuntimeException.class);
+                ConversationStore.JobUpdate.KEEP_WORKING, java.util.Optional.of(continuation), java.util.Optional.of(
+                        new ConversationStore.UsageCheckpointData(descriptor, 1, 50, 20, 70,
+                                "a".repeat(64), 0))), NOW)).isInstanceOf(RuntimeException.class);
 
         assertThat(jdbcTemplate.queryForObject("select count(*) from session_message", Integer.class)).isEqualTo(1);
         assertThat(jdbcTemplate.queryForObject("select count(*) from assistant_message", Integer.class)).isZero();
         assertThat(jdbcTemplate.queryForObject("select count(*) from assistant_tool_calls", Integer.class)).isZero();
         assertThat(jdbcTemplate.queryForObject("select count(*) from tool_observation", Integer.class)).isZero();
         assertThat(jdbcTemplate.queryForObject("select count(*) from model_continuation", Integer.class)).isZero();
+        assertThat(jdbcTemplate.queryForObject("select count(*) from context_usage_checkpoint", Integer.class)).isZero();
         assertThat(jdbcTemplate.queryForObject("select next_sequence from conversation_session", Long.class)).isEqualTo(2L);
         assertThat(jdbcTemplate.queryForObject("select status from message_job where message_job_id = ?", String.class,
                 java.util.UUID.fromString(receipt.messageJobId().value()))).isEqualTo("WORKING");

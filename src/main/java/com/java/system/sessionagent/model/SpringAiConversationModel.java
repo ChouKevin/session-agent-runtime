@@ -58,7 +58,8 @@ public final class SpringAiConversationModel implements ConversationModel {
             ConversationTelemetry telemetry,
             ObjectMapper objectMapper,
             SpringAiContinuationHandler continuationHandler) {
-        this(chatModel, promptResource, telemetry, objectMapper, continuationHandler, null);
+        this(chatModel, promptResource, telemetry, objectMapper, continuationHandler,
+                testDescriptor(continuationHandler));
     }
 
     public SpringAiConversationModel(
@@ -66,9 +67,10 @@ public final class SpringAiConversationModel implements ConversationModel {
             PromptResource promptResource,
             ConversationTelemetry telemetry,
             ObjectMapper objectMapper,
-            SpringAiContinuationHandler continuationHandler, Integer contextWindowOverride) {
+            SpringAiContinuationHandler continuationHandler,
+            ModelDescriptor descriptor) {
         this(chatModel, promptResource, new SpringAiToolCallbackFactory(objectMapper), new ConversationHistoryProjector(objectMapper), telemetry,
-                objectMapper, continuationHandler, contextWindowOverride);
+                objectMapper, continuationHandler, descriptor);
     }
 
     SpringAiConversationModel(
@@ -79,7 +81,8 @@ public final class SpringAiConversationModel implements ConversationModel {
             ConversationTelemetry telemetry,
             ObjectMapper objectMapper,
             SpringAiContinuationHandler continuationHandler) {
-        this(chatModel, promptResource, callbackFactory, historyProjector, telemetry, objectMapper, continuationHandler, null);
+        this(chatModel, promptResource, callbackFactory, historyProjector, telemetry, objectMapper, continuationHandler,
+                testDescriptor(continuationHandler));
     }
 
     SpringAiConversationModel(
@@ -89,7 +92,8 @@ public final class SpringAiConversationModel implements ConversationModel {
             ConversationHistoryProjector historyProjector,
             ConversationTelemetry telemetry,
             ObjectMapper objectMapper,
-            SpringAiContinuationHandler continuationHandler, Integer contextWindowOverride) {
+            SpringAiContinuationHandler continuationHandler,
+            ModelDescriptor descriptor) {
         Assert.notNull(chatModel, "Chat model must not be null");
         Assert.notNull(promptResource, "Prompt resource must not be null");
         Assert.notNull(callbackFactory, "Tool callback factory must not be null");
@@ -97,6 +101,8 @@ public final class SpringAiConversationModel implements ConversationModel {
         Assert.notNull(telemetry, "Conversation telemetry must not be null");
         Assert.notNull(objectMapper, "Object mapper must not be null");
         Assert.notNull(continuationHandler, "Spring AI continuation handler must not be null");
+        Assert.notNull(descriptor, "Model descriptor must not be null");
+        Assert.isTrue(descriptor.routeId().equals(continuationHandler.routeId()), "Model descriptor route must match continuation route");
         this.chatModel = chatModel;
         this.promptResource = promptResource;
         this.callbackFactory = callbackFactory;
@@ -104,7 +110,7 @@ public final class SpringAiConversationModel implements ConversationModel {
         this.telemetry = telemetry;
         this.objectMapper = objectMapper;
         this.continuationHandler = continuationHandler;
-        this.descriptor = descriptor(chatModel, continuationHandler.routeId(), contextWindowOverride);
+        this.descriptor = descriptor;
     }
 
     @Override
@@ -165,15 +171,8 @@ public final class SpringAiConversationModel implements ConversationModel {
         return result;
     }
 
-    private static ModelDescriptor descriptor(ChatModel chatModel, ModelRouteId routeId, Integer contextWindowOverride) {
-        ChatOptions options = chatModel.getOptions();
-        String modelId = options instanceof org.springframework.ai.google.genai.GoogleGenAiChatOptions googleOptions
-                ? googleOptions.getModel() : "gemini-3.1-flash-lite";
-        Assert.hasText(modelId, "Google GenAI model ID must not be blank");
-        long catalogWindow = "gemini-3.1-flash-lite".equals(modelId) ? 1_048_576L : 0L;
-        long effectiveWindow = Objects.isNull(contextWindowOverride) ? catalogWindow : contextWindowOverride.longValue();
-        Assert.isTrue(effectiveWindow > 0, "Model context window capacity must be configured");
-        return new ModelDescriptor(routeId, modelId, effectiveWindow);
+    private static ModelDescriptor testDescriptor(SpringAiContinuationHandler continuationHandler) {
+        return new ModelDescriptor(continuationHandler.routeId(), "unspecified", 1);
     }
 
     private Prompt promptFor(ModelRequest request) {

@@ -11,6 +11,7 @@ import com.java.system.sessionagent.conversation.port.out.ConversationTelemetry;
 import com.java.system.sessionagent.model.SpringAiConversationModel;
 import com.java.system.sessionagent.model.GoogleGenAiThoughtSignatureHandler;
 import com.java.system.sessionagent.conversation.domain.ModelRouteId;
+import com.java.system.sessionagent.conversation.domain.ModelDescriptor;
 import com.java.system.sessionagent.model.PromptResource;
 import com.java.system.sessionagent.storage.PostgresConversationStore;
 import com.java.system.sessionagent.tool.port.ToolCatalog;
@@ -23,6 +24,8 @@ import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.MapperFeature;
 import com.fasterxml.jackson.databind.type.LogicalType;
 import org.springframework.ai.chat.model.ChatModel;
+import org.springframework.ai.chat.prompt.ChatOptions;
+import org.springframework.ai.google.genai.GoogleGenAiChatOptions;
 import org.springframework.boot.jackson.autoconfigure.JsonMapperBuilderCustomizer;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
@@ -35,6 +38,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import javax.sql.DataSource;
 import java.time.Clock;
 import java.time.Duration;
+import java.util.Objects;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 
@@ -94,7 +98,22 @@ public class RuntimeConfiguration {
             RuntimeProperties runtimeProperties) {
         ModelRouteId routeId = new ModelRouteId(runtimeProperties.model().routeId());
         return new SpringAiConversationModel(chatModel, promptResource, conversationTelemetry, objectMapper,
-                new GoogleGenAiThoughtSignatureHandler(routeId, objectMapper), runtimeProperties.model().contextWindowTokens());
+                new GoogleGenAiThoughtSignatureHandler(routeId, objectMapper),
+                googleGenAiDescriptor(chatModel, routeId, runtimeProperties.model().contextWindowTokens()));
+    }
+
+    private static ModelDescriptor googleGenAiDescriptor(
+            ChatModel chatModel,
+            ModelRouteId routeId,
+            Integer contextWindowOverride) {
+        ChatOptions options = chatModel.getOptions();
+        String modelId = options instanceof GoogleGenAiChatOptions googleOptions
+                ? googleOptions.getModel() : "gemini-3.1-flash-lite";
+        org.springframework.util.Assert.hasText(modelId, "Google GenAI model ID must not be blank");
+        long catalogWindow = "gemini-3.1-flash-lite".equals(modelId) ? 1_048_576L : 0L;
+        long effectiveWindow = Objects.isNull(contextWindowOverride) ? catalogWindow : contextWindowOverride.longValue();
+        org.springframework.util.Assert.isTrue(effectiveWindow > 0, "Model context window capacity must be configured");
+        return new ModelDescriptor(routeId, modelId, effectiveWindow);
     }
 
     @Bean

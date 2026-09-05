@@ -5,6 +5,7 @@ import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Positive;
 import jakarta.validation.constraints.PositiveOrZero;
 import org.springframework.boot.context.properties.ConfigurationProperties;
+import org.springframework.boot.context.properties.bind.ConstructorBinding;
 import org.springframework.boot.context.properties.bind.DefaultValue;
 import org.springframework.util.Assert;
 import org.springframework.validation.annotation.Validated;
@@ -27,6 +28,7 @@ public record RuntimeProperties(
             @NotBlank @DefaultValue("google-genai") String routeId,
             @Positive Integer contextWindowTokens) {
 
+        @ConstructorBinding
         public Model {
             Assert.hasText(routeId, "Model route ID must not be blank");
         }
