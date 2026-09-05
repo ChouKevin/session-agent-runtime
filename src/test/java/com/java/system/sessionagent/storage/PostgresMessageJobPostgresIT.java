@@ -15,7 +15,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
-import org.testcontainers.containers.PostgreSQLContainer;
+import org.testcontainers.postgresql.PostgreSQLContainer;
 
 import java.time.Clock;
 import java.time.Duration;
@@ -38,7 +38,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 class PostgresMessageJobPostgresIT {
 
     private static final Instant NOW = Instant.parse("2026-08-31T10:00:01Z");
-    private static final PostgreSQLContainer<?> POSTGRES = new PostgreSQLContainer<>("postgres:17-alpine");
+    private static final PostgreSQLContainer POSTGRES = new PostgreSQLContainer("postgres:17-alpine");
 
     private JdbcTemplate jdbcTemplate;
 
@@ -86,8 +86,9 @@ class PostgresMessageJobPostgresIT {
         List<Optional<MessageWorkClaim>> claims = concurrently(() -> store.claimNext(
                 "worker-" + Thread.currentThread().threadId(), Duration.ofSeconds(30)));
 
-        assertThat(claims.stream().filter(Optional::isPresent)).hasSize(1);
-        MessageWorkClaim claim = claims.stream().flatMap(Optional::stream).findFirst().orElseThrow();
+        assertThat(claims.stream().filter(optionalClaim -> optionalClaim.isPresent())).hasSize(1);
+        MessageWorkClaim claim = claims.stream().flatMap(optionalClaim -> optionalClaim.stream())
+                .findFirst().orElseThrow();
         List<OptionalInt> reservations = concurrently(() -> store.reserveModelCall(claim, 1, NOW));
 
         assertThat(reservations).containsExactlyInAnyOrder(OptionalInt.of(1), OptionalInt.empty());

@@ -23,7 +23,8 @@ public sealed interface ModelReply permits ModelReply.Text, ModelReply.UseTools 
             message.ifPresent(value -> Assert.hasText(value, "Model reply message must not be blank"));
             requests = List.copyOf(requests);
             Assert.notEmpty(requests, "Model reply must contain tool requests");
-            Set<ToolCallId> toolCallIds = requests.stream().map(ToolRequest::toolCallId).collect(java.util.stream.Collectors.toUnmodifiableSet());
+            Set<ToolCallId> toolCallIds = requests.stream().map(request -> request.toolCallId())
+                    .collect(java.util.stream.Collectors.toUnmodifiableSet());
             Assert.isTrue(toolCallIds.size() == requests.size(), "Model tool call IDs must be distinct");
         }
     }

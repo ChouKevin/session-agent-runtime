@@ -308,7 +308,8 @@ public final class PostgresConversationStore implements ConversationStore {
                     new ModelContinuation(new ModelRouteId(resultSet.getString("model_route_id")), resultSet.getString("format"),
                             resultSet.getBytes("payload"))), messageJobId(requiredClaim), sessionId(requiredClaim),
                     requiredClaim.workerId(), requiredClaim.claimNumber()).stream()
-                    .collect(java.util.stream.Collectors.toUnmodifiableMap(Map.Entry::getKey, Map.Entry::getValue));
+                    .collect(java.util.stream.Collectors.toUnmodifiableMap(
+                            entry -> entry.getKey(), entry -> entry.getValue()));
             return Map.copyOf(continuations);
         } catch (RuntimeException exception) {
             throw translate(exception);
@@ -340,7 +341,8 @@ public final class PostgresConversationStore implements ConversationStore {
                     returning model_calls
                     """, (resultSet, rowNumber) -> resultSet.getInt("model_calls"), messageJobId(requiredClaim),
                     sessionId(requiredClaim), requiredClaim.workerId(), requiredClaim.claimNumber(), maxModelCalls)
-                    .stream().findFirst().map(OptionalInt::of).orElseGet(OptionalInt::empty);
+                    .stream().findFirst().map(modelCalls -> OptionalInt.of(modelCalls))
+                    .orElseGet(OptionalInt::empty);
         } catch (RuntimeException exception) {
             throw translate(exception);
         }

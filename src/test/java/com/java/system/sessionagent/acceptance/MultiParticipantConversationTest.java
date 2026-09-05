@@ -24,6 +24,6 @@ class MultiParticipantConversationTest {
                 new UserMessage(sessionId, new SessionSequence(2), Optional.of(new MessageJobId("job-2")), Instant.EPOCH,
                         MessageRole.USER, "bob", "Which method is supported?"));
 
-        assertThat(history).extracting(UserMessage::participantId).containsExactly("alice", "bob");
+        assertThat(history).extracting(message -> message.participantId()).containsExactly("alice", "bob");
     }
 }

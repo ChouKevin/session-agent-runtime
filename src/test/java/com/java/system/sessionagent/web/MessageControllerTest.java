@@ -19,11 +19,13 @@ import com.java.system.sessionagent.conversation.port.in.ConversationQueryPort;
 import com.java.system.sessionagent.conversation.port.in.MessageIntakePort;
 import com.java.system.sessionagent.conversation.port.in.MessageJobView;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.http.MediaType;
-import org.springframework.http.converter.json.Jackson2ObjectMapperBuilder;
-import org.springframework.http.converter.json.MappingJackson2HttpMessageConverter;
+import org.springframework.http.converter.json.JacksonJsonHttpMessageConverter;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
+import tools.jackson.databind.json.JsonMapper;
 
 import java.time.Instant;
 import java.util.List;
@@ -122,11 +124,25 @@ class MessageControllerTest {
                 .andExpect(status().isAccepted()).andExpect(jsonPath("$.messageJobId").value(JOB_ID));
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "{\"sessionKey\":\"thread\",\"participantId\":\"alice\",\"sourceMessageId\":\"source\",\"message\":\"hello\",\"unexpected\":true}",
+            "{\"sessionKey\":\"thread\",\"participantId\":123,\"sourceMessageId\":\"source\",\"message\":\"hello\"}",
+            "{\"sessionKey\":\"thread\",\"participantId\":\"alice\",\"sourceMessageId\":\"source\",\"message\":\"hello\"} trailing"
+    })
+    void rejects_non_strict_inbound_json(String content) throws Exception {
+        MessageIntakePort intake = mock(MessageIntakePort.class);
+        ConversationQueryPort queries = mock(ConversationQueryPort.class);
+
+        mvc(intake, queries).perform(post("/internal/messages").contentType(MediaType.APPLICATION_JSON).content(content))
+                .andExpect(status().isBadRequest());
+    }
+
     private static MockMvc mvc(MessageIntakePort intake, ConversationQueryPort queries) {
-        Jackson2ObjectMapperBuilder builder = Jackson2ObjectMapperBuilder.json();
-        new RuntimeConfiguration().strictJsonObjectMapper().customize(builder);
+        JsonMapper.Builder builder = JsonMapper.builder();
+        new RuntimeConfiguration().strictJsonMapper().customize(builder);
         return MockMvcBuilders.standaloneSetup(new MessageController(intake, queries))
-                .setMessageConverters(new MappingJackson2HttpMessageConverter(builder.build()))
+                .setMessageConverters(new JacksonJsonHttpMessageConverter(builder))
                 .setControllerAdvice(new WebErrorHandler()).build();
     }
 }

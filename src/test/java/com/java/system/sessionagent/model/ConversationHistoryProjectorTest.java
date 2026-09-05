@@ -36,7 +36,8 @@ class ConversationHistoryProjectorTest {
         assertThat(messages).hasSize(2);
         assertThat(messages.getFirst()).isInstanceOf(org.springframework.ai.chat.messages.AssistantMessage.class);
         assertThat(messages.get(1)).isInstanceOfSatisfying(ToolResponseMessage.class,
-                value -> assertThat(value.getResponses()).extracting(ToolResponseMessage.ToolResponse::id).containsExactly("call-1", "call-2"));
+                value -> assertThat(value.getResponses()).extracting(response -> response.id())
+                        .containsExactly("call-1", "call-2"));
     }
 
     @ParameterizedTest(name = "rejects {0} native history before provider invocation")

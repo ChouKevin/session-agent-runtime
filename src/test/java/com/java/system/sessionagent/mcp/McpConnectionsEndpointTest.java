@@ -19,9 +19,8 @@ class McpConnectionsEndpointTest {
                 new McpConnectionProperties(Map.of(), null, null, null, null, null), connection -> {
                     throw new IllegalStateException("MCP lifecycle is not configured");
                 }, Mockito.mock(TaskScheduler.class), java.time.Clock.systemUTC(),
-                new com.fasterxml.jackson.databind.ObjectMapper(), Runnable::run);
-        manager.publish("semantic", new EmptyClient(), List.of(new McpSchema.Tool(
-                "search_code", null, "Search", Map.of("type", "object"), Map.of(), null, Map.of())));
+                new com.fasterxml.jackson.databind.ObjectMapper(), command -> command.run());
+        manager.publish("semantic", new EmptyClient(), List.of(tool("search_code", "Search")));
         McpConnectionsEndpoint endpoint = new McpConnectionsEndpoint(manager);
 
         Map<String, Object> response = endpoint.connections();
@@ -35,7 +34,7 @@ class McpConnectionsEndpointTest {
     void reports_withheld_bindings_immediately_without_waiting_for_a_catalog_snapshot() {
         McpConnectionManager manager = manager();
         manager.publish("semantic", new EmptyClient(), Arrays.asList(
-                new McpSchema.Tool("search_code", null, "Search", Map.of("type", "object"), Map.of(), null, Map.of()),
+                tool("search_code", "Search"),
                 null));
 
         assertThat(new McpConnectionsEndpoint(manager).connections()).isEqualTo(Map.of("connections", Map.of("semantic", Map.of(
@@ -47,7 +46,16 @@ class McpConnectionsEndpointTest {
         return new McpConnectionManager(
                 new McpConnectionProperties(Map.of(), null, null, null, null, null), connection -> {
                     throw new IllegalStateException("MCP lifecycle is not configured");
-                }, Mockito.mock(TaskScheduler.class), java.time.Clock.systemUTC(), new com.fasterxml.jackson.databind.ObjectMapper(), Runnable::run);
+                }, Mockito.mock(TaskScheduler.class), java.time.Clock.systemUTC(),
+                new com.fasterxml.jackson.databind.ObjectMapper(), command -> command.run());
+    }
+
+    private static McpSchema.Tool tool(String name, String description) {
+        return McpSchema.Tool.builder(name, Map.of("type", "object"))
+                .description(description)
+                .outputSchema(Map.of())
+                .meta(Map.of())
+                .build();
     }
 
     private static final class EmptyClient implements McpConnectionClient {
@@ -59,7 +67,7 @@ class McpConnectionsEndpointTest {
 
         @Override
         public McpSchema.ListToolsResult listTools() {
-            return new McpSchema.ListToolsResult(List.of(), null);
+            return McpSchema.ListToolsResult.builder(List.of()).build();
         }
 
         @Override

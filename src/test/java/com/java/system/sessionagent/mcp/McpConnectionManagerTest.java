@@ -48,7 +48,7 @@ class McpConnectionManagerTest {
 
         assertThat(manager.diagnostic("broken").state()).isEqualTo(McpConnectionState.UNAVAILABLE);
         assertThat(manager.diagnostic("semantic").state()).isEqualTo(McpConnectionState.AVAILABLE);
-        assertThat(manager.view().connections().get("semantic").tools()).extracting(McpSchema.Tool::name)
+        assertThat(manager.view().connections().get("semantic").tools()).extracting(tool -> tool.name())
                 .containsExactly("search_code");
     }
 
@@ -92,7 +92,7 @@ class McpConnectionManagerTest {
 
         assertThat(originalView.connections().get("semantic").client()).contains(originalClient);
         assertThat(manager.view().connections().get("semantic").client()).contains(replacementClient);
-        assertThat(manager.view().connections().get("semantic").tools()).extracting(McpSchema.Tool::name)
+        assertThat(manager.view().connections().get("semantic").tools()).extracting(tool -> tool.name())
                 .containsExactly("lookup_invoice");
     }
 
@@ -169,7 +169,7 @@ class McpConnectionManagerTest {
         manager.publish("semantic", client, List.of(tool("lookup_invoice")));
 
         assertThat(client.closeCount()).isZero();
-        assertThat(manager.view().connections().get("semantic").tools()).extracting(McpSchema.Tool::name)
+        assertThat(manager.view().connections().get("semantic").tools()).extracting(tool -> tool.name())
                 .containsExactly("lookup_invoice");
     }
 
@@ -334,7 +334,7 @@ class McpConnectionManagerTest {
         scheduler.runDueTasks();
 
         assertThat(manager.diagnostic("semantic").state()).isEqualTo(McpConnectionState.DEGRADED);
-        assertThat(manager.view().connections().get("semantic").tools()).extracting(McpSchema.Tool::name)
+        assertThat(manager.view().connections().get("semantic").tools()).extracting(tool -> tool.name())
                 .containsExactly("search_code");
     }
 
@@ -405,7 +405,8 @@ class McpConnectionManagerTest {
         McpConnectionProperties properties = new McpConnectionProperties(connections, Duration.ofSeconds(60),
                 Duration.ofSeconds(1), initialBackoff, maximumBackoff, Duration.ofSeconds(5));
         return new McpConnectionManager(properties, factory, scheduler,
-                Clock.fixed(Instant.parse("2026-09-03T00:00:00Z"), ZoneOffset.UTC), new ObjectMapper(), Runnable::run);
+                Clock.fixed(Instant.parse("2026-09-03T00:00:00Z"), ZoneOffset.UTC), new ObjectMapper(),
+                command -> command.run());
     }
 
     private static McpConnectionManager manager(
@@ -434,7 +435,11 @@ class McpConnectionManagerTest {
     }
 
     private static McpSchema.Tool tool(String name) {
-        return new McpSchema.Tool(name, null, name, Map.of("type", "object"), Map.of(), null, Map.of());
+        return McpSchema.Tool.builder(name, Map.of("type", "object"))
+                .description(name)
+                .outputSchema(Map.of())
+                .meta(Map.of())
+                .build();
     }
 
     private static class RecordingClient implements McpConnectionClient {
@@ -460,7 +465,7 @@ class McpConnectionManagerTest {
                 throw new IllegalStateException("connection lost");
             }
             listingCompleted.countDown();
-            return new McpSchema.ListToolsResult(tools, null);
+            return McpSchema.ListToolsResult.builder(tools).build();
         }
 
         @Override

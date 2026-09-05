@@ -13,16 +13,13 @@ import com.java.system.sessionagent.conversation.port.out.ConversationModel;
 import com.java.system.sessionagent.conversation.port.out.ConversationTelemetry;
 import com.java.system.sessionagent.conversation.port.out.ModelCallFailure;
 import com.java.system.sessionagent.conversation.port.out.ModelCallReservation;
-import com.java.system.sessionagent.conversation.port.out.NoOpConversationTelemetry;
 import com.java.system.sessionagent.tool.domain.ToolName;
-import org.springframework.ai.chat.metadata.ChatResponseMetadata;
 import org.springframework.ai.chat.metadata.EmptyUsage;
 import org.springframework.ai.chat.metadata.Usage;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.chat.model.ChatResponse;
-import org.springframework.ai.chat.model.Generation;
 import org.springframework.ai.chat.prompt.ChatOptions;
 import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.ai.model.tool.ToolCallingChatOptions;
@@ -163,10 +160,10 @@ public final class SpringAiConversationModel implements ConversationModel {
 
     private static Optional<AssistantMessage> firstActionableMessage(ChatResponse response) {
         return Optional.ofNullable(response)
-                .map(ChatResponse::getResults)
+                .map(value -> value.getResults())
                 .stream()
-                .flatMap(List::stream)
-                .map(Generation::getOutput)
+                .flatMap(results -> results.stream())
+                .map(generation -> generation.getOutput())
                 .filter(Objects::nonNull)
                 .filter(SpringAiConversationModel::isActionable)
                 .findFirst();
@@ -203,7 +200,7 @@ public final class SpringAiConversationModel implements ConversationModel {
 
     private static ModelUsage usage(ChatResponse response) {
         Optional<Usage> responseUsage = Optional.ofNullable(response.getMetadata())
-                .map(ChatResponseMetadata::getUsage)
+                .map(metadata -> metadata.getUsage())
                 .filter(value -> !(value instanceof EmptyUsage));
         if (responseUsage.isEmpty()) {
             return new ModelUsage(0, 0, 0, false);

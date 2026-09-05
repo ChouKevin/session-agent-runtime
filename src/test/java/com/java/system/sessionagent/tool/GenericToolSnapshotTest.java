@@ -38,14 +38,14 @@ class GenericToolSnapshotTest {
                     received.set(supplied);
                     return new ToolOutput(false, Map.of("items", List.of()));
                 });
-        ToolSnapshot snapshot = new ToolSnapshot(List.of(binding));
+        try (ToolSnapshot snapshot = new ToolSnapshot(List.of(binding))) {
+            ToolOutput output = snapshot.invoke(new ToolName("semantic_search_code"), arguments);
 
-        ToolOutput output = snapshot.invoke(new ToolName("semantic_search_code"), arguments);
-
-        assertFalse(output.isError());
-        assertSame(arguments, received.get());
-        assertThrows(IllegalArgumentException.class,
-                () -> snapshot.invoke(new ToolName("semantic_search_code"), null));
+            assertFalse(output.isError());
+            assertSame(arguments, received.get());
+            assertThrows(IllegalArgumentException.class,
+                    () -> snapshot.invoke(new ToolName("semantic_search_code"), null));
+        }
     }
 
     @Test
@@ -56,11 +56,12 @@ class GenericToolSnapshotTest {
         source.add(first);
         source.add(second);
 
-        ToolSnapshot snapshot = new ToolSnapshot(source);
-        source.clear();
-        source.add(binding("replacement"));
+        try (ToolSnapshot snapshot = new ToolSnapshot(source)) {
+            source.clear();
+            source.add(binding("replacement"));
 
-        assertEquals(List.of(first.definition(), second.definition()), snapshot.definitions());
+            assertEquals(List.of(first.definition(), second.definition()), snapshot.definitions());
+        }
     }
 
     @Test
@@ -83,12 +84,14 @@ class GenericToolSnapshotTest {
 
     @Test
     void returns_not_available_output_for_unknown_names() {
-        ToolOutput output = new ToolSnapshot(List.of()).invoke(new ToolName("unknown"), Map.of());
+        try (ToolSnapshot snapshot = new ToolSnapshot(List.of())) {
+            ToolOutput output = snapshot.invoke(new ToolName("unknown"), Map.of());
 
-        assertTrue(output.isError());
-        assertTrue(output.asStructuredValue().get("result") instanceof Map<?, ?>);
-        Map<?, ?> failure = (Map<?, ?>) output.asStructuredValue().get("result");
-        assertEquals("TOOL_NOT_AVAILABLE", failure.get("code"));
+            assertTrue(output.isError());
+            assertTrue(output.asStructuredValue().get("result") instanceof Map<?, ?>);
+            Map<?, ?> failure = (Map<?, ?>) output.asStructuredValue().get("result");
+            assertEquals("TOOL_NOT_AVAILABLE", failure.get("code"));
+        }
     }
 
     @Test
@@ -117,12 +120,11 @@ class GenericToolSnapshotTest {
         nested.put("maximum", 2);
         properties.add(Map.of("additionalProperties", false));
 
-        Map<?, ?> frozenNested = (Map<?, ?>) ((List<?>) definition.inputSchema().get("properties")).getFirst();
+        List<?> frozenProperties = (List<?>) definition.inputSchema().get("properties");
+        Map<?, ?> frozenNested = (Map<?, ?>) frozenProperties.getFirst();
         assertEquals(Map.of("minimum", 1), frozenNested);
-        assertThrows(UnsupportedOperationException.class,
-                () -> ((Map<String, Object>) frozenNested).put("maximum", 2));
-        assertThrows(UnsupportedOperationException.class,
-                () -> ((List<Object>) definition.inputSchema().get("properties")).add(Map.of()));
+        assertThrows(UnsupportedOperationException.class, frozenNested::clear);
+        assertThrows(UnsupportedOperationException.class, frozenProperties::clear);
     }
 
     @Test

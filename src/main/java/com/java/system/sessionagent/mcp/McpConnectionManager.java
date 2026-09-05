@@ -8,7 +8,6 @@ import org.springframework.util.Assert;
 
 import java.time.Clock;
 import java.time.Duration;
-import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.IdentityHashMap;
@@ -200,7 +199,7 @@ public final class McpConnectionManager {
             ownedClients.clear();
             clientLifetimes.clear();
         }
-        ownedWorkExecutor.ifPresent(ExecutorService::shutdownNow);
+        ownedWorkExecutor.ifPresent(executor -> executor.shutdownNow());
         closeWithinTimeout(clientsToClose);
     }
 
@@ -208,7 +207,7 @@ public final class McpConnectionManager {
         if (scheduleAttemptOnce(connectionName, delay)) {
             return;
         }
-        int failures = reconnectFailures.merge(connectionName, 1, Integer::sum);
+        int failures = reconnectFailures.merge(connectionName, 1, (existing, increment) -> existing + increment);
         scheduleAttemptOnce(connectionName, reconnectDelay(failures));
     }
 
@@ -409,7 +408,8 @@ public final class McpConnectionManager {
                 ToolOutput failure = resultMapper.mapRuntimeFailure(exception).orElseGet(resultMapper::connectionFailure);
                 clientsToClose = replace(connectionName, ConnectionView.withoutClient(new Diagnostic(
                         McpConnectionState.UNAVAILABLE, failureCode(failure), CONNECTION_FAILURE_MESSAGE)));
-                int failures = reconnectFailures.merge(connectionName, 1, Integer::sum);
+                int failures = reconnectFailures.merge(connectionName, 1,
+                        (existing, increment) -> existing + increment);
                 scheduleAttempt(connectionName, reconnectDelay(failures));
             }
         } finally {

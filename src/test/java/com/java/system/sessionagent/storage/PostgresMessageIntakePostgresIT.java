@@ -11,7 +11,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
-import org.testcontainers.containers.PostgreSQLContainer;
+import org.testcontainers.postgresql.PostgreSQLContainer;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
@@ -26,7 +26,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class PostgresMessageIntakePostgresIT {
-    private static final PostgreSQLContainer<?> POSTGRES = new PostgreSQLContainer<>("postgres:17-alpine");
+    private static final PostgreSQLContainer POSTGRES = new PostgreSQLContainer("postgres:17-alpine");
     @BeforeEach void migrate() { POSTGRES.start(); flyway().clean(); flyway().migrate(); }
     @AfterEach void clean() { flyway().clean(); }
     @Test void retains_inbound_idempotency_and_rejects_conflicting_duplicate_content() {
@@ -42,7 +42,8 @@ class PostgresMessageIntakePostgresIT {
         List<MessageReceipt> distinct = concurrently(() -> store.receive(new IncomingMessage("thread", "alice",
                 "source-" + Thread.currentThread().threadId(), "message")));
         assertThat(duplicates).containsOnly(duplicates.getFirst());
-        assertThat(distinct).extracting(MessageReceipt::messageJobId).doesNotContain(duplicates.getFirst().messageJobId());
+        assertThat(distinct).extracting(receipt -> receipt.messageJobId())
+                .doesNotContain(duplicates.getFirst().messageJobId());
         assertThat(store.loadHistory(duplicates.getFirst().sessionId())).extracting(message -> message.sequence().value())
                 .containsExactly(1L, 2L, 3L);
     }

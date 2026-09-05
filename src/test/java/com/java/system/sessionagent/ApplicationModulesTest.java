@@ -40,7 +40,7 @@ class ApplicationModulesTest {
                 modules.stream().collect(Collectors.toMap(
                         module -> module.getIdentifier().toString(),
                         module -> allowedModuleNames(module, modules))));
-        assertTrue(modules.stream().noneMatch(ApplicationModule::isOpen));
+        assertTrue(modules.stream().noneMatch(module -> module.isOpen()));
     }
 
     @Test

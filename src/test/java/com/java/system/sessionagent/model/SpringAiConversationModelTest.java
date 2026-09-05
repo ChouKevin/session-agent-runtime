@@ -75,7 +75,7 @@ class SpringAiConversationModelTest {
 
         ModelReply.UseTools generated = (ModelReply.UseTools) model(withoutIds, GOOGLE_ROUTE_ID)
                 .respond(new ModelRequest(List.of(), new ToolSnapshot(List.of())), () -> 1, usage -> { }).reply();
-        assertThat(generated.requests()).extracting(ToolRequest::toolCallId).doesNotHaveDuplicates();
+        assertThat(generated.requests()).extracting(request -> request.toolCallId()).doesNotHaveDuplicates();
 
         AssistantMessage duplicateIds = AssistantMessage.builder().toolCalls(List.of(
                 new AssistantMessage.ToolCall("call-1", "function", "first", "{}"),
@@ -142,7 +142,7 @@ class SpringAiConversationModelTest {
         org.springframework.ai.chat.messages.AssistantMessage restored = (org.springframework.ai.chat.messages.AssistantMessage)
                 prompts.get(1).getInstructions().get(1);
         assertThat(restored.getMetadata()).containsKey("thoughtSignatures").doesNotContainKeys("finishReason", "candidateIndex");
-        assertThat((List<byte[]>) restored.getMetadata().get("thoughtSignatures"))
+        assertThat(thoughtSignatures(restored.getMetadata().get("thoughtSignatures")))
                 .containsExactly(firstSignature, secondSignature);
     }
 
@@ -173,6 +173,13 @@ class SpringAiConversationModelTest {
 
     private static SpringAiConversationModel model(AssistantMessage message, ModelRouteId routeId) {
         return model(message, new AtomicBoolean(), routeId);
+    }
+
+    private static List<byte[]> thoughtSignatures(Object value) {
+        assertThat(value).isInstanceOf(List.class);
+        List<?> elements = (List<?>) value;
+        assertThat(elements).allSatisfy(element -> assertThat(element).isInstanceOf(byte[].class));
+        return elements.stream().map(element -> (byte[]) element).toList();
     }
 
     private static SpringAiConversationModel model(

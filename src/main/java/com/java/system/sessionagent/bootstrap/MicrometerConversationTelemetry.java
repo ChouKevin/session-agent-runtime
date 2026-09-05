@@ -23,7 +23,7 @@ public final class MicrometerConversationTelemetry implements ConversationTeleme
             "STOP", "MAX_TOKENS", "SAFETY", "RECITATION", "OTHER", "UNAVAILABLE", "RESPONSE", "OUTPUT_INVALID");
     private static final Set<String> TOOL_OUTCOMES = Set.of("SUCCESS", "INVALID_INPUT", "FAILURE");
     private static final Set<String> RUNTIME_MESSAGE_CODES = Arrays.stream(RuntimeMessageCode.values())
-            .map(RuntimeMessageCode::name)
+            .map(code -> code.name())
             .collect(Collectors.toUnmodifiableSet());
     private static final Set<String> RETRY_CATEGORIES = Set.of("MODEL", "TOOL", "STORAGE", "DEPENDENCY");
 

@@ -25,7 +25,6 @@ public final class MessageJobWorker {
     private final ConversationStore conversationStore;
     private final MessageJobPort messageJobPort;
     private final WorkerProperties properties;
-    private final Clock clock;
     private final ScheduledExecutorService scheduler;
     private final String workerId;
     private final ConversationTelemetry telemetry;
@@ -51,7 +50,7 @@ public final class MessageJobWorker {
         this.conversationStore = Objects.requireNonNull(conversationStore, "Conversation store must not be null");
         this.messageJobPort = Objects.requireNonNull(messageJobPort, "Message job port must not be null");
         this.properties = Objects.requireNonNull(properties, "Worker properties must not be null");
-        this.clock = Objects.requireNonNull(clock, "Clock must not be null");
+        Objects.requireNonNull(clock, "Clock must not be null");
         this.scheduler = Objects.requireNonNull(scheduler, "Scheduler must not be null");
         Assert.hasText(workerId, "Worker ID must not be blank");
         this.workerId = workerId;

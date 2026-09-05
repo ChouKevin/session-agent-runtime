@@ -67,8 +67,12 @@ class McpToolCatalogTest {
         RecordingClient replacementClient = new RecordingClient();
         McpConnectionManager manager = manager();
         McpToolCatalog catalog = new McpToolCatalog(manager, OBJECT_MAPPER);
-        manager.publish("semantic", originalClient, List.of(new McpSchema.Tool("search_code", null, "Search code",
-                new FailingSecondTraversalMap(), Map.of(), null, Map.of())));
+        manager.publish("semantic", originalClient, List.of(McpSchema.Tool
+                .builder("search_code", new FailingSecondTraversalMap())
+                .description("Search code")
+                .outputSchema(Map.of())
+                .meta(Map.of())
+                .build()));
 
         org.assertj.core.api.Assertions.assertThatThrownBy(catalog::snapshot)
                 .isInstanceOf(IllegalStateException.class)
@@ -128,8 +132,11 @@ class McpToolCatalogTest {
     void withholds_a_malformed_schema_before_any_snapshot_can_reach_the_worker() {
         McpConnectionManager manager = manager();
         McpToolCatalog catalog = new McpToolCatalog(manager, OBJECT_MAPPER);
-        McpSchema.Tool malformed = new McpSchema.Tool("bad_schema", null, "Malformed",
-                Map.of("type", new Object()), Map.of(), null, Map.of());
+        McpSchema.Tool malformed = McpSchema.Tool.builder("bad_schema", Map.of("type", new Object()))
+                .description("Malformed")
+                .outputSchema(Map.of())
+                .meta(Map.of())
+                .build();
 
         manager.publish("semantic", new RecordingClient(), List.of(tool("search_code", "Search code"), malformed));
 
@@ -209,7 +216,11 @@ class McpToolCatalogTest {
     }
 
     private static McpSchema.Tool tool(String name, String description) {
-        return new McpSchema.Tool(name, null, description, Map.of("type", "object"), Map.of(), null, Map.of());
+        return McpSchema.Tool.builder(name, Map.of("type", "object"))
+                .description(description)
+                .outputSchema(Map.of())
+                .meta(Map.of())
+                .build();
     }
 
     private static McpConnectionManager manager() {
@@ -219,7 +230,7 @@ class McpToolCatalogTest {
     private static McpConnectionManager manager(McpConnectionProperties properties) {
         return new McpConnectionManager(properties, connection -> {
             throw new IllegalStateException("MCP lifecycle is not configured");
-        }, new ManualTaskScheduler(), java.time.Clock.systemUTC(), OBJECT_MAPPER, Runnable::run);
+        }, new ManualTaskScheduler(), java.time.Clock.systemUTC(), OBJECT_MAPPER, command -> command.run());
     }
 
     private static class RecordingClient implements McpConnectionClient {
@@ -235,7 +246,7 @@ class McpToolCatalogTest {
 
         @Override
         public McpSchema.ListToolsResult listTools() {
-            return new McpSchema.ListToolsResult(List.of(), null);
+            return McpSchema.ListToolsResult.builder(List.of()).build();
         }
 
         @Override

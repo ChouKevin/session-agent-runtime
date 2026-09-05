@@ -17,7 +17,7 @@ class McpToolResultMapperTest {
     @Test
     void preserves_structured_content_and_provider_error_without_sdk_values() {
         McpSchema.CallToolResult result = new McpSchema.CallToolResult(
-                List.of(new McpSchema.TextContent("ignored")), true,
+                List.of(McpSchema.TextContent.builder("ignored").build()), true,
                 Map.of("items", List.of(Map.of("name", "payments"))), Map.of());
 
         ToolOutput output = mapper.map(result);
@@ -30,7 +30,7 @@ class McpToolResultMapperTest {
     @Test
     void normalizes_standard_content_when_structured_content_is_absent() {
         McpSchema.CallToolResult result = new McpSchema.CallToolResult(
-                List.of(new McpSchema.TextContent("source text")), false, null, Map.of());
+                List.of(McpSchema.TextContent.builder("source text").build()), false, null, Map.of());
 
         ToolOutput output = mapper.map(result);
 

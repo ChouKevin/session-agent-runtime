@@ -72,7 +72,9 @@ public final class McpToolCatalog implements ToolCatalog {
     }
 
     private ToolOutput invoke(Route route, Map<String, Object> arguments) {
-        McpSchema.CallToolRequest request = new McpSchema.CallToolRequest(route.rawToolName(), arguments);
+        McpSchema.CallToolRequest request = McpSchema.CallToolRequest.builder(route.rawToolName())
+                .arguments(arguments)
+                .build();
         try {
             Optional<McpSchema.CallToolResult> result = Optional.ofNullable(route.client().callTool(request));
             return result.map(resultMapper::map).orElseGet(resultMapper::protocolFailure);

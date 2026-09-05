@@ -17,14 +17,13 @@ import com.java.system.sessionagent.tool.port.ToolCatalog;
 import com.java.system.sessionagent.worker.MessageJobWorker;
 import com.java.system.sessionagent.worker.WorkerProperties;
 import io.micrometer.core.instrument.MeterRegistry;
-import io.micrometer.observation.ObservationRegistry;
 import com.fasterxml.jackson.databind.cfg.CoercionAction;
 import com.fasterxml.jackson.databind.cfg.CoercionInputShape;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.MapperFeature;
 import com.fasterxml.jackson.databind.type.LogicalType;
 import org.springframework.ai.chat.model.ChatModel;
-import org.springframework.boot.jackson2.autoconfigure.Jackson2ObjectMapperBuilderCustomizer;
+import org.springframework.boot.jackson.autoconfigure.JsonMapperBuilderCustomizer;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -44,14 +43,35 @@ import java.util.concurrent.ScheduledExecutorService;
 public class RuntimeConfiguration {
 
     @Bean
-    public Jackson2ObjectMapperBuilderCustomizer strictJsonObjectMapper() {
-        return builder -> builder.featuresToEnable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES,
+    @ConditionalOnMissingBean(ObjectMapper.class)
+    ObjectMapper runtimeObjectMapper() {
+        ObjectMapper objectMapper = com.fasterxml.jackson.databind.json.JsonMapper.builder()
+                .findAndAddModules()
+                .enable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES,
                         DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
-                .featuresToDisable(MapperFeature.ALLOW_COERCION_OF_SCALARS)
-                .postConfigurer(mapper -> mapper.coercionConfigFor(LogicalType.Textual)
-                        .setCoercion(CoercionInputShape.Integer, CoercionAction.Fail)
-                        .setCoercion(CoercionInputShape.Float, CoercionAction.Fail)
-                        .setCoercion(CoercionInputShape.Boolean, CoercionAction.Fail));
+                .disable(MapperFeature.ALLOW_COERCION_OF_SCALARS)
+                .build();
+        objectMapper.coercionConfigFor(LogicalType.Textual)
+                .setCoercion(CoercionInputShape.Integer, CoercionAction.Fail)
+                .setCoercion(CoercionInputShape.Float, CoercionAction.Fail)
+                .setCoercion(CoercionInputShape.Boolean, CoercionAction.Fail);
+        return objectMapper;
+    }
+
+    @Bean
+    public JsonMapperBuilderCustomizer strictJsonMapper() {
+        return builder -> builder
+                .enable(tools.jackson.databind.DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES,
+                        tools.jackson.databind.DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
+                .disable(tools.jackson.databind.MapperFeature.ALLOW_COERCION_OF_SCALARS)
+                .withCoercionConfig(tools.jackson.databind.type.LogicalType.Textual,
+                        config -> config
+                                .setCoercion(tools.jackson.databind.cfg.CoercionInputShape.Integer,
+                                        tools.jackson.databind.cfg.CoercionAction.Fail)
+                                .setCoercion(tools.jackson.databind.cfg.CoercionInputShape.Float,
+                                        tools.jackson.databind.cfg.CoercionAction.Fail)
+                                .setCoercion(tools.jackson.databind.cfg.CoercionInputShape.Boolean,
+                                        tools.jackson.databind.cfg.CoercionAction.Fail));
     }
 
     @Bean

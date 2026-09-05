@@ -35,7 +35,7 @@ class GoogleGenAiThoughtSignatureHandlerTest {
         Map<String, Object> restored = handler.restore(continuation);
 
         assertThat(restored).containsOnlyKeys("thoughtSignatures");
-        assertThat((List<byte[]>) restored.get("thoughtSignatures"))
+        assertThat(thoughtSignatures(restored.get("thoughtSignatures")))
                 .containsExactly(first, second);
     }
 
@@ -61,9 +61,9 @@ class GoogleGenAiThoughtSignatureHandlerTest {
 
         ModelContinuation continuation = handler.capture(providerMessage).orElseThrow();
         signature[0] = 9;
-        List<byte[]> firstRestore = (List<byte[]>) handler.restore(continuation).get("thoughtSignatures");
+        List<byte[]> firstRestore = thoughtSignatures(handler.restore(continuation).get("thoughtSignatures"));
         firstRestore.getFirst()[1] = 8;
-        List<byte[]> secondRestore = (List<byte[]>) handler.restore(continuation).get("thoughtSignatures");
+        List<byte[]> secondRestore = thoughtSignatures(handler.restore(continuation).get("thoughtSignatures"));
 
         assertThat(secondRestore).containsExactly(new byte[] {1, 2, 3});
     }
@@ -119,5 +119,12 @@ class GoogleGenAiThoughtSignatureHandlerTest {
 
     private static AssistantMessage.ToolCall toolCall(String id, String name) {
         return new AssistantMessage.ToolCall(id, "function", name, "{}");
+    }
+
+    private static List<byte[]> thoughtSignatures(Object value) {
+        assertThat(value).isInstanceOf(List.class);
+        List<?> elements = (List<?>) value;
+        assertThat(elements).allSatisfy(element -> assertThat(element).isInstanceOf(byte[].class));
+        return elements.stream().map(element -> (byte[]) element).toList();
     }
 }

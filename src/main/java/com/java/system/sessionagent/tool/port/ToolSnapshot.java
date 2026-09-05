@@ -38,7 +38,7 @@ public final class ToolSnapshot implements AutoCloseable {
             copiedBindings.put(name, retainedBinding);
         }
         bindings = Collections.unmodifiableMap(copiedBindings);
-        definitions = bindings.values().stream().map(ToolBinding::definition).toList();
+        definitions = bindings.values().stream().map(binding -> binding.definition()).toList();
         this.closeAction = closeAction;
     }
 
