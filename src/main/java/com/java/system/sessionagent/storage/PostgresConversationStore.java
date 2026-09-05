@@ -13,6 +13,8 @@ import com.java.system.sessionagent.conversation.domain.MessageRole;
 import com.java.system.sessionagent.conversation.domain.MessageWorkClaim;
 import com.java.system.sessionagent.conversation.domain.ModelContinuation;
 import com.java.system.sessionagent.conversation.domain.ContextUsageCheckpoint;
+import com.java.system.sessionagent.conversation.domain.ContextCompaction;
+import com.java.system.sessionagent.conversation.domain.ContextSummary;
 import com.java.system.sessionagent.conversation.domain.ModelDescriptor;
 import com.java.system.sessionagent.conversation.domain.ModelRouteId;
 import com.java.system.sessionagent.conversation.domain.RuntimeMessage;
@@ -339,6 +341,66 @@ public final class PostgresConversationStore implements ConversationStore {
         } catch (RuntimeException exception) {
             throw translate(exception);
         }
+    }
+
+    @Override
+    public Optional<ContextCompaction> loadCompaction(SessionId sessionId) {
+        SessionId requiredSessionId = Objects.requireNonNull(sessionId, "Session ID must not be null");
+        try {
+            return jdbcTemplate.query("""
+                    select generation, message_job_id, reason, summary, covered_through, model_route_id, model_id,
+                        context_window_tokens, request_shape_fingerprint, estimate_before_tokens, estimate_after_tokens, created_at
+                    from session_compaction where session_id = ? order by generation desc limit 1
+                    """, (resultSet, rowNumber) -> new ContextCompaction(resultSet.getLong("generation"),
+                    new MessageJobId(resultSet.getObject("message_job_id", UUID.class).toString()),
+                    ContextCompaction.Reason.valueOf(resultSet.getString("reason")), new ContextSummary(resultSet.getString("summary")),
+                    new SessionSequence(resultSet.getLong("covered_through")), new ModelDescriptor(
+                    new ModelRouteId(resultSet.getString("model_route_id")), resultSet.getString("model_id"),
+                    resultSet.getLong("context_window_tokens")), resultSet.getString("request_shape_fingerprint"),
+                    resultSet.getLong("estimate_before_tokens"), resultSet.getLong("estimate_after_tokens"),
+                    resultSet.getObject("created_at", OffsetDateTime.class).toInstant()), UUID.fromString(requiredSessionId.value()))
+                    .stream().findFirst();
+        } catch (RuntimeException exception) {
+            throw translate(exception);
+        }
+    }
+
+    @Override
+    public boolean hasOverflowCompaction(MessageJobId messageJobId) {
+        MessageJobId requiredMessageJobId = Objects.requireNonNull(messageJobId, "Message job ID must not be null");
+        try {
+            return Boolean.TRUE.equals(jdbcTemplate.queryForObject("""
+                    select exists(select 1 from session_compaction where message_job_id = ? and reason = 'OVERFLOW')
+                    """, Boolean.class, UUID.fromString(requiredMessageJobId.value())));
+        } catch (RuntimeException exception) {
+            throw translate(exception);
+        }
+    }
+
+    @Override
+    public void compact(MessageWorkClaim claim, CompactionData compaction, Instant createdAt) {
+        MessageWorkClaim requiredClaim = Objects.requireNonNull(claim, "Message work claim must not be null");
+        CompactionData requiredCompaction = Objects.requireNonNull(compaction, "Context compaction data must not be null");
+        Instant requiredCreatedAt = Objects.requireNonNull(createdAt, "Context compaction creation time must not be null");
+        inTransaction(() -> {
+            requireLiveClaim(requiredClaim);
+            UUID sessionId = sessionId(requiredClaim);
+            jdbcTemplate.update("""
+                    insert into session_compaction(session_id, generation, message_job_id, reason, summary, covered_through,
+                        model_route_id, model_id, context_window_tokens, request_shape_fingerprint, estimate_before_tokens,
+                        estimate_after_tokens, created_at)
+                    values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, sessionId, requiredCompaction.generation(), messageJobId(requiredClaim), requiredCompaction.reason().name(),
+                    requiredCompaction.summary(), requiredCompaction.coveredThrough().value(),
+                    requiredCompaction.model().routeId().value(), requiredCompaction.model().modelId(),
+                    requiredCompaction.model().contextWindowTokens(), requiredCompaction.requestShapeFingerprint(),
+                    requiredCompaction.estimateBeforeTokens(), requiredCompaction.estimateAfterTokens(), timestamp(requiredCreatedAt));
+            jdbcTemplate.update("""
+                    delete from model_continuation where message_job_id = ? and session_id = ? and assistant_sequence <= ?
+                    """, messageJobId(requiredClaim), sessionId, requiredCompaction.coveredThrough().value());
+            requireLiveClaim(requiredClaim);
+            return Boolean.TRUE;
+        });
     }
 
     private List<SessionMessage> loadHistoryInSingleSnapshot(SessionId sessionId) {

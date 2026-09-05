@@ -117,6 +117,25 @@ create table context_usage_checkpoint (
     foreign key (session_id, response_sequence) references session_message(session_id, sequence)
 );
 
+create table session_compaction (
+    session_id uuid not null references conversation_session(session_id),
+    generation bigint not null check (generation > 0),
+    message_job_id uuid not null,
+    reason varchar(16) not null check (reason in ('PROACTIVE', 'OVERFLOW')),
+    summary text not null check (length(summary) > 0),
+    covered_through bigint not null,
+    model_route_id varchar(64) not null,
+    model_id varchar(128) not null,
+    context_window_tokens bigint not null check (context_window_tokens > 0),
+    request_shape_fingerprint char(64) not null,
+    estimate_before_tokens bigint not null check (estimate_before_tokens >= 0),
+    estimate_after_tokens bigint not null check (estimate_after_tokens >= 0),
+    created_at timestamptz not null,
+    primary key (session_id, generation),
+    foreign key (message_job_id, session_id) references message_job(message_job_id, session_id),
+    foreign key (session_id, covered_through) references session_message(session_id, sequence)
+);
+
 create table tool_observation (
     session_id uuid not null,
     sequence bigint not null,
@@ -141,6 +160,7 @@ create table runtime_message (
 create unique index uq_one_working_job_per_session on message_job(session_id) where status = 'WORKING';
 create index ix_claimable_job on message_job(available_at, created_at, message_job_id)
     where status in ('PENDING', 'RETRY');
+create unique index uq_one_overflow_compaction_per_job on session_compaction(message_job_id) where reason = 'OVERFLOW';
 
 create function reject_committed_row_change() returns trigger language plpgsql as $$
 begin
@@ -163,6 +183,8 @@ create trigger tool_observation_append_only before update or delete on tool_obse
 create trigger runtime_message_append_only before update or delete on runtime_message
     for each row execute function reject_committed_row_change();
 create trigger context_usage_checkpoint_append_only before update or delete on context_usage_checkpoint
+    for each row execute function reject_committed_row_change();
+create trigger session_compaction_append_only before update or delete on session_compaction
     for each row execute function reject_committed_row_change();
 
 create function restrict_conversation_session_change() returns trigger language plpgsql as $$

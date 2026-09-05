@@ -9,6 +9,7 @@ import com.java.system.sessionagent.conversation.domain.ModelDescriptor;
 import com.java.system.sessionagent.conversation.domain.ModelRouteId;
 import com.java.system.sessionagent.conversation.domain.ModelRequest;
 import com.java.system.sessionagent.conversation.domain.ModelUsage;
+import com.java.system.sessionagent.conversation.domain.ContextCompactionRequest;
 import com.java.system.sessionagent.conversation.domain.ToolRequest;
 import com.java.system.sessionagent.conversation.port.out.ConversationModel;
 import com.java.system.sessionagent.conversation.port.out.ConversationTelemetry;
@@ -171,6 +172,36 @@ public final class SpringAiConversationModel implements ConversationModel {
         return result;
     }
 
+    @Override
+    public String summarize(ContextCompactionRequest request, ModelCallReservation reservation) {
+        Assert.notNull(request, "Context compaction request must not be null");
+        Assert.notNull(reservation, "Model call reservation must not be null");
+        List<Message> messages = new ArrayList<>();
+        messages.add(new org.springframework.ai.chat.messages.SystemMessage(compactionPrompt()));
+        try {
+            messages.addAll(historyProjector.project(request.history(), Map.of(), null, request.previousSummary()));
+        } catch (InvalidConversationHistoryException exception) {
+            throw ModelCallFailure.invalidHistory();
+        }
+        reservation.reserve();
+        long requestStartedAt = System.nanoTime();
+        ChatResponse response;
+        try {
+            response = chatModel.call(new Prompt(List.copyOf(messages)));
+        } catch (RuntimeException exception) {
+            ModelCallFailure failure = classifyProviderFailure(exception);
+            recordFailure("UNAVAILABLE", requestStartedAt);
+            throw failure;
+        }
+        AssistantMessage message = firstActionableMessage(response).orElseThrow(ModelCallFailure::correctable);
+        if (message.hasToolCalls() || !StringUtils.hasText(message.getText())) {
+            recordFailure("OUTPUT_INVALID", requestStartedAt);
+            throw ModelCallFailure.correctable();
+        }
+        telemetry.model("SUCCESS", Optional.of("COMPACTION"), usage(response), elapsedSince(requestStartedAt));
+        return message.getText();
+    }
+
     private static ModelDescriptor testDescriptor(SpringAiContinuationHandler continuationHandler) {
         return new ModelDescriptor(continuationHandler.routeId(), "unspecified", 1);
     }
@@ -179,7 +210,7 @@ public final class SpringAiConversationModel implements ConversationModel {
         List<ToolCallback> callbacks = callbackFactory.create(request.toolSnapshot());
         List<Message> messages = new ArrayList<>();
         messages.add(new org.springframework.ai.chat.messages.SystemMessage(promptResource.content()));
-        messages.addAll(historyProjector.project(request.history(), request.continuations(), continuationHandler));
+        messages.addAll(historyProjector.project(request.history(), request.continuations(), continuationHandler, request.contextSummary()));
         if (callbacks.isEmpty()) {
             return new Prompt(List.copyOf(messages));
         }

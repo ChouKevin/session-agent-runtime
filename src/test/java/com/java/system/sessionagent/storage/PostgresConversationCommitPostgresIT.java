@@ -17,6 +17,7 @@ import com.java.system.sessionagent.conversation.domain.ContextUsageProjection;
 import com.java.system.sessionagent.conversation.domain.ModelRequest;
 import com.java.system.sessionagent.conversation.domain.ModelUsage;
 import com.java.system.sessionagent.conversation.domain.SessionMessage;
+import com.java.system.sessionagent.conversation.domain.SessionSequence;
 import com.java.system.sessionagent.conversation.domain.ToolObservation;
 import com.java.system.sessionagent.conversation.application.MessageJobService;
 import com.java.system.sessionagent.conversation.port.out.ConversationModel;
@@ -111,7 +112,7 @@ class PostgresConversationCommitPostgresIT {
 
         assertThat(tables).containsExactlyInAnyOrder("conversation_session", "source_message", "session_message", "user_message",
                 "message_job", "assistant_message", "assistant_tool_calls", "model_continuation", "tool_observation", "runtime_message",
-                "context_usage_checkpoint");
+                "context_usage_checkpoint", "session_compaction");
         assertThat(observationColumns).containsExactlyInAnyOrder("session_id", "sequence", "role", "tool_call_id", "tool_name", "output");
         assertThat(jobColumns).contains("model_route_id").doesNotContain("reply_sequence");
         assertThat(roleChecks).contains("USER", "TOOL", "ASSISTANT", "ASSISTANT_TOOL_CALLS", "RUNTIME").doesNotContain("FEEDBACK");
@@ -153,6 +154,30 @@ class PostgresConversationCommitPostgresIT {
                 java.util.UUID.fromString(receipt.messageJobId().value()))).isEqualTo("DONE");
         assertThat(jdbcTemplate.queryForObject("select count(*) from tool_observation", Integer.class)).isEqualTo(2);
         assertThat(restartedStore.claimNext("recovery-worker", Duration.ofSeconds(30))).isEmpty();
+    }
+
+    @Test
+    void persists_compaction_without_replacing_raw_history_and_durably_limits_overflow_recovery() {
+        ConversationStore store = store();
+        MessageReceipt receipt = store.receive(new IncomingMessage("thread", "alice", "compaction", "hello"));
+        MessageWorkClaim claim = store.claimNext("worker", Duration.ofSeconds(30)).orElseThrow();
+        ModelDescriptor descriptor = new ModelDescriptor(new ModelRouteId("google-genai"), "gemini-3.1-flash-lite", 1_048_576);
+        ConversationStore.CompactionData compact = new ConversationStore.CompactionData(1,
+                com.java.system.sessionagent.conversation.domain.ContextCompaction.Reason.OVERFLOW, "historical summary",
+                new SessionSequence(1), descriptor, "a".repeat(64), 100, 10);
+
+        store.compact(claim, compact, NOW);
+
+        ConversationStore restarted = store();
+        assertThat(restarted.loadHistory(receipt.sessionId())).extracting(message -> message.sequence().value()).containsExactly(1L);
+        assertThat(restarted.loadCompaction(receipt.sessionId())).hasValueSatisfying(value -> {
+            assertThat(value.summary().text()).isEqualTo("historical summary");
+            assertThat(value.reason()).isEqualTo(com.java.system.sessionagent.conversation.domain.ContextCompaction.Reason.OVERFLOW);
+        });
+        assertThat(restarted.hasOverflowCompaction(receipt.messageJobId())).isTrue();
+        assertThatThrownBy(() -> restarted.compact(claim, new ConversationStore.CompactionData(2,
+                com.java.system.sessionagent.conversation.domain.ContextCompaction.Reason.OVERFLOW, "another summary", new SessionSequence(1),
+                descriptor, "b".repeat(64), 100, 10), NOW.plusSeconds(1))).isInstanceOf(ConversationStoreFailure.class);
     }
 
     @Test

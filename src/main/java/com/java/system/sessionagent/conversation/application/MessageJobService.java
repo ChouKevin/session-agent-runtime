@@ -4,6 +4,9 @@ import com.java.system.sessionagent.conversation.domain.MessageWorkClaim;
 import com.java.system.sessionagent.conversation.domain.ModelReply;
 import com.java.system.sessionagent.conversation.domain.ModelCallResult;
 import com.java.system.sessionagent.conversation.domain.ContextUsageCheckpoint;
+import com.java.system.sessionagent.conversation.domain.ContextCompaction;
+import com.java.system.sessionagent.conversation.domain.ContextCompactionRequest;
+import com.java.system.sessionagent.conversation.domain.ContextSummary;
 import com.java.system.sessionagent.conversation.domain.ContextUsageEstimator;
 import com.java.system.sessionagent.conversation.domain.ContextUsageProjection;
 import com.java.system.sessionagent.conversation.domain.ModelDescriptor;
@@ -46,6 +49,7 @@ public final class MessageJobService implements MessageJobPort {
     private static final String MODEL_OUTPUT_INVALID = "MODEL_OUTPUT_INVALID";
     private static final String MODEL_UNAVAILABLE = "MODEL_UNAVAILABLE";
     private static final String CONTEXT_TOO_LARGE = "CONTEXT_TOO_LARGE";
+    private static final String COMPACTION_FAILED = "COMPACTION_FAILED";
     private static final String INVALID_CONVERSATION_HISTORY = "INVALID_CONVERSATION_HISTORY";
 
     private final ConversationStore conversationStore;
@@ -131,15 +135,15 @@ public final class MessageJobService implements MessageJobPort {
             }
             try (ToolSnapshot tools = toolCatalog.snapshot()) {
                 ReservationState reservation = new ReservationState();
-                ModelRequest request = new ModelRequest(history, continuations, tools);
-                String requestShapeFingerprint = "";
-                if (!Objects.isNull(activeModelDescriptor) && org.springframework.util.StringUtils.hasText(conversationModel.systemPrompt())) {
-                    ContextUsageProjection projection = new ContextUsageProjection(activeModelDescriptor, conversationModel.systemPrompt(),
-                            tools.definitions(), history, 0);
-                    requestShapeFingerprint = contextUsageEstimator.requestShapeFingerprint(projection);
-                    contextUsageEstimator.estimate(projection, conversationStore.loadUsageCheckpoint(claim.sessionId(), activeModelDescriptor,
-                            requestShapeFingerprint, 0));
+                ContextState context = contextState(claim, history, continuations, tools, activeModelDescriptor);
+                if (context.requiresCompaction()) {
+                    if (!compact(claim, guard, reservation, context, ContextCompaction.Reason.PROACTIVE)) {
+                        return;
+                    }
+                    continue;
                 }
+                ModelRequest request = context.request();
+                String requestShapeFingerprint = context.requestShapeFingerprint();
                 ModelReply reply;
                 Optional<ModelContinuation> continuation;
                 ModelCallResult result;
@@ -156,6 +160,10 @@ public final class MessageJobService implements MessageJobPort {
                     if (failure.kind() == ModelCallFailure.Kind.INVALID_HISTORY) {
                         appendRuntime(claim, guard, List.of(runtime(INVALID_CONVERSATION_HISTORY)), ConversationStore.JobUpdate.COMPLETE);
                         return;
+                    }
+                    if (failure.kind() == ModelCallFailure.Kind.CONTEXT_TOO_LARGE
+                            && recoverOverflow(claim, guard, reservation, context, elapsedSince(requestStartedAt))) {
+                        continue;
                     }
                     if (handleModelFailure(claim, guard, reservation, failure, elapsedSince(requestStartedAt))) {
                         continue;
@@ -174,7 +182,7 @@ public final class MessageJobService implements MessageJobPort {
                 if (reply instanceof ModelReply.Text text) {
                     appendResponse(claim, guard, List.of(new ConversationStore.AssistantData(text.message())),
                             ConversationStore.JobUpdate.COMPLETE, Optional.empty(), checkpoint(result, activeModelDescriptor, ordinal,
-                                    requestShapeFingerprint));
+                                    requestShapeFingerprint, context.compaction().map(ContextCompaction::generation).orElse(0L)));
                     return;
                 }
                 ModelReply.UseTools useTools = (ModelReply.UseTools) reply;
@@ -187,7 +195,8 @@ public final class MessageJobService implements MessageJobPort {
                     return;
                 }
                 if (!appendResponse(claim, guard, messages, ConversationStore.JobUpdate.KEEP_WORKING, continuation,
-                        checkpoint(result, activeModelDescriptor, ordinal, requestShapeFingerprint))) {
+                        checkpoint(result, activeModelDescriptor, ordinal, requestShapeFingerprint,
+                                context.compaction().map(ContextCompaction::generation).orElse(0L)))) {
                     return;
                 }
             }
@@ -195,12 +204,200 @@ public final class MessageJobService implements MessageJobPort {
     }
 
     private Optional<ConversationStore.UsageCheckpointData> checkpoint(ModelCallResult result, ModelDescriptor descriptor, int ordinal,
-            String requestShapeFingerprint) {
+            String requestShapeFingerprint, long compactGeneration) {
         if (!result.usage().available() || Objects.isNull(descriptor) || !org.springframework.util.StringUtils.hasText(requestShapeFingerprint)) {
             return Optional.empty();
         }
         return Optional.of(new ConversationStore.UsageCheckpointData(descriptor, ordinal, result.usage().promptTokens(),
-                result.usage().completionTokens(), result.usage().totalTokens(), requestShapeFingerprint, 0));
+                result.usage().completionTokens(), result.usage().totalTokens(), requestShapeFingerprint, compactGeneration));
+    }
+
+    private ContextState contextState(
+            MessageWorkClaim claim,
+            List<SessionMessage> history,
+            Map<SessionSequence, ModelContinuation> continuations,
+            ToolSnapshot tools,
+            ModelDescriptor descriptor) {
+        if (Objects.isNull(descriptor) || "unspecified".equals(descriptor.modelId())
+                || !org.springframework.util.StringUtils.hasText(conversationModel.systemPrompt())) {
+            return new ContextState(new ModelRequest(history, continuations, tools), "", Optional.empty(), 0, false, Optional.empty());
+        }
+        Optional<ContextCompaction> compaction = conversationStore.loadCompaction(claim.sessionId());
+        List<SessionMessage> visibleHistory = compactedSuffix(history, compaction);
+        Map<SessionSequence, ModelContinuation> visibleContinuations = continuationsAfter(continuations, compaction);
+        Optional<ContextSummary> summary = compaction.map(ContextCompaction::summary);
+        long generation = compaction.map(ContextCompaction::generation).orElse(0L);
+        ContextUsageProjection projection = new ContextUsageProjection(descriptor, conversationModel.systemPrompt(), tools.definitions(),
+                visibleHistory, generation, summary);
+        String fingerprint = contextUsageEstimator.requestShapeFingerprint(projection);
+        long estimate = contextUsageEstimator.estimate(projection,
+                conversationStore.loadUsageCheckpoint(claim.sessionId(), descriptor, fingerprint, generation)).tokens();
+        long threshold = fourFifths(descriptor.contextWindowTokens());
+        return new ContextState(new ModelRequest(visibleHistory, visibleContinuations, tools, summary), fingerprint, compaction,
+                estimate, estimate >= threshold, Optional.of(projection));
+    }
+
+    private boolean recoverOverflow(
+            MessageWorkClaim claim,
+            WorkGuard guard,
+            ReservationState reservation,
+            ContextState context,
+            Duration duration) {
+        logModelFailure(claim, reservation.ordinal(), ModelCallFailure.Kind.CONTEXT_TOO_LARGE, duration);
+        if (conversationStore.hasOverflowCompaction(claim.messageJobId())) {
+            appendRuntime(claim, guard, List.of(runtime(CONTEXT_TOO_LARGE)), ConversationStore.JobUpdate.COMPLETE);
+            return false;
+        }
+        return compact(claim, guard, new ReservationState(), context, ContextCompaction.Reason.OVERFLOW);
+    }
+
+    private boolean compact(
+            MessageWorkClaim claim,
+            WorkGuard guard,
+            ReservationState reservation,
+            ContextState context,
+            ContextCompaction.Reason reason) {
+        if (context.projection().isEmpty()) {
+            appendRuntime(claim, guard, List.of(runtime(CONTEXT_TOO_LARGE)), ConversationStore.JobUpdate.COMPLETE);
+            return false;
+        }
+        ContextUsageProjection projection = context.projection().orElseThrow();
+        Optional<CompactionBoundary> boundary = selectBoundary(claim, context, projection.model());
+        if (boundary.isEmpty()) {
+            appendRuntime(claim, guard, List.of(runtime(CONTEXT_TOO_LARGE)), ConversationStore.JobUpdate.COMPLETE);
+            return false;
+        }
+        CompactionBoundary selected = boundary.orElseThrow();
+        String summary;
+        try {
+            summary = conversationModel.summarize(new ContextCompactionRequest(context.compaction().map(ContextCompaction::summary),
+                    selected.history()), () -> reserveAndLogModelRequest(claim, guard, reservation, selected.history().size(), 0));
+        } catch (BudgetExhausted exception) {
+            appendRuntime(claim, guard, List.of(runtime(MODEL_CALL_LIMIT_REACHED)), ConversationStore.JobUpdate.COMPLETE);
+            return false;
+        } catch (ModelCallFailure failure) {
+            return handleCompactionFailure(claim, guard, reservation, failure);
+        }
+        if (!guard.stillOwned()) {
+            return false;
+        }
+        ContextSummary compactedSummary;
+        try {
+            compactedSummary = new ContextSummary(summary);
+        } catch (IllegalArgumentException exception) {
+            appendRuntime(claim, guard, List.of(runtime(COMPACTION_FAILED)), ConversationStore.JobUpdate.COMPLETE);
+            return false;
+        }
+        ContextUsageProjection afterProjection = new ContextUsageProjection(projection.model(), projection.systemPrompt(),
+                projection.toolDefinitions(), selected.suffix(), context.compaction().map(ContextCompaction::generation).orElse(0L) + 1,
+                Optional.of(compactedSummary));
+        long afterEstimate = contextUsageEstimator.estimate(afterProjection, Optional.empty()).tokens();
+        try {
+            conversationStore.compact(claim, new ConversationStore.CompactionData(
+                    context.compaction().map(ContextCompaction::generation).orElse(0L) + 1, reason, compactedSummary.text(),
+                    selected.boundary(), projection.model(), context.requestShapeFingerprint(), context.estimateTokens(), afterEstimate), clock.instant());
+            return guard.stillOwned();
+        } catch (StaleWorkClaimException exception) {
+            return false;
+        }
+    }
+
+    private boolean handleCompactionFailure(
+            MessageWorkClaim claim,
+            WorkGuard guard,
+            ReservationState reservation,
+            ModelCallFailure failure) {
+        logModelFailure(claim, reservation.ordinal(), failure.kind(), Duration.ZERO);
+        if (failure.kind() == ModelCallFailure.Kind.TRANSIENT && reservation.ordinal() < maxModelCalls && scheduleRetry(claim, guard)) {
+            return false;
+        }
+        appendRuntime(claim, guard, List.of(runtime(COMPACTION_FAILED)), ConversationStore.JobUpdate.COMPLETE);
+        return false;
+    }
+
+    private Optional<CompactionBoundary> selectBoundary(MessageWorkClaim claim, ContextState context, ModelDescriptor descriptor) {
+        List<SessionMessage> full = conversationStore.loadHistory(claim.sessionId());
+        int start = context.compaction().map(compaction -> indexAfter(full, compaction.coveredThrough())).orElse(0);
+        int currentUser = currentUserIndex(full, claim);
+        if (currentUser <= start) {
+            return Optional.empty();
+        }
+        for (int index = currentUser - 1; index >= start; index--) {
+            int end = completeBoundaryEnd(full, index);
+            if (end < index || !isResponseBoundary(full.get(index))) {
+                continue;
+            }
+            List<SessionMessage> candidate = full.subList(start, end + 1);
+            ContextUsageProjection summaryProjection = new ContextUsageProjection(descriptor, conversationModel.compactionPrompt(), List.of(), candidate,
+                    0, context.compaction().map(ContextCompaction::summary));
+            long summaryEstimate = contextUsageEstimator.estimate(summaryProjection, Optional.empty()).tokens();
+            if (summaryEstimate < descriptor.contextWindowTokens()) {
+                return Optional.of(new CompactionBoundary(new SessionSequence(full.get(end).sequence().value()), List.copyOf(candidate),
+                        List.copyOf(full.subList(end + 1, full.size()))));
+            }
+        }
+        return Optional.empty();
+    }
+
+    private static int currentUserIndex(List<SessionMessage> history, MessageWorkClaim claim) {
+        for (int index = history.size() - 1; index >= 0; index--) {
+            SessionMessage message = history.get(index);
+            if (message instanceof com.java.system.sessionagent.conversation.domain.UserMessage
+                    && message.messageJobId().filter(claim.messageJobId()::equals).isPresent()) {
+                return index;
+            }
+        }
+        return history.size();
+    }
+
+    private static long fourFifths(long value) {
+        return (value / 5L) * 4L + (value % 5L) * 4L / 5L;
+    }
+
+    private static int completeBoundaryEnd(List<SessionMessage> history, int index) {
+        SessionMessage message = history.get(index);
+        if (!(message instanceof com.java.system.sessionagent.conversation.domain.AssistantToolCallsMessage calls)) {
+            return index;
+        }
+        int end = index + calls.requests().size();
+        if (end >= history.size()) {
+            return -1;
+        }
+        for (int offset = 1; offset <= calls.requests().size(); offset++) {
+            if (!(history.get(index + offset) instanceof com.java.system.sessionagent.conversation.domain.ToolObservation)) {
+                return -1;
+            }
+        }
+        return end;
+    }
+
+    private static boolean isResponseBoundary(SessionMessage message) {
+        return message instanceof com.java.system.sessionagent.conversation.domain.AssistantMessage
+                || message instanceof com.java.system.sessionagent.conversation.domain.AssistantToolCallsMessage
+                || message instanceof com.java.system.sessionagent.conversation.domain.RuntimeMessage;
+    }
+
+    private static int indexAfter(List<SessionMessage> history, SessionSequence boundary) {
+        for (int index = 0; index < history.size(); index++) {
+            if (history.get(index).sequence().equals(boundary)) {
+                return index + 1;
+            }
+        }
+        return history.size();
+    }
+
+    private static List<SessionMessage> compactedSuffix(List<SessionMessage> history, Optional<ContextCompaction> compaction) {
+        return compaction.map(value -> List.copyOf(history.subList(indexAfter(history, value.coveredThrough()), history.size()))).orElse(history);
+    }
+
+    private static Map<SessionSequence, ModelContinuation> continuationsAfter(
+            Map<SessionSequence, ModelContinuation> continuations, Optional<ContextCompaction> compaction) {
+        if (compaction.isEmpty()) {
+            return continuations;
+        }
+        long boundary = compaction.orElseThrow().coveredThrough().value();
+        return continuations.entrySet().stream().filter(entry -> entry.getKey().value() > boundary)
+                .collect(java.util.stream.Collectors.toUnmodifiableMap(Map.Entry::getKey, Map.Entry::getValue));
     }
 
     private static boolean hasContinuationForAnotherRoute(
@@ -398,6 +595,7 @@ public final class MessageJobService implements MessageJobPort {
             case MODEL_OUTPUT_INVALID -> new ConversationStore.RuntimeData(code, "Runtime model output is invalid.");
             case MODEL_UNAVAILABLE -> new ConversationStore.RuntimeData(code, "Runtime model is unavailable.");
             case CONTEXT_TOO_LARGE -> new ConversationStore.RuntimeData(code, "Runtime model context is too large.");
+            case COMPACTION_FAILED -> new ConversationStore.RuntimeData(code, "Runtime context compaction failed.");
             case INVALID_CONVERSATION_HISTORY -> new ConversationStore.RuntimeData(code, "Runtime conversation history is invalid.");
             default -> throw new IllegalArgumentException("Unsupported runtime code");
         };
@@ -442,6 +640,18 @@ public final class MessageJobService implements MessageJobPort {
     }
 
     private static final class BudgetExhausted extends RuntimeException {
+    }
+
+    private record ContextState(
+            ModelRequest request,
+            String requestShapeFingerprint,
+            Optional<ContextCompaction> compaction,
+            long estimateTokens,
+            boolean requiresCompaction,
+            Optional<ContextUsageProjection> projection) {
+    }
+
+    private record CompactionBoundary(SessionSequence boundary, List<SessionMessage> history, List<SessionMessage> suffix) {
     }
 
     private static final class ReservationState {

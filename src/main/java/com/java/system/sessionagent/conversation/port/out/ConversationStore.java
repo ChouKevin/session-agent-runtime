@@ -8,6 +8,7 @@ import com.java.system.sessionagent.conversation.domain.MessageWorkClaim;
 import com.java.system.sessionagent.conversation.domain.ModelContinuation;
 import com.java.system.sessionagent.conversation.domain.ModelDescriptor;
 import com.java.system.sessionagent.conversation.domain.ContextUsageCheckpoint;
+import com.java.system.sessionagent.conversation.domain.ContextCompaction;
 import com.java.system.sessionagent.conversation.domain.ModelRouteId;
 import com.java.system.sessionagent.conversation.domain.SessionId;
 import com.java.system.sessionagent.conversation.domain.SessionMessage;
@@ -40,6 +41,18 @@ public interface ConversationStore {
     default Optional<ContextUsageCheckpoint> loadUsageCheckpoint(
             SessionId sessionId, ModelDescriptor model, String requestShapeFingerprint, long compactGeneration) {
         return Optional.empty();
+    }
+
+    default Optional<ContextCompaction> loadCompaction(SessionId sessionId) {
+        return Optional.empty();
+    }
+
+    default boolean hasOverflowCompaction(MessageJobId messageJobId) {
+        return false;
+    }
+
+    default void compact(MessageWorkClaim claim, CompactionData compaction, Instant createdAt) {
+        throw new UnsupportedOperationException("Context compaction is not supported");
     }
 
     OptionalInt reserveModelCall(MessageWorkClaim claim, int maxModelCalls, Instant now);
@@ -122,6 +135,27 @@ public interface ConversationStore {
                     "Usage checkpoint token counts must not be negative");
             Assert.hasText(requestShapeFingerprint, "Usage checkpoint request shape fingerprint must not be blank");
             Assert.isTrue(compactGeneration >= 0, "Usage checkpoint compact generation must not be negative");
+        }
+    }
+
+    record CompactionData(
+            long generation,
+            ContextCompaction.Reason reason,
+            String summary,
+            SessionSequence coveredThrough,
+            ModelDescriptor model,
+            String requestShapeFingerprint,
+            long estimateBeforeTokens,
+            long estimateAfterTokens) {
+        public CompactionData {
+            Assert.isTrue(generation > 0, "Context compaction generation must be positive");
+            Assert.notNull(reason, "Context compaction reason must not be null");
+            Assert.hasText(summary, "Context compaction summary must not be blank");
+            Assert.notNull(coveredThrough, "Context compaction boundary must not be null");
+            Assert.notNull(model, "Context compaction model must not be null");
+            Assert.hasText(requestShapeFingerprint, "Context compaction fingerprint must not be blank");
+            Assert.isTrue(estimateBeforeTokens >= 0 && estimateAfterTokens >= 0,
+                    "Context compaction estimates must not be negative");
         }
     }
 

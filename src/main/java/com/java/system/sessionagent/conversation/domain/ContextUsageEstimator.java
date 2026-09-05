@@ -59,6 +59,7 @@ public final class ContextUsageEstimator {
     private static String serializedRequestShape(ContextUsageProjection projection) {
         StringBuilder serialized = new StringBuilder();
         appendString(serialized, "system", projection.systemPrompt());
+        projection.contextSummary().ifPresent(summary -> appendString(serialized, "untrusted-history-summary", summary.text()));
         projection.toolDefinitions().stream()
                 .sorted(Comparator.comparing(definition -> definition.name().value()))
                 .forEach(definition -> appendToolDefinition(serialized, definition));

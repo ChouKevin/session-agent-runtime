@@ -11,6 +11,10 @@ import com.java.system.sessionagent.conversation.domain.ModelContinuation;
 import com.java.system.sessionagent.conversation.domain.ModelRouteId;
 import com.java.system.sessionagent.conversation.domain.ModelRequest;
 import com.java.system.sessionagent.conversation.domain.ModelUsage;
+import com.java.system.sessionagent.conversation.domain.ModelDescriptor;
+import com.java.system.sessionagent.conversation.domain.ContextCompaction;
+import com.java.system.sessionagent.conversation.domain.ContextSummary;
+import com.java.system.sessionagent.conversation.domain.AssistantMessage;
 import com.java.system.sessionagent.conversation.domain.ToolCallId;
 import com.java.system.sessionagent.conversation.domain.ToolRequest;
 import com.java.system.sessionagent.conversation.domain.UserMessage;
@@ -43,6 +47,7 @@ import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -75,6 +80,112 @@ class MessageJobServiceTest {
         assertThat(batch.getValue()).isEqualTo(new ConversationStore.MessageBatch(List.of(
                 new ConversationStore.AssistantData("```json\n{\"answer\":\"plain completion\"}\n```")),
                 ConversationStore.JobUpdate.COMPLETE));
+    }
+
+    @Test
+    void compacts_a_complete_tool_batch_before_the_ordinary_request_and_keeps_raw_history() {
+        ConversationStore store = mock(ConversationStore.class);
+        MessageWorkClaim claim = claim();
+        List<com.java.system.sessionagent.conversation.domain.SessionMessage> rawHistory = List.of(
+                new UserMessage(claim.sessionId(), new SessionSequence(1), Optional.of(new MessageJobId("job-old")), Instant.EPOCH,
+                        MessageRole.USER, "alice", "x".repeat(40_000)),
+                new com.java.system.sessionagent.conversation.domain.AssistantToolCallsMessage(claim.sessionId(), new SessionSequence(2),
+                        Optional.of(new MessageJobId("job-old")), Instant.EPOCH, MessageRole.ASSISTANT_TOOL_CALLS, Optional.empty(),
+                        List.of(request("call-1", "first"))),
+                new com.java.system.sessionagent.conversation.domain.ToolObservation(claim.sessionId(), new SessionSequence(3),
+                        Optional.of(new MessageJobId("job-old")), Instant.EPOCH, MessageRole.TOOL, new ToolCallId("call-1"), "first",
+                        Map.of("isError", false, "result", Map.of("value", "x".repeat(500)))),
+                new UserMessage(claim.sessionId(), new SessionSequence(4), Optional.of(claim.messageJobId()), Instant.EPOCH,
+                        MessageRole.USER, "alice", "continue"));
+        AtomicReference<ContextCompaction> compacted = new AtomicReference<>();
+        when(store.loadHistory(claim.sessionId())).thenReturn(rawHistory);
+        when(store.loadCompaction(claim.sessionId())).thenAnswer(invocation -> Optional.ofNullable(compacted.get()));
+        when(store.reserveModelCall(eq(claim), eq(2), any(Instant.class))).thenReturn(OptionalInt.of(1), OptionalInt.of(2));
+        org.mockito.Mockito.doAnswer(invocation -> {
+            ConversationStore.CompactionData data = invocation.getArgument(1);
+            compacted.set(new ContextCompaction(data.generation(), claim.messageJobId(), data.reason(), new ContextSummary(data.summary()),
+                    data.coveredThrough(), data.model(), data.requestShapeFingerprint(), data.estimateBeforeTokens(),
+                    data.estimateAfterTokens(), Instant.EPOCH));
+            return null;
+        }).when(store).compact(eq(claim), any(ConversationStore.CompactionData.class), any(Instant.class));
+        List<String> callOrder = new ArrayList<>();
+        ModelDescriptor descriptor = new ModelDescriptor(TEST_ROUTE_ID, "test-capacity", 12_000);
+        ConversationModel model = new ConversationModel() {
+            @Override public ModelRouteId routeId() { return TEST_ROUTE_ID; }
+            @Override public ModelDescriptor descriptor() { return descriptor; }
+            @Override public String systemPrompt() { return "system"; }
+            @Override public String summarize(com.java.system.sessionagent.conversation.domain.ContextCompactionRequest request,
+                    ModelCallReservation reservation) {
+                callOrder.add("compact");
+                reservation.reserve();
+                return "old discussion summary";
+            }
+            @Override public ModelCallResult respond(ModelRequest request, ModelCallReservation reservation, Consumer<ModelUsage> usageObserver) {
+                callOrder.add("ordinary");
+                assertThat(request.contextSummary()).contains(new ContextSummary("old discussion summary"));
+                assertThat(request.history()).containsExactly(rawHistory.get(3));
+                reservation.reserve();
+                return result(new ModelReply.Text("done"));
+            }
+        };
+
+        service(store, model, catalog()).process(claim, () -> true);
+
+        assertThat(callOrder).containsExactly("compact", "ordinary");
+        assertThat(rawHistory).extracting(message -> message.sequence().value()).containsExactly(1L, 2L, 3L, 4L);
+        assertThat(compacted.get()).isNotNull();
+        assertThat(compacted.get().coveredThrough().value()).isEqualTo(3L);
+    }
+
+    @Test
+    void recovers_one_context_overflow_with_a_persisted_compaction_then_retries_once() {
+        ConversationStore store = mock(ConversationStore.class);
+        MessageWorkClaim claim = claim();
+        List<com.java.system.sessionagent.conversation.domain.SessionMessage> history = List.of(
+                new UserMessage(claim.sessionId(), new SessionSequence(1), Optional.of(new MessageJobId("job-old")), Instant.EPOCH,
+                        MessageRole.USER, "alice", "x".repeat(40_000)),
+                new AssistantMessage(claim.sessionId(), new SessionSequence(2), Optional.of(new MessageJobId("job-old")), Instant.EPOCH,
+                        MessageRole.ASSISTANT, "previous answer"),
+                new UserMessage(claim.sessionId(), new SessionSequence(3), Optional.of(claim.messageJobId()), Instant.EPOCH,
+                        MessageRole.USER, "alice", "continue"));
+        AtomicReference<ContextCompaction> compacted = new AtomicReference<>();
+        when(store.loadHistory(claim.sessionId())).thenReturn(history);
+        when(store.loadCompaction(claim.sessionId())).thenAnswer(invocation -> Optional.ofNullable(compacted.get()));
+        when(store.hasOverflowCompaction(claim.messageJobId())).thenReturn(false);
+        when(store.reserveModelCall(eq(claim), eq(3), any(Instant.class))).thenReturn(OptionalInt.of(1), OptionalInt.of(2), OptionalInt.of(3));
+        org.mockito.Mockito.doAnswer(invocation -> {
+            ConversationStore.CompactionData data = invocation.getArgument(1);
+            compacted.set(new ContextCompaction(data.generation(), claim.messageJobId(), data.reason(), new ContextSummary(data.summary()),
+                    data.coveredThrough(), data.model(), data.requestShapeFingerprint(), data.estimateBeforeTokens(),
+                    data.estimateAfterTokens(), Instant.EPOCH));
+            return null;
+        }).when(store).compact(eq(claim), any(ConversationStore.CompactionData.class), any(Instant.class));
+        List<String> calls = new ArrayList<>();
+        ModelDescriptor descriptor = new ModelDescriptor(TEST_ROUTE_ID, "test-capacity", 20_000);
+        ConversationModel model = new ConversationModel() {
+            @Override public ModelRouteId routeId() { return TEST_ROUTE_ID; }
+            @Override public ModelDescriptor descriptor() { return descriptor; }
+            @Override public String systemPrompt() { return "system"; }
+            @Override public String summarize(com.java.system.sessionagent.conversation.domain.ContextCompactionRequest request,
+                    ModelCallReservation reservation) {
+                calls.add("compact");
+                reservation.reserve();
+                return "previous summary";
+            }
+            @Override public ModelCallResult respond(ModelRequest request, ModelCallReservation reservation, Consumer<ModelUsage> usageObserver) {
+                calls.add("ordinary");
+                reservation.reserve();
+                if (calls.size() == 1) {
+                    throw ModelCallFailure.contextTooLarge();
+                }
+                return result(new ModelReply.Text("done"));
+            }
+        };
+
+        service(store, model, catalog(), 3).process(claim, () -> true);
+
+        assertThat(calls).containsExactly("ordinary", "compact", "ordinary");
+        assertThat(compacted.get().reason()).isEqualTo(ContextCompaction.Reason.OVERFLOW);
     }
 
     @Test
