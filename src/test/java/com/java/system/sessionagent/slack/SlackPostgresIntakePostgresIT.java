@@ -20,6 +20,11 @@ import com.java.system.sessionagent.conversation.port.out.ModelCallReservation;
 import com.java.system.sessionagent.storage.PostgresConversationStore;
 import com.java.system.sessionagent.tool.port.ToolCatalog;
 import com.java.system.sessionagent.tool.port.ToolSnapshot;
+import com.slack.api.bolt.App;
+import com.slack.api.bolt.AppConfig;
+import com.slack.api.bolt.request.RequestHeaders;
+import com.slack.api.bolt.request.builtin.EventRequest;
+import com.slack.api.bolt.response.Response;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -34,6 +39,7 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.Duration;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CountDownLatch;
@@ -88,6 +94,57 @@ class SlackPostgresIntakePostgresIT {
         intake.receive(replyIntake("event-unbound", "T1", "C1", "1.000001", "1.000002", "U2", "reply"));
 
         assertThat(count(jdbcTemplate, "select count(*) from conversation_session where source_type = 'slack'")).isZero();
+        assertThat(count(jdbcTemplate, "select count(*) from source_message where source_type = 'slack'")).isZero();
+        assertThat(count(jdbcTemplate, "select count(*) from message_job")).isZero();
+    }
+
+    @Test
+    void keeps_an_unbound_logical_reply_ignored_across_same_and_distinct_event_redelivery_after_binding() throws Exception {
+        SlackPostgresRootIntake intake = intake();
+        JdbcTemplate jdbcTemplate = new JdbcTemplate(dataSource());
+        SlackRootIntake unboundReply = replyIntake("event-unbound", "T1", "C1", "1.000001", "1.000002", "U2", "reply");
+
+        SlackEventOutcome initial = intake.receive(unboundReply);
+        intake.receive(rootIntake("T1", "C1", "1.000001"));
+        SlackEventOutcome sameEventReplay = intake.receive(unboundReply);
+        List<SlackEventOutcome> distinctEventReplays = concurrently(() -> intake.receive(replyIntake(
+                "event-unbound-overlap-" + Thread.currentThread().threadId(), "T1", "C1", "1.000001", "1.000002", "U2", "reply")));
+
+        assertThat(initial).isEqualTo(SlackEventOutcome.IGNORED);
+        assertThat(sameEventReplay).isEqualTo(SlackEventOutcome.IGNORED);
+        assertThat(distinctEventReplays).containsOnly(SlackEventOutcome.IGNORED);
+        assertThat(count(jdbcTemplate, "select count(*) from source_message where source_type = 'slack'")).isEqualTo(1);
+        assertThat(count(jdbcTemplate, "select count(*) from message_job")).isEqualTo(1);
+        assertThat(count(jdbcTemplate, "select count(*) from slack_message_receipt")).isEqualTo(2);
+        assertThat(count(jdbcTemplate, "select count(*) from slack_event_receipt")).isEqualTo(4);
+    }
+
+    @Test
+    void acknowledges_and_persists_an_official_file_share_subtype_envelope_without_a_job() throws Exception {
+        JdbcTemplate jdbcTemplate = new JdbcTemplate(dataSource());
+        SlackEventAdapter adapter = new SlackEventAdapter("UBOT", intake());
+        SlackBoltSocketClient socketClient = new SlackBoltSocketClient(new SlackProperties("xapp-test", "xoxb-test", "UBOT",
+                Duration.ofSeconds(1), Duration.ofSeconds(1)), adapter);
+        App app = new App(AppConfig.builder().requestVerificationEnabled(false).build());
+        socketClient.registerHandlers(app);
+        EventRequest request = new EventRequest("""
+                {
+                  "type":"event_callback",
+                  "event_id":"event-file-share",
+                  "team_id":"T1",
+                  "event":{"type":"message","subtype":"file_share","channel":"C1","channel_type":"channel",
+                  "user":"U1","text":"private attachment caption","ts":"1.000001","files":[]}
+                }
+                """, new RequestHeaders(Map.of()));
+        request.setSocketMode(true);
+
+        Response response = app.run(request);
+
+        assertThat(response.getStatusCode()).isEqualTo(200);
+        assertThat(count(jdbcTemplate, "select count(*) from slack_event_receipt where classification = 'UNSUPPORTED_CONTENT'"))
+                .isEqualTo(1);
+        assertThat(count(jdbcTemplate, "select count(*) from slack_message_receipt where classification = 'UNSUPPORTED_CONTENT'"))
+                .isEqualTo(1);
         assertThat(count(jdbcTemplate, "select count(*) from source_message where source_type = 'slack'")).isZero();
         assertThat(count(jdbcTemplate, "select count(*) from message_job")).isZero();
     }
@@ -153,11 +210,16 @@ class SlackPostgresIntakePostgresIT {
 
         assertThat(outcome).isEqualTo(SlackEventOutcome.IGNORED);
         assertThat(count(jdbcTemplate, "select count(*) from slack_event_receipt where classification = 'BLANK'")).isEqualTo(1);
+        assertThat(count(jdbcTemplate, """
+                select count(*) from slack_message_receipt
+                where classification = 'BLANK' and session_id is null and message_job_id is null
+                """)).isEqualTo(1);
         assertThat(count(jdbcTemplate, "select count(*) from session_message")).isZero();
         assertThat(count(jdbcTemplate, "select count(*) from message_job")).isZero();
         assertThat(count(jdbcTemplate, """
                 select count(*) from information_schema.columns
-                where table_name = 'slack_event_receipt' and column_name in ('text', 'message', 'payload', 'raw_payload')
+                where table_name in ('slack_event_receipt', 'slack_message_receipt')
+                and column_name in ('text', 'message', 'payload', 'raw_payload')
                 """)).isZero();
     }
 

@@ -5,6 +5,8 @@ import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.context.annotation.Configuration;
 
+import java.time.Duration;
+
 import static org.assertj.core.api.Assertions.assertThat;
 
 class SlackConfigurationTest {
@@ -36,6 +38,15 @@ class SlackConfigurationTest {
                     assertThat(context).hasNotFailed();
                     assertThat(context.getBean(SlackProperties.class).enabled()).isTrue();
                 });
+    }
+
+    @Test
+    void enables_bolt_subtype_auto_ack_as_a_safe_fallback_after_registering_handlers() {
+        SlackEventAdapter adapter = new SlackEventAdapter("UBOT", ignored -> SlackEventOutcome.IGNORED);
+        SlackBoltSocketClient client = new SlackBoltSocketClient(new SlackProperties("xapp-complete", "xoxb-complete", "UBOT",
+                Duration.ofSeconds(1), Duration.ofSeconds(1)), adapter);
+
+        assertThat(client.buildApp().config().isSubtypedMessageEventsAutoAckEnabled()).isTrue();
     }
 
     @Configuration(proxyBeanMethods = false)

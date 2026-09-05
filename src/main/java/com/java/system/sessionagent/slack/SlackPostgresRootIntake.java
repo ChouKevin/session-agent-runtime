@@ -47,6 +47,10 @@ public final class SlackPostgresRootIntake implements SlackRootIntakePort {
         if (existingEvent.isPresent()) {
             return verifyExistingEvent(intake, existingEvent.orElseThrow());
         }
+        Optional<StoredMessageReceipt> existingLogicalMessage = findMessageReceipt(intake);
+        if (existingLogicalMessage.isPresent()) {
+            return replayLogicalMessage(intake, existingLogicalMessage.orElseThrow());
+        }
         if (intake.classification() != SlackIntakeClassification.ACCEPTED) {
             return ignore(intake);
         }
@@ -85,29 +89,41 @@ public final class SlackPostgresRootIntake implements SlackRootIntakePort {
     private SlackEventOutcome finishAccepted(SlackRootIntake intake, MessageReceipt receipt) {
         UUID sessionId = UUID.fromString(receipt.sessionId().value());
         UUID jobId = UUID.fromString(receipt.messageJobId().value());
-        jdbcTemplate.update("""
-                insert into slack_message_receipt(team_id, channel_id, message_ts, session_id, message_job_id, created_at)
-                values (?, ?, ?, ?, ?, ?)
-                on conflict (team_id, channel_id, message_ts) do nothing
-                """, intake.teamId(), intake.channelId(), intake.messageTs(), sessionId, jobId, createdAt());
-        Optional<StoredMessageReceipt> messageReceipt = findMessageReceipt(intake);
-        Assert.isTrue(messageReceipt.isPresent() && messageReceipt.orElseThrow().matches(sessionId, jobId),
-                "Slack logical message receipt must match its committed outcome");
-        persistEventReceipt(intake, jobId);
-        Optional<StoredEventReceipt> eventReceipt = findEventReceipt(intake.eventId());
-        Assert.isTrue(eventReceipt.isPresent() && eventReceipt.orElseThrow().matches(intake, jobId),
-                "Slack event receipt must match its committed outcome");
+        persistLogicalReceipt(intake, SlackIntakeClassification.ACCEPTED, sessionId, jobId);
+        persistAndVerifyEventReceipt(intake, SlackIntakeClassification.ACCEPTED, jobId);
         return SlackEventOutcome.ACCEPTED;
     }
 
     private SlackEventOutcome verifyExistingEvent(SlackRootIntake intake, StoredEventReceipt existing) {
-        Assert.isTrue(existing.matches(intake, existing.correlationId()), "Slack event ID must retain one logical outcome");
-        if (intake.classification() != SlackIntakeClassification.ACCEPTED) {
+        Assert.isTrue(existing.matchesEnvelope(intake), "Slack event ID must retain one logical identity");
+        if (!existing.isAccepted()) {
             return SlackEventOutcome.IGNORED;
+        }
+        if (intake.classification() != SlackIntakeClassification.ACCEPTED) {
+            return SlackEventOutcome.ACCEPTED;
         }
         MessageReceipt receipt = receiveMessage(intake);
         UUID jobId = UUID.fromString(receipt.messageJobId().value());
-        Assert.isTrue(existing.correlationId().equals(jobId), "Slack event duplicate must retain its message job");
+        Assert.isTrue(existing.matchesOutcome(SlackIntakeClassification.ACCEPTED, jobId),
+                "Slack event duplicate must retain its message job");
+        return SlackEventOutcome.ACCEPTED;
+    }
+
+    private SlackEventOutcome replayLogicalMessage(SlackRootIntake intake, StoredMessageReceipt existing) {
+        if (!existing.isAccepted()) {
+            persistAndVerifyEventReceipt(intake, existing.classification(), null);
+            return SlackEventOutcome.IGNORED;
+        }
+        if (intake.classification() != SlackIntakeClassification.ACCEPTED) {
+            persistAndVerifyEventReceipt(intake, SlackIntakeClassification.ACCEPTED, existing.messageJobId());
+            return SlackEventOutcome.ACCEPTED;
+        }
+        MessageReceipt receipt = receiveMessage(intake);
+        UUID sessionId = UUID.fromString(receipt.sessionId().value());
+        UUID jobId = UUID.fromString(receipt.messageJobId().value());
+        Assert.isTrue(existing.matches(SlackIntakeClassification.ACCEPTED, sessionId, jobId),
+                "Slack logical message receipt must retain its committed outcome");
+        persistAndVerifyEventReceipt(intake, SlackIntakeClassification.ACCEPTED, jobId);
         return SlackEventOutcome.ACCEPTED;
     }
 
@@ -117,20 +133,40 @@ public final class SlackPostgresRootIntake implements SlackRootIntakePort {
     }
 
     private SlackEventOutcome ignore(SlackRootIntake intake) {
-        persistEventReceipt(intake, null);
-        Optional<StoredEventReceipt> eventReceipt = findEventReceipt(intake.eventId());
-        Assert.isTrue(eventReceipt.isPresent() && eventReceipt.orElseThrow().matches(intake, null),
-                "Slack ignored event receipt must match its committed outcome");
+        persistLogicalReceipt(intake, intake.classification(), null, null);
+        persistAndVerifyEventReceipt(intake, intake.classification(), null);
         return SlackEventOutcome.IGNORED;
     }
 
-    private void persistEventReceipt(SlackRootIntake intake, UUID correlationId) {
+    private void persistLogicalReceipt(
+            SlackRootIntake intake,
+            SlackIntakeClassification classification,
+            UUID sessionId,
+            UUID jobId) {
+        jdbcTemplate.update("""
+                insert into slack_message_receipt(team_id, channel_id, message_ts, classification, session_id, message_job_id, created_at)
+                values (?, ?, ?, ?, ?, ?, ?)
+                on conflict (team_id, channel_id, message_ts) do nothing
+                """, intake.teamId(), intake.channelId(), intake.messageTs(), classification.name(), sessionId, jobId, createdAt());
+        Optional<StoredMessageReceipt> messageReceipt = findMessageReceipt(intake);
+        Assert.isTrue(messageReceipt.isPresent() && messageReceipt.orElseThrow().matches(classification, sessionId, jobId),
+                "Slack logical message receipt must match its committed outcome");
+    }
+
+    private void persistAndVerifyEventReceipt(
+            SlackRootIntake intake,
+            SlackIntakeClassification classification,
+            UUID correlationId) {
         jdbcTemplate.update("""
                 insert into slack_event_receipt(event_id, team_id, channel_id, message_ts, classification, correlation_id, created_at)
                 values (?, ?, ?, ?, ?, ?, ?)
                 on conflict (event_id) do nothing
-                """, intake.eventId(), intake.teamId(), intake.channelId(), intake.messageTs(), intake.classification().name(),
+                """, intake.eventId(), intake.teamId(), intake.channelId(), intake.messageTs(), classification.name(),
                 correlationId, createdAt());
+        Optional<StoredEventReceipt> eventReceipt = findEventReceipt(intake.eventId());
+        Assert.isTrue(eventReceipt.isPresent() && eventReceipt.orElseThrow().matchesEnvelope(intake)
+                        && eventReceipt.orElseThrow().matchesOutcome(classification, correlationId),
+                "Slack event receipt must match its committed outcome");
     }
 
     private Optional<UUID> findThreadBinding(SlackRootIntake intake) {
@@ -153,9 +189,10 @@ public final class SlackPostgresRootIntake implements SlackRootIntakePort {
 
     private Optional<StoredMessageReceipt> findMessageReceipt(SlackRootIntake intake) {
         return jdbcTemplate.query("""
-                select session_id, message_job_id from slack_message_receipt
+                select classification, session_id, message_job_id from slack_message_receipt
                 where team_id = ? and channel_id = ? and message_ts = ?
-                """, (resultSet, rowNumber) -> new StoredMessageReceipt(resultSet.getObject("session_id", UUID.class),
+                """, (resultSet, rowNumber) -> new StoredMessageReceipt(
+                SlackIntakeClassification.valueOf(resultSet.getString("classification")), resultSet.getObject("session_id", UUID.class),
                 resultSet.getObject("message_job_id", UUID.class)), intake.teamId(), intake.channelId(), intake.messageTs())
                 .stream().findFirst();
     }
@@ -175,17 +212,29 @@ public final class SlackPostgresRootIntake implements SlackRootIntakePort {
             SlackIntakeClassification classification,
             UUID correlationId) {
 
-        private boolean matches(SlackRootIntake intake, UUID expectedCorrelationId) {
+        private boolean matchesEnvelope(SlackRootIntake intake) {
             return teamId.equals(intake.teamId()) && channelId.equals(intake.channelId())
-                    && messageTs.equals(intake.messageTs()) && classification == intake.classification()
-                    && Objects.equals(correlationId, expectedCorrelationId);
+                    && messageTs.equals(intake.messageTs());
+        }
+
+        private boolean isAccepted() {
+            return classification == SlackIntakeClassification.ACCEPTED;
+        }
+
+        private boolean matchesOutcome(SlackIntakeClassification expectedClassification, UUID expectedCorrelationId) {
+            return classification == expectedClassification && Objects.equals(correlationId, expectedCorrelationId);
         }
     }
 
-    private record StoredMessageReceipt(UUID sessionId, UUID messageJobId) {
+    private record StoredMessageReceipt(SlackIntakeClassification classification, UUID sessionId, UUID messageJobId) {
 
-        private boolean matches(UUID expectedSessionId, UUID expectedJobId) {
-            return sessionId.equals(expectedSessionId) && messageJobId.equals(expectedJobId);
+        private boolean isAccepted() {
+            return classification == SlackIntakeClassification.ACCEPTED;
+        }
+
+        private boolean matches(SlackIntakeClassification expectedClassification, UUID expectedSessionId, UUID expectedJobId) {
+            return classification == expectedClassification && Objects.equals(sessionId, expectedSessionId)
+                    && Objects.equals(messageJobId, expectedJobId);
         }
     }
 }

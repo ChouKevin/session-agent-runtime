@@ -279,11 +279,15 @@ create table slack_message_receipt (
     team_id varchar(128) not null check (team_id ~ '[^[:space:]]'),
     channel_id varchar(128) not null check (channel_id ~ '[^[:space:]]'),
     message_ts varchar(64) not null check (message_ts ~ '[^[:space:]]'),
-    session_id uuid not null references conversation_session(session_id),
-    message_job_id uuid not null,
+    classification varchar(32) not null check (classification in (
+        'ACCEPTED', 'UNBOUND_THREAD', 'BLANK', 'UNSUPPORTED_CONTENT', 'EDIT_OR_DELETE', 'HIDDEN')),
+    session_id uuid references conversation_session(session_id),
+    message_job_id uuid,
     created_at timestamptz not null,
     primary key (team_id, channel_id, message_ts),
-    foreign key (message_job_id, session_id) references message_job(message_job_id, session_id)
+    foreign key (message_job_id, session_id) references message_job(message_job_id, session_id),
+    check ((classification = 'ACCEPTED' and session_id is not null and message_job_id is not null)
+        or (classification <> 'ACCEPTED' and session_id is null and message_job_id is null))
 );
 
 create trigger slack_thread_binding_append_only before update or delete on slack_thread_binding
