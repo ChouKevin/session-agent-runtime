@@ -1,17 +1,21 @@
 package com.java.system.sessionagent.bootstrap;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.java.system.sessionagent.conversation.domain.ModelDescriptor;
+import com.java.system.sessionagent.conversation.domain.ModelRouteId;
 import com.java.system.sessionagent.conversation.port.out.ConversationStore;
 import com.java.system.sessionagent.mcp.McpConnectionManager;
 import com.java.system.sessionagent.model.SpringAiConversationModel;
 import com.java.system.sessionagent.tool.port.ToolCatalog;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import org.springframework.ai.google.genai.GoogleGenAiChatOptions;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.core.env.Environment;
 
 import javax.sql.DataSource;
 
@@ -51,6 +55,19 @@ class ApplicationStartupTest {
                         .isEqualTo("gemini-primary"));
     }
 
+    @Test
+    void resolves_the_configured_google_catalog_capacity_and_rejects_unknown_models_without_an_override() {
+        contextRunner.run(context -> {
+            assertThat(context).hasNotFailed();
+            assertThat(context.getBean(SpringAiConversationModel.class).descriptor())
+                    .isEqualTo(new ModelDescriptor(
+                            new ModelRouteId("google-genai"),
+                            "gemini-3.1-flash-lite", 1_048_576));
+        });
+        contextRunner.withPropertyValues("spring.ai.google.genai.chat.options.model=unknown-model")
+                .run(context -> assertThat(context).hasFailed());
+    }
+
     @Configuration(proxyBeanMethods = false)
     static class TestDependencies {
         @Bean
@@ -59,8 +76,11 @@ class ApplicationStartupTest {
         }
 
         @Bean
-        ChatModel chatModel() {
-            return Mockito.mock(ChatModel.class);
+        ChatModel chatModel(Environment environment) {
+            ChatModel chatModel = Mockito.mock(ChatModel.class);
+            String modelId = environment.getProperty("spring.ai.google.genai.chat.options.model", "gemini-3.1-flash-lite");
+            Mockito.when(chatModel.getOptions()).thenReturn(GoogleGenAiChatOptions.builder().model(modelId).build());
+            return chatModel;
         }
 
         @Bean

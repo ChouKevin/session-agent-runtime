@@ -258,7 +258,13 @@ public final class SpringAiConversationModel implements ConversationModel {
         if (promptTokens.isEmpty() || completionTokens.isEmpty() || totalTokens.isEmpty()) {
             return new ModelUsage(0, 0, 0, false);
         }
-        return new ModelUsage(promptTokens.get(), completionTokens.get(), totalTokens.get(), true);
+        int prompt = promptTokens.get();
+        int completion = completionTokens.get();
+        int total = totalTokens.get();
+        if (prompt < 0 || completion < 0 || total < 0) {
+            return new ModelUsage(0, 0, 0, false);
+        }
+        return new ModelUsage(prompt, completion, total, true);
     }
 
     private static ModelCallFailure classifyProviderFailure(RuntimeException exception) {

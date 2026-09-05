@@ -18,6 +18,7 @@ import org.junit.jupiter.api.Test;
 
 import java.time.Instant;
 import java.util.List;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Optional;
 
@@ -46,6 +47,18 @@ class ContextUsageEstimatorTest {
         assertThat(continued.tokens()).isGreaterThan(100);
         assertThat(stale.basis()).isEqualTo(ContextEstimate.Basis.FULL_ESTIMATE);
         assertThat(stale.tokens()).isGreaterThan(0);
+    }
+
+    @Test
+    void fingerprints_opaque_tool_schemas_that_contain_json_null_values() {
+        Map<String, Object> schema = new LinkedHashMap<>();
+        schema.put("default", null);
+        schema.put("type", "string");
+        ContextUsageEstimator estimator = new ContextUsageEstimator();
+
+        String fingerprint = estimator.requestShapeFingerprint(projection(List.of(definition("nullable", schema))));
+
+        assertThat(fingerprint).hasSize(64).matches("[0-9a-f]+");
     }
 
     private static ContextUsageProjection projection(List<ToolDefinition> definitions) {

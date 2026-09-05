@@ -52,3 +52,26 @@ Task 1 changed the provider-neutral conversation usage contracts/policy, Postgre
 - `src/test/java/com/java/system/sessionagent/storage/PostgresConversationCommitPostgresIT.java`
 
 Self-review: Google/Spring AI catalog resolution is contained in bootstrap; the adapter receives only a provider-neutral descriptor. The current catalog entry remains `gemini-3.1-flash-lite` with capacity `1,048,576`; an unknown model needs a positive override. Usage is returned with the model result and stored inside the existing append transaction, with no network work introduced into database transactions. No Task 1 `NEEDS_USER_DECISION` or `FOLLOW_UP` remains.
+
+## Fix Round 1
+
+### BDD scenarios and findings
+
+- Invalid provider usage: Given a Spring AI response containing a negative token count, when the adapter maps usage, then it returns unavailable `ModelUsage(0,0,0,false)` and the normal result path completes. Changed `SpringAiConversationModel` to validate all three provider counts before constructing available usage; covered by `SpringAiConversationModelTest`.
+- Opaque nullable schemas: Given a generic tool input schema containing JSON `null`, when Runtime fingerprints the request shape, then fingerprinting completes deterministically without interpreting the schema. Changed `ContextUsageEstimator` to use a null-tolerant sortable map entry; covered by `ContextUsageEstimatorTest`.
+- Atomic successful checkpoint: Given a fake provider result with available usage and the real PostgreSQL store, when `MessageJobService` commits a text response, then a restarted store reloads both the response boundary and the matching route/model/fingerprint checkpoint with ordinal and token values. Covered by `PostgresConversationCommitPostgresIT` using the application plus real-PostgreSQL boundary.
+- Catalog capacity: Given the configured Google options identify `gemini-3.1-flash-lite`, when bootstrap creates the adapter, then its descriptor has `1,048,576`; given an unknown ID and no override, startup fails. Covered by `ApplicationStartupTest` at the configuration boundary.
+
+### RED / GREEN evidence
+
+- RED (invalid usage and nullable schema): `JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64 mvn --batch-mode --no-transfer-progress -Dtest=SpringAiConversationModelTest,ContextUsageEstimatorTest test` failed with 2 expected errors: `Prompt token count must not be negative` at `SpringAiConversationModel.usage`, and `NullPointerException` from `Map.entry` in `ContextUsageEstimator.appendValue`.
+- GREEN (invalid usage and nullable schema): same command passed 9/9 after the two minimal fixes.
+- Successful checkpoint and catalog capacity were coverage gaps over already-correct behavior, so no artificial RED was created. Their characterization GREEN commands were `JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64 mvn --batch-mode --no-transfer-progress -Ppostgres-it -Dit.test=PostgresConversationCommitPostgresIT verify` (10/10 PostgreSQL commit tests) and `JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64 mvn --batch-mode --no-transfer-progress -Dtest=ApplicationStartupTest test` (4/4, including expected unknown-model startup failure).
+
+### Full verification and self-review
+
+- Specific covering suite: `SpringAiConversationModelTest,ContextUsageEstimatorTest,ApplicationStartupTest` passed 13/13.
+- Task 1 focused command passed 29/29; `SpringAiBoundaryTest` passed 6/6.
+- `JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64 mvn --batch-mode --no-transfer-progress -Ppostgres-it verify` passed 146 ordinary tests with 1 authorized live-model skip and 17/17 PostgreSQL integration tests.
+- Files changed: `SpringAiConversationModel.java`, `ContextUsageEstimator.java`, `SpringAiConversationModelTest.java`, `ContextUsageEstimatorTest.java`, `PostgresConversationCommitPostgresIT.java`, and `ApplicationStartupTest.java`.
+- Self-review: negative/partial usage remains unavailable, tool schema contents remain provider-neutral and opaque, successful and rollback checkpoint paths are both real-PostgreSQL protected, and Google types remain at the bootstrap/adapter boundary. No `NEEDS_USER_DECISION` or `FOLLOW_UP` remains.

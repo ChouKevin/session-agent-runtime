@@ -6,6 +6,7 @@ import org.springframework.util.Assert;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.util.AbstractMap;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
@@ -101,7 +102,7 @@ public final class ContextUsageEstimator {
         if (value instanceof Map<?, ?> map) {
             serialized.append('{');
             map.entrySet().stream()
-                    .map(entry -> Map.entry(String.valueOf(entry.getKey()), entry.getValue()))
+                    .map(entry -> new AbstractMap.SimpleImmutableEntry<>(String.valueOf(entry.getKey()), entry.getValue()))
                     .sorted(Map.Entry.comparingByKey())
                     .forEach(entry -> {
                         appendString(serialized, "key", entry.getKey());

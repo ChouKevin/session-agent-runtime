@@ -4,18 +4,31 @@ import com.java.system.sessionagent.conversation.domain.IncomingMessage;
 import com.java.system.sessionagent.conversation.domain.JobStatus;
 import com.java.system.sessionagent.conversation.domain.MessageReceipt;
 import com.java.system.sessionagent.conversation.domain.MessageWorkClaim;
+import com.java.system.sessionagent.conversation.domain.AssistantMessage;
 import com.java.system.sessionagent.conversation.domain.ModelContinuation;
 import com.java.system.sessionagent.conversation.domain.ModelRouteId;
 import com.java.system.sessionagent.conversation.domain.ModelDescriptor;
+import com.java.system.sessionagent.conversation.domain.ModelCallResult;
+import com.java.system.sessionagent.conversation.domain.ModelReply;
 import com.java.system.sessionagent.conversation.domain.ToolCallId;
 import com.java.system.sessionagent.conversation.domain.AssistantToolCallsMessage;
+import com.java.system.sessionagent.conversation.domain.ContextUsageEstimator;
+import com.java.system.sessionagent.conversation.domain.ContextUsageProjection;
+import com.java.system.sessionagent.conversation.domain.ModelRequest;
+import com.java.system.sessionagent.conversation.domain.ModelUsage;
+import com.java.system.sessionagent.conversation.domain.SessionMessage;
 import com.java.system.sessionagent.conversation.domain.ToolObservation;
+import com.java.system.sessionagent.conversation.application.MessageJobService;
+import com.java.system.sessionagent.conversation.port.out.ConversationModel;
+import com.java.system.sessionagent.conversation.port.out.ModelCallReservation;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.java.system.sessionagent.conversation.port.out.ConversationStore;
 import com.java.system.sessionagent.conversation.port.out.ConversationStoreFailure;
 import com.java.system.sessionagent.conversation.port.out.StaleWorkClaimException;
 import com.java.system.sessionagent.model.ConversationHistoryProjector;
 import com.java.system.sessionagent.model.InvalidConversationHistoryException;
+import com.java.system.sessionagent.tool.port.ToolCatalog;
+import com.java.system.sessionagent.tool.port.ToolSnapshot;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -38,6 +51,8 @@ import java.util.UUID;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
+import java.util.function.Consumer;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -138,6 +153,48 @@ class PostgresConversationCommitPostgresIT {
                 java.util.UUID.fromString(receipt.messageJobId().value()))).isEqualTo("DONE");
         assertThat(jdbcTemplate.queryForObject("select count(*) from tool_observation", Integer.class)).isEqualTo(2);
         assertThat(restartedStore.claimNext("recovery-worker", Duration.ofSeconds(30))).isEmpty();
+    }
+
+    @Test
+    void persists_available_model_usage_with_the_committed_response_boundary() {
+        ConversationStore store = store();
+        MessageReceipt receipt = store.receive(new IncomingMessage("thread", "alice", "source", "hello"));
+        MessageWorkClaim claim = store.claimNext("worker", Duration.ofSeconds(30)).orElseThrow();
+        ModelDescriptor descriptor = new ModelDescriptor(new ModelRouteId("google-genai"), "gemini-3.1-flash-lite", 1_048_576);
+        ModelUsage usage = new ModelUsage(50, 20, 70, true);
+        ConversationModel model = new ConversationModel() {
+            @Override public ModelRouteId routeId() { return descriptor.routeId(); }
+            @Override public ModelDescriptor descriptor() { return descriptor; }
+            @Override public String systemPrompt() { return "Runtime system prompt"; }
+            @Override public ModelCallResult respond(
+                    ModelRequest request,
+                    ModelCallReservation reservation,
+                    Consumer<ModelUsage> usageObserver) {
+                reservation.reserve();
+                usageObserver.accept(usage);
+                return new ModelCallResult(new ModelReply.Text("done"), Optional.empty(), usage);
+            }
+        };
+        ToolCatalog toolCatalog = () -> new ToolSnapshot(List.of());
+        MessageJobService service = new MessageJobService(store, model, toolCatalog, Clock.fixed(NOW, ZoneOffset.UTC));
+
+        service.process(claim, () -> true);
+
+        ConversationStore restartedStore = store();
+        List<SessionMessage> history = restartedStore.loadHistory(receipt.sessionId());
+        String fingerprint = new ContextUsageEstimator().requestShapeFingerprint(new ContextUsageProjection(descriptor, model.systemPrompt(),
+                List.of(), history.subList(0, 1), 0));
+        assertThat(history).extracting(message -> message.sequence().value()).containsExactly(1L, 2L);
+        assertThat(history.get(1)).isInstanceOfSatisfying(AssistantMessage.class,
+                assistant -> assertThat(assistant.message()).isEqualTo("done"));
+        assertThat(restartedStore.loadUsageCheckpoint(receipt.sessionId(), descriptor, fingerprint, 0))
+                .hasValueSatisfying(checkpoint -> {
+                    assertThat(checkpoint.responseBoundary().value()).isEqualTo(2L);
+                    assertThat(checkpoint.modelCallOrdinal()).isEqualTo(1);
+                    assertThat(checkpoint.promptTokens()).isEqualTo(50);
+                    assertThat(checkpoint.completionTokens()).isEqualTo(20);
+                    assertThat(checkpoint.totalTokens()).isEqualTo(70);
+                });
     }
 
     @Test

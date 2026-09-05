@@ -9,6 +9,7 @@ import com.java.system.sessionagent.conversation.domain.ModelCallResult;
 import com.java.system.sessionagent.conversation.domain.ModelContinuation;
 import com.java.system.sessionagent.conversation.domain.ModelRouteId;
 import com.java.system.sessionagent.conversation.domain.ModelRequest;
+import com.java.system.sessionagent.conversation.domain.ModelUsage;
 import com.java.system.sessionagent.conversation.domain.SessionId;
 import com.java.system.sessionagent.conversation.domain.SessionMessage;
 import com.java.system.sessionagent.conversation.domain.SessionSequence;
@@ -23,6 +24,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.ai.chat.metadata.ChatResponseMetadata;
+import org.springframework.ai.chat.metadata.Usage;
 import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.model.Generation;
@@ -65,6 +67,31 @@ class SpringAiConversationModelTest {
         ModelReply reply = result.reply();
 
         assertThat(reply).isEqualTo(new ModelReply.Text("{\"message\":\"still plain text\"}"));
+    }
+
+    @Test
+    void treats_negative_provider_usage_as_unavailable() {
+        Usage negativeUsage = new Usage() {
+            @Override public Integer getPromptTokens() { return -1; }
+            @Override public Integer getCompletionTokens() { return 2; }
+            @Override public Integer getTotalTokens() { return 1; }
+            @Override public Object getNativeUsage() { return Map.of(); }
+        };
+        ChatModel chatModel = new ChatModel() {
+            @Override public ChatResponse call(Prompt prompt) {
+                return new ChatResponse(List.of(new Generation(new AssistantMessage("done"))),
+                        ChatResponseMetadata.builder().usage(negativeUsage).build());
+            }
+            @Override public ToolCallingChatOptions getOptions() { return ToolCallingChatOptions.builder().build(); }
+        };
+        ObjectMapper mapper = new ObjectMapper();
+        SpringAiConversationModel model = new SpringAiConversationModel(chatModel, new PromptResource(), new NoOpConversationTelemetry(), mapper,
+                new GoogleGenAiThoughtSignatureHandler(GOOGLE_ROUTE_ID, mapper));
+
+        ModelCallResult result = model.respond(new ModelRequest(List.of(), new ToolSnapshot(List.of())), () -> 1, usage -> { });
+
+        assertThat(result.reply()).isEqualTo(new ModelReply.Text("done"));
+        assertThat(result.usage()).isEqualTo(new ModelUsage(0, 0, 0, false));
     }
 
     @Test
