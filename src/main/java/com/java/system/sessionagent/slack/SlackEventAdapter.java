@@ -5,6 +5,8 @@ import com.java.system.sessionagent.conversation.domain.IncomingMessageSource;
 import org.springframework.util.Assert;
 import org.springframework.util.StringUtils;
 
+import java.util.Optional;
+
 public final class SlackEventAdapter {
 
     private final String botUserId;
@@ -19,36 +21,61 @@ public final class SlackEventAdapter {
 
     public SlackEventOutcome handle(SlackRootEvent event) {
         Assert.notNull(event, "Slack root event must not be null");
-        if (!isCandidateHumanRoot(event)) {
-            return SlackEventOutcome.IGNORED;
-        }
-        String message = normalizedMessage(event);
-        if (!StringUtils.hasText(message)) {
+        if (isObviousNonHumanNoise(event)) {
             return SlackEventOutcome.IGNORED;
         }
         String rootThreadTs = StringUtils.hasText(event.threadTs()) ? event.threadTs() : event.messageTs();
+        SlackIntakeClassification ignoredClassification = ignoredClassification(event);
+        if (ignoredClassification != SlackIntakeClassification.ACCEPTED) {
+            return rootIntakePort.receive(new SlackRootIntake(event.eventId(), event.teamId(), event.channelId(), rootThreadTs,
+                    event.messageTs(), ignoredClassification, Optional.empty()));
+        }
+        String message = normalizedMessage(event);
+        if (!StringUtils.hasText(message)) {
+            return rootIntakePort.receive(new SlackRootIntake(event.eventId(), event.teamId(), event.channelId(), rootThreadTs,
+                    event.messageTs(), SlackIntakeClassification.BLANK, Optional.empty()));
+        }
         IncomingMessage incomingMessage = new IncomingMessage(
                 IncomingMessageSource.SLACK,
                 boundedKey("slack/", event.teamId(), event.channelId(), rootThreadTs),
                 event.participantId(),
                 boundedKey("slack/", event.teamId(), event.channelId(), event.messageTs()),
                 message);
-        rootIntakePort.receive(new SlackRootIntake(
-                event.teamId(), event.channelId(), rootThreadTs, event.messageTs(), incomingMessage));
-        return SlackEventOutcome.ACCEPTED;
+        return rootIntakePort.receive(new SlackRootIntake(event.eventId(), event.teamId(), event.channelId(), rootThreadTs,
+                event.messageTs(), SlackIntakeClassification.ACCEPTED, Optional.of(incomingMessage)));
     }
 
-    private boolean isCandidateHumanRoot(SlackRootEvent event) {
+    private boolean isObviousNonHumanNoise(SlackRootEvent event) {
         if (!StringUtils.hasText(event.participantId()) || StringUtils.hasText(event.botId())
-                || botUserId.equals(event.participantId()) || StringUtils.hasText(event.subtype())) {
-            return false;
+                || botUserId.equals(event.participantId())) {
+            return true;
         }
-        return !StringUtils.hasText(event.threadTs()) || event.messageTs().equals(event.threadTs());
+        return "bot_message".equals(event.subtype()) || "channel_join".equals(event.subtype())
+                || "channel_leave".equals(event.subtype());
+    }
+
+    private SlackIntakeClassification ignoredClassification(SlackRootEvent event) {
+        if (event.hidden()) {
+            return SlackIntakeClassification.HIDDEN;
+        }
+        if ("message_changed".equals(event.subtype()) || "message_deleted".equals(event.subtype())) {
+            return SlackIntakeClassification.EDIT_OR_DELETE;
+        }
+        if (StringUtils.hasText(event.subtype())) {
+            return SlackIntakeClassification.UNSUPPORTED_CONTENT;
+        }
+        if (event.hasAttachments()) {
+            return SlackIntakeClassification.UNSUPPORTED_CONTENT;
+        }
+        return SlackIntakeClassification.ACCEPTED;
     }
 
     private String normalizedMessage(SlackRootEvent event) {
         if (!StringUtils.hasText(event.text())) {
             return "";
+        }
+        if (StringUtils.hasText(event.threadTs()) && !event.messageTs().equals(event.threadTs())) {
+            return event.text().trim();
         }
         if ("im".equals(event.channelType())) {
             return event.text().trim();

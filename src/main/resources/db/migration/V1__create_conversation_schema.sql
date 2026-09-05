@@ -264,15 +264,31 @@ create table slack_thread_binding (
 );
 
 create table slack_event_receipt (
+    event_id varchar(128) not null check (event_id ~ '[^[:space:]]'),
+    team_id varchar(128) not null check (team_id ~ '[^[:space:]]'),
+    channel_id varchar(128) not null check (channel_id ~ '[^[:space:]]'),
+    message_ts varchar(64) not null check (message_ts ~ '[^[:space:]]'),
+    classification varchar(32) not null check (classification in (
+        'ACCEPTED', 'UNBOUND_THREAD', 'BLANK', 'UNSUPPORTED_CONTENT', 'EDIT_OR_DELETE', 'HIDDEN')),
+    correlation_id uuid,
+    created_at timestamptz not null,
+    primary key (event_id)
+);
+
+create table slack_message_receipt (
     team_id varchar(128) not null check (team_id ~ '[^[:space:]]'),
     channel_id varchar(128) not null check (channel_id ~ '[^[:space:]]'),
     message_ts varchar(64) not null check (message_ts ~ '[^[:space:]]'),
     session_id uuid not null references conversation_session(session_id),
+    message_job_id uuid not null,
     created_at timestamptz not null,
-    primary key (team_id, channel_id, message_ts)
+    primary key (team_id, channel_id, message_ts),
+    foreign key (message_job_id, session_id) references message_job(message_job_id, session_id)
 );
 
 create trigger slack_thread_binding_append_only before update or delete on slack_thread_binding
     for each row execute function reject_committed_row_change();
 create trigger slack_event_receipt_append_only before update or delete on slack_event_receipt
+    for each row execute function reject_committed_row_change();
+create trigger slack_message_receipt_append_only before update or delete on slack_message_receipt
     for each row execute function reject_committed_row_change();
