@@ -94,7 +94,7 @@ public class RuntimeConfiguration {
             RuntimeProperties runtimeProperties) {
         ModelRouteId routeId = new ModelRouteId(runtimeProperties.model().routeId());
         return new SpringAiConversationModel(chatModel, promptResource, conversationTelemetry, objectMapper,
-                new GoogleGenAiThoughtSignatureHandler(routeId, objectMapper));
+                new GoogleGenAiThoughtSignatureHandler(routeId, objectMapper), runtimeProperties.model().contextWindowTokens());
     }
 
     @Bean

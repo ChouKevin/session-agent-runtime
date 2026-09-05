@@ -3,6 +3,10 @@ package com.java.system.sessionagent.conversation.application;
 import com.java.system.sessionagent.conversation.domain.MessageWorkClaim;
 import com.java.system.sessionagent.conversation.domain.ModelReply;
 import com.java.system.sessionagent.conversation.domain.ModelCallResult;
+import com.java.system.sessionagent.conversation.domain.ContextUsageCheckpoint;
+import com.java.system.sessionagent.conversation.domain.ContextUsageEstimator;
+import com.java.system.sessionagent.conversation.domain.ContextUsageProjection;
+import com.java.system.sessionagent.conversation.domain.ModelDescriptor;
 import com.java.system.sessionagent.conversation.domain.ModelContinuation;
 import com.java.system.sessionagent.conversation.domain.ModelRouteId;
 import com.java.system.sessionagent.conversation.domain.ModelRequest;
@@ -51,6 +55,7 @@ public final class MessageJobService implements MessageJobPort {
     private final int maxModelCalls;
     private final MessageJobRetryPolicy retryPolicy;
     private final ConversationTelemetry telemetry;
+    private final ContextUsageEstimator contextUsageEstimator = new ContextUsageEstimator();
 
     public MessageJobService(
             ConversationStore conversationStore,
@@ -101,7 +106,15 @@ public final class MessageJobService implements MessageJobPort {
     }
 
     private void processClaim(MessageWorkClaim claim, WorkGuard guard) {
+        ModelDescriptor modelDescriptor = conversationModel.descriptor();
         ModelRouteId routeId = conversationModel.routeId();
+        if (Objects.isNull(modelDescriptor) && !Objects.isNull(routeId)) {
+            modelDescriptor = new ModelDescriptor(routeId, "unspecified", 1);
+        }
+        if (!Objects.isNull(modelDescriptor)) {
+            routeId = modelDescriptor.routeId();
+        }
+        ModelDescriptor activeModelDescriptor = modelDescriptor;
         try {
             conversationStore.bindModelRoute(claim, routeId);
         } catch (ModelRouteMismatchException exception) {
@@ -119,13 +132,21 @@ public final class MessageJobService implements MessageJobPort {
             try (ToolSnapshot tools = toolCatalog.snapshot()) {
                 ReservationState reservation = new ReservationState();
                 ModelRequest request = new ModelRequest(history, continuations, tools);
+                String requestShapeFingerprint = "";
+                if (!Objects.isNull(activeModelDescriptor) && org.springframework.util.StringUtils.hasText(conversationModel.systemPrompt())) {
+                    ContextUsageProjection projection = new ContextUsageProjection(activeModelDescriptor, conversationModel.systemPrompt(),
+                            tools.definitions(), history, 0);
+                    requestShapeFingerprint = contextUsageEstimator.requestShapeFingerprint(projection);
+                    contextUsageEstimator.estimate(projection, conversationStore.loadUsageCheckpoint(claim.sessionId(), activeModelDescriptor,
+                            requestShapeFingerprint, 0));
+                }
                 ModelReply reply;
                 Optional<ModelContinuation> continuation;
+                ModelCallResult result;
                 long requestStartedAt = System.nanoTime();
                 try {
-                    ModelCallResult result = conversationModel.respond(request, () -> reserveAndLogModelRequest(claim, guard, reservation,
-                                    history.size(), tools.definitions().size()),
-                            usage -> { });
+                    result = conversationModel.respond(request, () -> reserveAndLogModelRequest(claim, guard, reservation,
+                            history.size(), tools.definitions().size()), usage -> { });
                     reply = result.reply();
                     continuation = result.continuation();
                 } catch (BudgetExhausted exception) {
@@ -151,8 +172,9 @@ public final class MessageJobService implements MessageJobPort {
                 int ordinal = reservation.ordinal();
                 logModelResponse(claim, ordinal, reply, elapsedSince(requestStartedAt));
                 if (reply instanceof ModelReply.Text text) {
-                    appendRuntime(claim, guard, List.of(new ConversationStore.AssistantData(text.message())),
-                            ConversationStore.JobUpdate.COMPLETE);
+                    appendResponse(claim, guard, List.of(new ConversationStore.AssistantData(text.message())),
+                            ConversationStore.JobUpdate.COMPLETE, Optional.empty(), checkpoint(result, activeModelDescriptor, ordinal,
+                                    requestShapeFingerprint));
                     return;
                 }
                 ModelReply.UseTools useTools = (ModelReply.UseTools) reply;
@@ -164,11 +186,21 @@ public final class MessageJobService implements MessageJobPort {
                 if (!guard.stillOwned()) {
                     return;
                 }
-                if (!appendRuntime(claim, guard, messages, ConversationStore.JobUpdate.KEEP_WORKING, continuation)) {
+                if (!appendResponse(claim, guard, messages, ConversationStore.JobUpdate.KEEP_WORKING, continuation,
+                        checkpoint(result, activeModelDescriptor, ordinal, requestShapeFingerprint))) {
                     return;
                 }
             }
         }
+    }
+
+    private Optional<ConversationStore.UsageCheckpointData> checkpoint(ModelCallResult result, ModelDescriptor descriptor, int ordinal,
+            String requestShapeFingerprint) {
+        if (!result.usage().available() || Objects.isNull(descriptor) || !org.springframework.util.StringUtils.hasText(requestShapeFingerprint)) {
+            return Optional.empty();
+        }
+        return Optional.of(new ConversationStore.UsageCheckpointData(descriptor, ordinal, result.usage().promptTokens(),
+                result.usage().completionTokens(), result.usage().totalTokens(), requestShapeFingerprint, 0));
     }
 
     private static boolean hasContinuationForAnotherRoute(
@@ -315,6 +347,20 @@ public final class MessageJobService implements MessageJobPort {
                     telemetry.feedback(runtime.code());
                 }
             }
+            return guard.stillOwned();
+        } catch (StaleWorkClaimException exception) {
+            return false;
+        }
+    }
+
+    private boolean appendResponse(MessageWorkClaim claim, WorkGuard guard, List<ConversationStore.MessageData> messages,
+            ConversationStore.JobUpdate update, Optional<ModelContinuation> continuation,
+            Optional<ConversationStore.UsageCheckpointData> checkpoint) {
+        if (!guard.stillOwned()) {
+            return false;
+        }
+        try {
+            conversationStore.append(claim, new ConversationStore.MessageBatch(messages, update, continuation, checkpoint), clock.instant());
             return guard.stillOwned();
         } catch (StaleWorkClaimException exception) {
             return false;

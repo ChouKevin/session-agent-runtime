@@ -5,6 +5,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.java.system.sessionagent.conversation.domain.ModelReply;
 import com.java.system.sessionagent.conversation.domain.ModelCallResult;
+import com.java.system.sessionagent.conversation.domain.ModelDescriptor;
 import com.java.system.sessionagent.conversation.domain.ModelRouteId;
 import com.java.system.sessionagent.conversation.domain.ModelRequest;
 import com.java.system.sessionagent.conversation.domain.ModelUsage;
@@ -37,7 +38,6 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
 import java.util.Optional;
-import java.util.function.Consumer;
 import java.util.UUID;
 import java.util.Map;
 
@@ -50,6 +50,7 @@ public final class SpringAiConversationModel implements ConversationModel {
     private final ConversationTelemetry telemetry;
     private final ObjectMapper objectMapper;
     private final SpringAiContinuationHandler continuationHandler;
+    private final ModelDescriptor descriptor;
 
     public SpringAiConversationModel(
             ChatModel chatModel,
@@ -57,8 +58,17 @@ public final class SpringAiConversationModel implements ConversationModel {
             ConversationTelemetry telemetry,
             ObjectMapper objectMapper,
             SpringAiContinuationHandler continuationHandler) {
+        this(chatModel, promptResource, telemetry, objectMapper, continuationHandler, null);
+    }
+
+    public SpringAiConversationModel(
+            ChatModel chatModel,
+            PromptResource promptResource,
+            ConversationTelemetry telemetry,
+            ObjectMapper objectMapper,
+            SpringAiContinuationHandler continuationHandler, Integer contextWindowOverride) {
         this(chatModel, promptResource, new SpringAiToolCallbackFactory(objectMapper), new ConversationHistoryProjector(objectMapper), telemetry,
-                objectMapper, continuationHandler);
+                objectMapper, continuationHandler, contextWindowOverride);
     }
 
     SpringAiConversationModel(
@@ -69,6 +79,17 @@ public final class SpringAiConversationModel implements ConversationModel {
             ConversationTelemetry telemetry,
             ObjectMapper objectMapper,
             SpringAiContinuationHandler continuationHandler) {
+        this(chatModel, promptResource, callbackFactory, historyProjector, telemetry, objectMapper, continuationHandler, null);
+    }
+
+    SpringAiConversationModel(
+            ChatModel chatModel,
+            PromptResource promptResource,
+            SpringAiToolCallbackFactory callbackFactory,
+            ConversationHistoryProjector historyProjector,
+            ConversationTelemetry telemetry,
+            ObjectMapper objectMapper,
+            SpringAiContinuationHandler continuationHandler, Integer contextWindowOverride) {
         Assert.notNull(chatModel, "Chat model must not be null");
         Assert.notNull(promptResource, "Prompt resource must not be null");
         Assert.notNull(callbackFactory, "Tool callback factory must not be null");
@@ -83,6 +104,7 @@ public final class SpringAiConversationModel implements ConversationModel {
         this.telemetry = telemetry;
         this.objectMapper = objectMapper;
         this.continuationHandler = continuationHandler;
+        this.descriptor = descriptor(chatModel, continuationHandler.routeId(), contextWindowOverride);
     }
 
     @Override
@@ -91,13 +113,21 @@ public final class SpringAiConversationModel implements ConversationModel {
     }
 
     @Override
+    public ModelDescriptor descriptor() {
+        return descriptor;
+    }
+
+    @Override
+    public String systemPrompt() {
+        return promptResource.content();
+    }
+
+    @Override
     public ModelCallResult respond(
             ModelRequest request,
-            ModelCallReservation reservation,
-            Consumer<ModelUsage> usageObserver) {
+            ModelCallReservation reservation) {
         Assert.notNull(request, "Model request must not be null");
         Assert.notNull(reservation, "Model call reservation must not be null");
-        Assert.notNull(usageObserver, "Model usage observer must not be null");
 
         Prompt prompt;
         try {
@@ -123,9 +153,27 @@ public final class SpringAiConversationModel implements ConversationModel {
             throw failure;
         }
         ModelUsage modelUsage = usage(response);
-        usageObserver.accept(modelUsage);
         telemetry.model("SUCCESS", Optional.of("RESPONSE"), modelUsage, elapsedSince(requestStartedAt));
+        return new ModelCallResult(result.reply(), result.continuation(), modelUsage);
+    }
+
+    @Override
+    public ModelCallResult respond(ModelRequest request, ModelCallReservation reservation, java.util.function.Consumer<ModelUsage> usageObserver) {
+        Assert.notNull(usageObserver, "Model usage observer must not be null");
+        ModelCallResult result = respond(request, reservation);
+        usageObserver.accept(result.usage());
         return result;
+    }
+
+    private static ModelDescriptor descriptor(ChatModel chatModel, ModelRouteId routeId, Integer contextWindowOverride) {
+        ChatOptions options = chatModel.getOptions();
+        String modelId = options instanceof org.springframework.ai.google.genai.GoogleGenAiChatOptions googleOptions
+                ? googleOptions.getModel() : "gemini-3.1-flash-lite";
+        Assert.hasText(modelId, "Google GenAI model ID must not be blank");
+        long catalogWindow = "gemini-3.1-flash-lite".equals(modelId) ? 1_048_576L : 0L;
+        long effectiveWindow = Objects.isNull(contextWindowOverride) ? catalogWindow : contextWindowOverride.longValue();
+        Assert.isTrue(effectiveWindow > 0, "Model context window capacity must be configured");
+        return new ModelDescriptor(routeId, modelId, effectiveWindow);
     }
 
     private Prompt promptFor(ModelRequest request) {

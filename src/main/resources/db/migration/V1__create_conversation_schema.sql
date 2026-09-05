@@ -101,6 +101,22 @@ create table model_continuation (
         references assistant_tool_calls(session_id, sequence)
 );
 
+create table context_usage_checkpoint (
+    session_id uuid not null references conversation_session(session_id),
+    response_sequence bigint not null,
+    model_route_id varchar(64) not null,
+    model_id varchar(128) not null,
+    model_call_ordinal integer not null check (model_call_ordinal > 0),
+    prompt_tokens bigint not null check (prompt_tokens >= 0),
+    completion_tokens bigint not null check (completion_tokens >= 0),
+    total_tokens bigint not null check (total_tokens >= 0),
+    request_shape_fingerprint char(64) not null,
+    compact_generation bigint not null check (compact_generation >= 0),
+    created_at timestamptz not null,
+    primary key (session_id, response_sequence),
+    foreign key (session_id, response_sequence) references session_message(session_id, sequence)
+);
+
 create table tool_observation (
     session_id uuid not null,
     sequence bigint not null,
@@ -145,6 +161,8 @@ create trigger assistant_tool_calls_append_only before update or delete on assis
 create trigger tool_observation_append_only before update or delete on tool_observation
     for each row execute function reject_committed_row_change();
 create trigger runtime_message_append_only before update or delete on runtime_message
+    for each row execute function reject_committed_row_change();
+create trigger context_usage_checkpoint_append_only before update or delete on context_usage_checkpoint
     for each row execute function reject_committed_row_change();
 
 create function restrict_conversation_session_change() returns trigger language plpgsql as $$

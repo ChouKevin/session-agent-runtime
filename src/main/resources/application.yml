@@ -16,6 +16,7 @@ session-agent:
   model:
     max-model-calls-per-message: ${SESSION_AGENT_MAX_MODEL_CALLS_PER_MESSAGE:12}
     route-id: ${SESSION_AGENT_MODEL_ROUTE_ID:google-genai}
+    context-window-tokens: ${SESSION_AGENT_MODEL_CONTEXT_WINDOW_TOKENS:}
   worker:
     poll-delay: 1s
     lock-duration: 30s

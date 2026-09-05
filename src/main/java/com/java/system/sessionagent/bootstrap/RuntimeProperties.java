@@ -24,10 +24,15 @@ public record RuntimeProperties(
 
     public record Model(
             @Positive @DefaultValue("12") int maxModelCallsPerMessage,
-            @NotBlank @DefaultValue("google-genai") String routeId) {
+            @NotBlank @DefaultValue("google-genai") String routeId,
+            @Positive Integer contextWindowTokens) {
 
         public Model {
             Assert.hasText(routeId, "Model route ID must not be blank");
+        }
+
+        public Model(int maxModelCallsPerMessage, String routeId) {
+            this(maxModelCallsPerMessage, routeId, null);
         }
     }
 

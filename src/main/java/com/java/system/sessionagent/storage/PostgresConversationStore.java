@@ -12,6 +12,8 @@ import com.java.system.sessionagent.conversation.domain.MessageReceipt;
 import com.java.system.sessionagent.conversation.domain.MessageRole;
 import com.java.system.sessionagent.conversation.domain.MessageWorkClaim;
 import com.java.system.sessionagent.conversation.domain.ModelContinuation;
+import com.java.system.sessionagent.conversation.domain.ContextUsageCheckpoint;
+import com.java.system.sessionagent.conversation.domain.ModelDescriptor;
 import com.java.system.sessionagent.conversation.domain.ModelRouteId;
 import com.java.system.sessionagent.conversation.domain.RuntimeMessage;
 import com.java.system.sessionagent.conversation.domain.SessionId;
@@ -316,6 +318,29 @@ public final class PostgresConversationStore implements ConversationStore {
         }
     }
 
+    @Override
+    public Optional<ContextUsageCheckpoint> loadUsageCheckpoint(
+            SessionId sessionId, ModelDescriptor model, String requestShapeFingerprint, long compactGeneration) {
+        SessionId requiredSessionId = Objects.requireNonNull(sessionId, "Session ID must not be null");
+        ModelDescriptor requiredModel = Objects.requireNonNull(model, "Model descriptor must not be null");
+        Assert.hasText(requestShapeFingerprint, "Request shape fingerprint must not be blank");
+        Assert.isTrue(compactGeneration >= 0, "Compact generation must not be negative");
+        try {
+            return jdbcTemplate.query("""
+                    select response_sequence, model_call_ordinal, prompt_tokens, completion_tokens, total_tokens, created_at
+                    from context_usage_checkpoint where session_id = ? and model_route_id = ? and model_id = ?
+                      and request_shape_fingerprint = ? and compact_generation = ? order by response_sequence desc limit 1
+                    """, (resultSet, rowNumber) -> new ContextUsageCheckpoint(requiredModel,
+                    resultSet.getInt("model_call_ordinal"), new SessionSequence(resultSet.getLong("response_sequence")),
+                    resultSet.getLong("prompt_tokens"), resultSet.getLong("completion_tokens"), resultSet.getLong("total_tokens"),
+                    requestShapeFingerprint, compactGeneration, resultSet.getObject("created_at", OffsetDateTime.class).toInstant()),
+                    UUID.fromString(requiredSessionId.value()), requiredModel.routeId().value(), requiredModel.modelId(),
+                    requestShapeFingerprint, compactGeneration).stream().findFirst();
+        } catch (RuntimeException exception) {
+            throw translate(exception);
+        }
+    }
+
     private List<SessionMessage> loadHistoryInSingleSnapshot(SessionId sessionId) {
         UUID parsedSessionId = UUID.fromString(sessionId.value());
         List<SessionMessage> messages = new ArrayList<>();
@@ -357,6 +382,7 @@ public final class PostgresConversationStore implements ConversationStore {
             requireLiveClaim(requiredClaim);
             UUID sessionId = sessionId(requiredClaim);
             Optional<SessionSequence> continuationSequence = Optional.empty();
+            Optional<SessionSequence> responseSequence = Optional.empty();
             for (MessageData message : requiredBatch.messages()) {
                 long sequence = allocateSequence(sessionId);
                 requireLiveClaim(requiredClaim);
@@ -364,11 +390,13 @@ public final class PostgresConversationStore implements ConversationStore {
                     insertSessionMessage(sessionId, sequence, messageJobId(requiredClaim), "ASSISTANT", requiredCreatedAt);
                     jdbcTemplate.update("insert into assistant_message(session_id, sequence, message) values (?, ?, ?)",
                             sessionId, sequence, assistant.message());
+                    responseSequence = Optional.of(new SessionSequence(sequence));
                 } else if (message instanceof AssistantToolCallsData assistantToolCalls) {
                     insertSessionMessage(sessionId, sequence, messageJobId(requiredClaim), "ASSISTANT_TOOL_CALLS", requiredCreatedAt);
                     jdbcTemplate.update("insert into assistant_tool_calls(session_id, sequence, message, calls) values (?, ?, ?, ?::jsonb)",
                             sessionId, sequence, assistantToolCalls.message().orElse(null), json(storedToolCalls(assistantToolCalls.calls()))); // cs-allow nullable database column represents optional assistant text
                     continuationSequence = Optional.of(new SessionSequence(sequence));
+                    responseSequence = Optional.of(new SessionSequence(sequence));
                 } else if (message instanceof ToolObservationData observation) {
                     insertSessionMessage(sessionId, sequence, messageJobId(requiredClaim), "TOOL", requiredCreatedAt);
                     jdbcTemplate.update("""
@@ -381,6 +409,17 @@ public final class PostgresConversationStore implements ConversationStore {
                     jdbcTemplate.update("insert into runtime_message(session_id, sequence, code, message) values (?, ?, ?, ?)",
                             sessionId, sequence, runtime.code(), runtime.message());
                 }
+            }
+            if (requiredBatch.usageCheckpoint().isPresent()) {
+                ConversationStore.UsageCheckpointData checkpoint = requiredBatch.usageCheckpoint().orElseThrow();
+                SessionSequence boundary = responseSequence.orElseThrow();
+                jdbcTemplate.update("""
+                        insert into context_usage_checkpoint(session_id, response_sequence, model_route_id, model_id, model_call_ordinal,
+                            prompt_tokens, completion_tokens, total_tokens, request_shape_fingerprint, compact_generation, created_at)
+                        values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """, sessionId, boundary.value(), checkpoint.model().routeId().value(), checkpoint.model().modelId(),
+                        checkpoint.modelCallOrdinal(), checkpoint.promptTokens(), checkpoint.completionTokens(), checkpoint.totalTokens(),
+                        checkpoint.requestShapeFingerprint(), checkpoint.compactGeneration(), timestamp(requiredCreatedAt));
             }
             if (requiredBatch.continuation().isPresent()) {
                 SessionSequence assistantSequence = continuationSequence.orElseThrow();

@@ -6,6 +6,8 @@ import com.java.system.sessionagent.conversation.domain.MessageJobId;
 import com.java.system.sessionagent.conversation.domain.MessageReceipt;
 import com.java.system.sessionagent.conversation.domain.MessageWorkClaim;
 import com.java.system.sessionagent.conversation.domain.ModelContinuation;
+import com.java.system.sessionagent.conversation.domain.ModelDescriptor;
+import com.java.system.sessionagent.conversation.domain.ContextUsageCheckpoint;
 import com.java.system.sessionagent.conversation.domain.ModelRouteId;
 import com.java.system.sessionagent.conversation.domain.SessionId;
 import com.java.system.sessionagent.conversation.domain.SessionMessage;
@@ -34,6 +36,11 @@ public interface ConversationStore {
     void bindModelRoute(MessageWorkClaim claim, ModelRouteId modelRouteId);
 
     Map<SessionSequence, ModelContinuation> loadContinuations(MessageWorkClaim claim);
+
+    default Optional<ContextUsageCheckpoint> loadUsageCheckpoint(
+            SessionId sessionId, ModelDescriptor model, String requestShapeFingerprint, long compactGeneration) {
+        return Optional.empty();
+    }
 
     OptionalInt reserveModelCall(MessageWorkClaim claim, int maxModelCalls, Instant now);
 
@@ -106,20 +113,38 @@ public interface ConversationStore {
         }
     }
 
-    record MessageBatch(List<MessageData> messages, JobUpdate jobUpdate, Optional<ModelContinuation> continuation) {
+    record UsageCheckpointData(ModelDescriptor model, int modelCallOrdinal, long promptTokens, long completionTokens,
+                               long totalTokens, String requestShapeFingerprint, long compactGeneration) {
+        public UsageCheckpointData {
+            Assert.notNull(model, "Usage checkpoint model must not be null");
+            Assert.isTrue(modelCallOrdinal > 0, "Usage checkpoint model call ordinal must be positive");
+            Assert.isTrue(promptTokens >= 0 && completionTokens >= 0 && totalTokens >= 0,
+                    "Usage checkpoint token counts must not be negative");
+            Assert.hasText(requestShapeFingerprint, "Usage checkpoint request shape fingerprint must not be blank");
+            Assert.isTrue(compactGeneration >= 0, "Usage checkpoint compact generation must not be negative");
+        }
+    }
+
+    record MessageBatch(List<MessageData> messages, JobUpdate jobUpdate, Optional<ModelContinuation> continuation,
+                        Optional<UsageCheckpointData> usageCheckpoint) {
 
         public MessageBatch {
             Assert.notEmpty(messages, "Message batch must not be empty");
             messages = List.copyOf(messages);
             Assert.notNull(jobUpdate, "Job update must not be null");
             Assert.notNull(continuation, "Model continuation must not be null");
+            Assert.notNull(usageCheckpoint, "Usage checkpoint must not be null");
             long toolCallEvents = messages.stream().filter(AssistantToolCallsData.class::isInstance).count();
             Assert.isTrue(continuation.isEmpty() || (jobUpdate == JobUpdate.KEEP_WORKING && toolCallEvents == 1),
                     "Model continuation requires one working assistant tool call event");
         }
 
         public MessageBatch(List<MessageData> messages, JobUpdate jobUpdate) {
-            this(messages, jobUpdate, Optional.empty());
+            this(messages, jobUpdate, Optional.empty(), Optional.empty());
+        }
+
+        public MessageBatch(List<MessageData> messages, JobUpdate jobUpdate, Optional<ModelContinuation> continuation) {
+            this(messages, jobUpdate, continuation, Optional.empty());
         }
     }
 }
