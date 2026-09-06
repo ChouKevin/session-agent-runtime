@@ -38,16 +38,22 @@ Production packages are under
 `src/main/java/com/java/system/sessionagent/`; the paths below are relative to
 that directory.
 
-- `conversation/domain`: session, message, job, and ordered history rules.
-- `conversation/application`: conversation flow and model/tool loop coordination.
-- `conversation/port`: storage and external boundaries used by conversation logic.
-- `model`: provider-neutral model request/result contract and provider adapters.
-- `mcp`: named MCP connection lifecycle, tool discovery, routing, and safe diagnostics.
-- `tool/domain` and `tool/port`: generic tool definitions, calls, and observations.
-- `storage`: PostgreSQL adapters and Flyway migrations.
-- `web`: message, job, session-history, and actuator HTTP endpoints.
-- `worker`: queued job execution, retries, limits, and recovery.
-- `bootstrap`: Spring wiring and application startup.
+- `conversation/domain`: session, message, job, context, and ordered history rules.
+- `conversation/application`: conversation intake/query services and model/tool loop coordination.
+- `conversation/port/in`: contracts called by HTTP, Slack, and worker adapters.
+- `conversation/port/out`: model, storage, and telemetry contracts implemented by adapters.
+- `model/adapter/springai`: Spring AI model mapping, history projection, prompt, usage, and continuation adapter.
+- `mcp/domain`: provider-neutral MCP connection state.
+- `mcp/configuration`: named MCP connection properties and validation.
+- `mcp/adapter/sdk`: MCP SDK clients, connection lifecycle, discovery, tool routing, and result mapping.
+- `mcp/adapter/actuator`: safe MCP connection diagnostics endpoint.
+- `tool/domain` and `tool/port`: generic provider-neutral tool names, definitions, calls, snapshots, and observations.
+- `storage/adapter/postgres`: PostgreSQL conversation adapters, MyBatis mappers, and UUID mapping; Flyway migrations remain under `src/main/resources/db/migration`.
+- `web/adapter/http`: message, job, session-history, and HTTP error endpoints; MCP actuator diagnostics remain in `mcp/adapter/actuator`.
+- `worker/application` and `worker/configuration`: queued job claim, renewal, processing, retry, limit, recovery coordination, and worker properties.
+- `slack/domain`, `slack/application`, `slack/port/out`, `slack/adapter/sdk`, `slack/adapter/postgres`, and `slack/configuration`: Slack intake, delivery, Socket Mode lifecycle, provider adapters, persistence, and properties.
+- `bootstrap/configuration`: Spring composition and runtime configuration.
+- `bootstrap/adapter/metrics`: Micrometer conversation telemetry adapter.
 
 ## Change guide
 
