@@ -182,6 +182,40 @@ class PostgresConversationCommitPostgresIT {
     }
 
     @Test
+    void keeps_unique_ascending_raw_history_after_multiple_compactions_and_reads_the_latest_job_projection() {
+        ConversationStore store = store();
+        ModelDescriptor descriptor = new ModelDescriptor(new ModelRouteId("google-genai"), "gemini-3.1-flash-lite", 1_048_576);
+        MessageReceipt first = store.receive(new IncomingMessage("thread", "alice", "source-1", "first"));
+        MessageWorkClaim firstClaim = store.claimNext("worker", Duration.ofSeconds(30)).orElseThrow();
+        store.compact(firstClaim, new ConversationStore.CompactionData(1,
+                com.java.system.sessionagent.conversation.domain.ContextCompaction.Reason.PROACTIVE, "first summary", new SessionSequence(1),
+                descriptor, "a".repeat(64), 100, 10), NOW);
+        store.append(firstClaim, new ConversationStore.MessageBatch(List.of(new ConversationStore.AssistantData("first answer")),
+                ConversationStore.JobUpdate.COMPLETE), NOW);
+
+        MessageReceipt second = store.receive(new IncomingMessage("thread", "alice", "source-2", "second"));
+        MessageWorkClaim secondClaim = store.claimNext("worker", Duration.ofSeconds(30)).orElseThrow();
+        store.compact(secondClaim, new ConversationStore.CompactionData(2,
+                com.java.system.sessionagent.conversation.domain.ContextCompaction.Reason.PROACTIVE, "second summary", new SessionSequence(2),
+                descriptor, "b".repeat(64), 100, 10), NOW.plusSeconds(1));
+        store.append(secondClaim, new ConversationStore.MessageBatch(List.of(new ConversationStore.AssistantData("second answer")),
+                ConversationStore.JobUpdate.COMPLETE), NOW.plusSeconds(1));
+
+        ConversationStore restarted = store();
+        assertThat(restarted.loadHistory(first.sessionId())).extracting(message -> message.sequence().value())
+                .containsExactly(1L, 2L, 3L, 4L);
+        assertThat(restarted.readSession(first.sessionId())).hasValueSatisfying(session -> {
+            assertThat(session.currentJob()).hasValueSatisfying(job -> assertThat(job.messageJobId().value())
+                    .isEqualTo(second.messageJobId().value()));
+            assertThat(session.currentJob()).hasValueSatisfying(job -> assertThat(job.status()).isEqualTo(JobStatus.DONE));
+        });
+        assertThat(restarted.loadCompaction(first.sessionId())).hasValueSatisfying(compaction -> {
+            assertThat(compaction.generation()).isEqualTo(2);
+            assertThat(compaction.summary().text()).isEqualTo("second summary");
+        });
+    }
+
+    @Test
     void persists_available_model_usage_with_the_committed_response_boundary() {
         ConversationStore store = store();
         MessageReceipt receipt = store.receive(new IncomingMessage("thread", "alice", "source", "hello"));

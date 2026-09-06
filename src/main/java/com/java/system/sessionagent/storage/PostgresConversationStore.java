@@ -647,6 +647,35 @@ public final class PostgresConversationStore implements ConversationStore {
         }
     }
 
+    @Override
+    public Optional<SessionProjection> readSession(SessionId sessionId) {
+        SessionId requiredSessionId = Objects.requireNonNull(sessionId, "Session ID must not be null");
+        try {
+            return jdbcTemplate.query("""
+                    select session.session_id, session.created_at, job.message_job_id, job.status, job.retry_count, job.model_calls
+                    from conversation_session session
+                    left join lateral (
+                        select message_job_id, session_id, status, retry_count, model_calls
+                        from message_job where session_id = session.session_id
+                        order by user_message_sequence desc, message_job_id desc limit 1
+                    ) job on true
+                    where session.session_id = ?
+                    """, (resultSet, rowNumber) -> {
+                Optional<UUID> storedJobId = Optional.ofNullable(resultSet.getObject("message_job_id", UUID.class));
+                Optional<MessageJobProjection> currentJob = Optional.empty();
+                if (storedJobId.isPresent()) {
+                    currentJob = Optional.of(new MessageJobProjection(new MessageJobId(storedJobId.orElseThrow().toString()),
+                            new SessionId(resultSet.getObject("session_id", UUID.class).toString()),
+                            JobStatus.valueOf(resultSet.getString("status")), resultSet.getInt("retry_count"), resultSet.getInt("model_calls")));
+                }
+                return new SessionProjection(new SessionId(resultSet.getObject("session_id", UUID.class).toString()),
+                        resultSet.getObject("created_at", OffsetDateTime.class).toInstant(), currentJob);
+            }, UUID.fromString(requiredSessionId.value())).stream().findFirst();
+        } catch (RuntimeException exception) {
+            throw translate(exception);
+        }
+    }
+
     private UUID messageJobId(MessageWorkClaim claim) {
         return UUID.fromString(claim.messageJobId().value());
     }

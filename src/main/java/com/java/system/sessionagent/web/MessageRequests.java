@@ -16,4 +16,8 @@ public final class MessageRequests {
             @NotBlank @Size(max = 256) String sourceMessageId,
             @NotBlank String message) {
     }
+
+    @JsonIgnoreProperties(ignoreUnknown = false)
+    public record SessionLookupRequest(@NotBlank String permalink) {
+    }
 }

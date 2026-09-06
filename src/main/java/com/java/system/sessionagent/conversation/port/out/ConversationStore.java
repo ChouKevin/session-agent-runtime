@@ -63,12 +63,24 @@ public interface ConversationStore {
 
     Optional<MessageJobProjection> readJob(MessageJobId messageJobId);
 
+    default Optional<SessionProjection> readSession(SessionId sessionId) {
+        return Optional.empty();
+    }
+
     record MessageJobProjection(
             MessageJobId messageJobId,
             SessionId sessionId,
             JobStatus status,
             int retryCount,
             int modelCallCount) {
+    }
+
+    record SessionProjection(SessionId sessionId, Instant createdAt, Optional<MessageJobProjection> currentJob) {
+        public SessionProjection {
+            Assert.notNull(sessionId, "Session ID must not be null");
+            Assert.notNull(createdAt, "Session creation time must not be null");
+            Assert.notNull(currentJob, "Current message job must not be null");
+        }
     }
 
     enum JobUpdate {

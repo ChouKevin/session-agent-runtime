@@ -7,13 +7,14 @@ import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.http.converter.HttpMessageNotReadableException;
+import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
 
 @RestControllerAdvice
 public final class WebErrorHandler {
 
     @ExceptionHandler({BadRequestException.class, MethodArgumentNotValidException.class,
-            HttpMessageNotReadableException.class})
-    ResponseEntity<MessageResponses.ErrorResponse> badRequest(RuntimeException exception) {
+            HttpMessageNotReadableException.class, MethodArgumentTypeMismatchException.class})
+    ResponseEntity<MessageResponses.ErrorResponse> badRequest(Exception exception) {
         return error(HttpStatus.BAD_REQUEST, "bad_request");
     }
 

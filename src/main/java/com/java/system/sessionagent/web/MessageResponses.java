@@ -1,6 +1,8 @@
 package com.java.system.sessionagent.web;
 
+import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.java.system.sessionagent.conversation.port.in.SessionDetailView;
 import com.java.system.sessionagent.conversation.domain.AssistantMessage;
 import com.java.system.sessionagent.conversation.domain.AssistantToolCallsMessage;
 import com.java.system.sessionagent.conversation.domain.RuntimeMessage;
@@ -10,6 +12,7 @@ import com.java.system.sessionagent.conversation.domain.UserMessage;
 import com.java.system.sessionagent.conversation.port.in.MessageJobView;
 
 import java.time.Instant;
+import java.util.Optional;
 
 public final class MessageResponses {
 
@@ -17,6 +20,47 @@ public final class MessageResponses {
     }
 
     public record SendMessageResponse(String sessionId, String messageJobId) {
+    }
+
+    public record SessionLookupResponse(String sessionId, String sessionDetailPath) {
+    }
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record SessionDetailResponse(
+            String sessionId,
+            Instant createdAt,
+            SlackBindingResponse slack,
+            CurrentJobSummaryResponse currentJob,
+            CompactionBoundaryResponse latestCompaction,
+            ContextUsageResponse context) {
+
+        static SessionDetailResponse from(SessionDetailView view, Optional<SlackBindingResponse> slack) {
+            return new SessionDetailResponse(view.sessionId(), view.createdAt(), slack.orElse(null),
+                    view.currentJob().map(CurrentJobSummaryResponse::from).orElse(null),
+                    view.latestCompaction().map(CompactionBoundaryResponse::from).orElse(null), ContextUsageResponse.from(view.context()));
+        }
+    }
+
+    public record SlackBindingResponse(String teamId, String channelId, String rootThreadTs, Instant createdAt) {
+    }
+
+    public record CompactionBoundaryResponse(long generation, long coveredThrough, String reason, Instant createdAt) {
+        static CompactionBoundaryResponse from(SessionDetailView.CompactionBoundaryView view) {
+            return new CompactionBoundaryResponse(view.generation(), view.coveredThrough(), view.reason(), view.createdAt());
+        }
+    }
+
+    public record ContextUsageResponse(String modelId, long capacityTokens, long estimatedUsedTokens, double ratio, String basis) {
+        static ContextUsageResponse from(SessionDetailView.ContextUsageView view) {
+            return new ContextUsageResponse(view.modelId(), view.capacityTokens(), view.estimatedUsedTokens(), view.ratio(),
+                    view.basis().name());
+        }
+    }
+
+    public record CurrentJobSummaryResponse(String messageJobId, String status, int modelCallCount) {
+        static CurrentJobSummaryResponse from(MessageJobView view) {
+            return new CurrentJobSummaryResponse(view.messageJobId(), view.status().name(), view.modelCallCount());
+        }
     }
 
     public record MessageJobResponse(

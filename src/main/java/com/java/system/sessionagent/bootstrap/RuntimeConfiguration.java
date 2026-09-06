@@ -5,18 +5,23 @@ import com.java.system.sessionagent.conversation.application.ConversationQuerySe
 import com.java.system.sessionagent.conversation.application.MessageJobRetryPolicy;
 import com.java.system.sessionagent.conversation.application.MessageJobService;
 import com.java.system.sessionagent.conversation.port.in.ConversationQueryPort;
+import com.java.system.sessionagent.conversation.port.in.ExternalSessionReferenceQueryPort;
 import com.java.system.sessionagent.conversation.port.in.MessageIntakePort;
+import com.java.system.sessionagent.conversation.port.out.ConversationModel;
 import com.java.system.sessionagent.conversation.port.out.ConversationStore;
 import com.java.system.sessionagent.conversation.port.out.ConversationTelemetry;
 import com.java.system.sessionagent.model.SpringAiConversationModel;
 import com.java.system.sessionagent.model.GoogleGenAiThoughtSignatureHandler;
 import com.java.system.sessionagent.conversation.domain.ModelRouteId;
 import com.java.system.sessionagent.conversation.domain.ModelDescriptor;
+import com.java.system.sessionagent.conversation.domain.ContextUsageEstimator;
 import com.java.system.sessionagent.model.PromptResource;
 import com.java.system.sessionagent.storage.PostgresConversationStore;
 import com.java.system.sessionagent.slack.SlackBoltSocketClient;
 import com.java.system.sessionagent.slack.SlackEventAdapter;
 import com.java.system.sessionagent.slack.SlackPostgresRootIntake;
+import com.java.system.sessionagent.slack.SlackPostgresSessionLookup;
+import com.java.system.sessionagent.slack.SlackPermalinkParser;
 import com.java.system.sessionagent.slack.SlackProperties;
 import com.java.system.sessionagent.slack.SlackRootIntakePort;
 import com.java.system.sessionagent.slack.SlackSocketClient;
@@ -34,6 +39,7 @@ import com.java.system.sessionagent.worker.WorkerProperties;
 import io.micrometer.core.instrument.MeterRegistry;
 import com.fasterxml.jackson.databind.cfg.CoercionAction;
 import com.fasterxml.jackson.databind.cfg.CoercionInputShape;
+import com.fasterxml.jackson.core.StreamReadFeature;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.MapperFeature;
 import com.fasterxml.jackson.databind.type.LogicalType;
@@ -67,6 +73,7 @@ public class RuntimeConfiguration {
                 .findAndAddModules()
                 .enable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES,
                         DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
+                .enable(StreamReadFeature.STRICT_DUPLICATE_DETECTION)
                 .disable(MapperFeature.ALLOW_COERCION_OF_SCALARS)
                 .build();
         objectMapper.coercionConfigFor(LogicalType.Textual)
@@ -81,6 +88,7 @@ public class RuntimeConfiguration {
         return builder -> builder
                 .enable(tools.jackson.databind.DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES,
                         tools.jackson.databind.DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
+                .enable(tools.jackson.core.StreamReadFeature.STRICT_DUPLICATE_DETECTION)
                 .disable(tools.jackson.databind.MapperFeature.ALLOW_COERCION_OF_SCALARS)
                 .withCoercionConfig(tools.jackson.databind.type.LogicalType.Textual,
                         config -> config
@@ -198,8 +206,23 @@ public class RuntimeConfiguration {
     }
 
     @Bean
-    ConversationQueryPort conversationQueryPort(ConversationStore conversationStore) {
-        return new ConversationQueryService(conversationStore);
+    ConversationQueryPort conversationQueryPort(
+            ConversationStore conversationStore,
+            ConversationModel conversationModel,
+            ToolCatalog toolCatalog) {
+        return new ConversationQueryService(conversationStore, conversationModel, toolCatalog, new ContextUsageEstimator());
+    }
+
+    @Bean
+    SlackPermalinkParser slackPermalinkParser() {
+        return new SlackPermalinkParser();
+    }
+
+    @Bean
+    ExternalSessionReferenceQueryPort externalSessionReferenceQueryPort(
+            DataSource dataSource,
+            SlackPermalinkParser slackPermalinkParser) {
+        return new SlackPostgresSessionLookup(dataSource, slackPermalinkParser);
     }
 
     @Bean
