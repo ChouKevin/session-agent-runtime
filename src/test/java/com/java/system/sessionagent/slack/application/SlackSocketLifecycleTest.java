@@ -68,6 +68,7 @@ class SlackSocketLifecycleTest {
         while (lifecycle.state() != expected && System.nanoTime() < deadline) { // cs-allow Enum identity comparison is intentional.
             Thread.onSpinWait();
         }
+        assertThat(lifecycle.state()).as("observed lifecycle state before the next transport signal").isEqualTo(expected);
     }
 
     private static final class AsyncStartingSocketClient implements SlackSocketClient {

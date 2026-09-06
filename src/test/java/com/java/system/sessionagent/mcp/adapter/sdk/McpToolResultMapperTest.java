@@ -36,6 +36,10 @@ class McpToolResultMapperTest {
 
         assertThat(output.isError()).isFalse();
         assertThat(output.result()).isInstanceOf(List.class);
+        assertThat((List<?>) output.result()).singleElement().satisfies(content -> {
+            assertThat(content).isInstanceOf(Map.class);
+            assertThat(((Map<?, ?>) content).get("text")).isEqualTo("source text");
+        });
         assertThat(containsSdkValue(output.result())).isFalse();
     }
 

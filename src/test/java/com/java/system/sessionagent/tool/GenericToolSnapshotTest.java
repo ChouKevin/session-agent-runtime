@@ -141,6 +141,7 @@ class GenericToolSnapshotTest {
     void creates_safe_runtime_failures_for_the_supported_codes(String code) {
         ToolOutput output = ToolOutput.runtimeFailure(code, "safe message");
 
+        assertTrue(output.isError());
         assertEquals(Map.of("code", code, "message", "safe message"), output.asStructuredValue().get("result"));
     }
 

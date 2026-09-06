@@ -11,6 +11,8 @@ import com.java.system.sessionagent.conversation.port.in.MessageJobProcessingRes
 import com.java.system.sessionagent.conversation.port.out.ConversationStore;
 import com.java.system.sessionagent.worker.configuration.WorkerProperties;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.slf4j.LoggerFactory;
 
 import java.time.Clock;
@@ -104,8 +106,13 @@ class MessageJobWorkerTest {
                 .doesNotContain("message_job_completed");
     }
 
-    @Test
-    void reports_retry_scheduled_from_the_single_persisted_state_snapshot_without_a_false_completion() {
+    @ParameterizedTest
+    @CsvSource({
+            "RETRY_SCHEDULED, message_job_processing_finished, RETRY_SCHEDULED, message_job_completed",
+            "COMPLETED, message_job_completed, DONE, message_job_processing_finished"
+    })
+    void reports_the_processing_outcome_without_rereading_mutable_job_state(
+            MessageJobProcessingResult processingResult, String expectedEvent, String expectedOutcome, String unexpectedEvent) {
         ConversationStore store = mock(ConversationStore.class);
         MessageWorkClaim claim = new MessageWorkClaim(new MessageJobId("job"), new SessionId("session"), "worker", 1,
                 Instant.parse("2026-08-31T00:00:00Z"), Instant.parse("2026-08-31T00:01:00Z"));
@@ -115,7 +122,7 @@ class MessageJobWorkerTest {
         org.mockito.Mockito.doReturn(renewal).when(scheduler).scheduleAtFixedRate(any(Runnable.class),
                 org.mockito.ArgumentMatchers.anyLong(), org.mockito.ArgumentMatchers.anyLong(), any());
         MessageJobPort jobs = mock(MessageJobPort.class);
-        when(jobs.process(org.mockito.Mockito.eq(claim), any())).thenReturn(MessageJobProcessingResult.RETRY_SCHEDULED);
+        when(jobs.process(org.mockito.Mockito.eq(claim), any())).thenReturn(processingResult);
         MessageJobWorker worker = worker(store, jobs, scheduler);
         Logger logger = (Logger) LoggerFactory.getLogger(MessageJobWorker.class);
         ListAppender<ILoggingEvent> appender = new ListAppender<>();
@@ -129,12 +136,12 @@ class MessageJobWorkerTest {
         }
 
         assertThat(appender.list).extracting(event -> keyValues(event).get("event"))
-                .contains("message_job_claimed", "message_job_processing_finished")
-                .doesNotContain("message_job_completed");
+                .contains("message_job_claimed", expectedEvent)
+                .doesNotContain(unexpectedEvent);
         ILoggingEvent result = appender.list.stream()
-                .filter(event -> "message_job_processing_finished".equals(keyValues(event).get("event")))
+                .filter(event -> expectedEvent.equals(keyValues(event).get("event")))
                 .findFirst().orElseThrow();
-        assertThat(keyValues(result)).containsEntry("outcome", "RETRY_SCHEDULED")
+        assertThat(keyValues(result)).containsEntry("outcome", expectedOutcome)
                 .containsEntry("sessionId", "session")
                 .containsEntry("messageJobId", "job");
         verify(store, never()).readJob(claim.messageJobId());

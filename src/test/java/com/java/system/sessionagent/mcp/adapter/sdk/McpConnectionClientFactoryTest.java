@@ -2,6 +2,8 @@ package com.java.system.sessionagent.mcp.adapter.sdk;
 
 import com.java.system.sessionagent.mcp.configuration.McpConnectionProperties;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.net.URI;
 import java.net.http.HttpRequest;
@@ -23,10 +25,15 @@ class McpConnectionClientFactoryTest {
         assertThat(endpoint.pathAndQuery()).isEqualTo("/custom/mcp?tenant=payments");
     }
 
-    @Test
-    void rejects_an_endpoint_that_cannot_be_safely_represented_by_the_sdk_transport() {
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "https://token@mcp.example/custom/mcp",
+            "https://mcp.example/custom/mcp#fragment",
+            "https://token@mcp.example/custom/mcp#fragment"
+    })
+    void rejects_an_endpoint_that_cannot_be_safely_represented_by_the_sdk_transport(String endpoint) {
         assertThatIllegalArgumentException().isThrownBy(() -> McpConnectionClientFactory.splitEndpoint(
-                URI.create("https://token@mcp.example/custom/mcp#fragment")))
+                URI.create(endpoint)))
                 .withMessage("MCP endpoint cannot safely be represented by the streamable HTTP transport");
     }
 
