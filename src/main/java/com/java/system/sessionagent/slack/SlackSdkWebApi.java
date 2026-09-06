@@ -2,7 +2,6 @@ package com.java.system.sessionagent.slack;
 
 import com.slack.api.Slack;
 import com.slack.api.SlackConfig;
-import com.slack.api.methods.SlackApiErrorResponse;
 import com.slack.api.methods.SlackApiException;
 import com.slack.api.methods.response.chat.ChatPostMessageResponse;
 import okhttp3.Response;
@@ -76,7 +75,7 @@ public final class SlackSdkWebApi implements SlackWebApi, AutoCloseable {
             return new SlackPostFailure(SlackDeliveryFailureCategory.RATE_LIMIT, retryAfter);
         }
         String error = Optional.ofNullable(requiredException.getError())
-                .map(SlackApiErrorResponse::getError)
+                .map(value -> value.getError())
                 .orElse("");
         return classifiedFailure(error);
     }

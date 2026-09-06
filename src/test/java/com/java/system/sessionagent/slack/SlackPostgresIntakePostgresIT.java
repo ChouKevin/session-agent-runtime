@@ -567,34 +567,6 @@ class SlackPostgresIntakePostgresIT {
         }
     }
 
-    private List<SlackEventOutcome> concurrently(
-            SlackRootIntake firstIntake,
-            SlackRootIntake secondIntake,
-            java.util.function.Function<SlackRootIntake, SlackEventOutcome> receiver) throws Exception {
-        CountDownLatch ready = new CountDownLatch(2);
-        CountDownLatch start = new CountDownLatch(1);
-        ExecutorService executor = Executors.newFixedThreadPool(2);
-        try {
-            Callable<SlackEventOutcome> first = () -> {
-                ready.countDown();
-                start.await();
-                return receiver.apply(firstIntake);
-            };
-            Callable<SlackEventOutcome> second = () -> {
-                ready.countDown();
-                start.await();
-                return receiver.apply(secondIntake);
-            };
-            Future<SlackEventOutcome> firstResult = executor.submit(first);
-            Future<SlackEventOutcome> secondResult = executor.submit(second);
-            ready.await();
-            start.countDown();
-            return List.of(firstResult.get(), secondResult.get());
-        } finally {
-            executor.shutdownNow();
-        }
-    }
-
     private static SlackRootIntake rootIntake(String teamId, String channelId, String messageTs) {
         return replyIntake("event-" + messageTs, teamId, channelId, messageTs, messageTs, "U1", "hello");
     }

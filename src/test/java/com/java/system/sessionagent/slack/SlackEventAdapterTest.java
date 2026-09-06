@@ -77,7 +77,7 @@ class SlackEventAdapterTest {
         assertThat(hiddenOutcome).isEqualTo(SlackEventOutcome.IGNORED);
         assertThat(editOutcome).isEqualTo(SlackEventOutcome.IGNORED);
         assertThat(attachmentOutcome).isEqualTo(SlackEventOutcome.IGNORED);
-        assertThat(ignored).extracting(SlackRootIntake::classification).containsExactly(
+        assertThat(ignored).extracting(intake -> intake.classification()).containsExactly(
                 SlackIntakeClassification.BLANK, SlackIntakeClassification.UNSUPPORTED_CONTENT,
                 SlackIntakeClassification.HIDDEN, SlackIntakeClassification.EDIT_OR_DELETE,
                 SlackIntakeClassification.UNSUPPORTED_CONTENT);

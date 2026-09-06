@@ -23,7 +23,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class StandaloneProjectTest {
 
-    private static final String FORBIDDEN_TRANSPORT_TOKEN = "sla" + "ck";
     private static final String RESERVED_TRANSPORT_CONTRACT_FILE = "src/test/shell/docker-contract-test.sh";
     private static final Set<String> FORBIDDEN_RUNTIME_REMNANTS = Set.of(
             "Observation" + "Id", "StrictJson" + "Codec", "ToolSchema" + "Factory", "DirectTool" + "Registry",
@@ -125,30 +124,6 @@ class StandaloneProjectTest {
         }
     }
 
-    private static void assertNoForbiddenTransportReferenceInProjectFiles(Path projectPom) throws Exception {
-        Path projectRoot = projectPom.getParent();
-        Path sourceRoot = projectRoot.resolve("src");
-        List<Path> sourceFiles;
-        try (Stream<Path> paths = Files.walk(sourceRoot)) {
-            sourceFiles = paths.filter(Files::isRegularFile).toList();
-        }
-
-        List<Path> projectFiles = Stream.concat(sourceFiles.stream(), Stream.of(projectPom)).toList();
-        for (Path projectFile : projectFiles) {
-            String relativePath = projectRoot.relativize(projectFile).toString().replace(File.separatorChar, '/');
-            String content = Files.readString(projectFile);
-
-            if (isReservedTransportContractFile(relativePath)) {
-                continue;
-            }
-
-            assertFalse(containsForbiddenTransportReference(relativePath),
-                    () -> "Standalone project must not contain forbidden transport resource " + relativePath);
-            assertFalse(containsForbiddenTransportReference(content),
-                    () -> "Standalone project must not reference forbidden transport in " + relativePath);
-        }
-    }
-
     private static boolean isReservedTransportContractFile(String relativePath) {
         return RESERVED_TRANSPORT_CONTRACT_FILE.equals(relativePath);
     }
@@ -187,29 +162,6 @@ class StandaloneProjectTest {
             }
         }
         throw new AssertionError("Missing " + groupId + ":" + artifactId + " dependency");
-    }
-
-    private static boolean containsForbiddenTransportReference(String candidate) {
-        String normalizedCandidate = candidate.toLowerCase(Locale.ROOT);
-        int index = normalizedCandidate.indexOf(FORBIDDEN_TRANSPORT_TOKEN);
-        while (index >= 0) {
-            if (isForbiddenTransportStart(candidate, index) && isForbiddenTransportEnd(candidate, index)) {
-                return true;
-            }
-            index = normalizedCandidate.indexOf(FORBIDDEN_TRANSPORT_TOKEN, index + 1);
-        }
-        return false;
-    }
-
-    private static boolean isForbiddenTransportStart(String candidate, int index) {
-        return index == 0 || !Character.isLetterOrDigit(candidate.charAt(index - 1));
-    }
-
-    private static boolean isForbiddenTransportEnd(String candidate, int index) {
-        int tokenEnd = index + FORBIDDEN_TRANSPORT_TOKEN.length();
-        return tokenEnd == candidate.length()
-                || !Character.isLetterOrDigit(candidate.charAt(tokenEnd))
-                || Character.isUpperCase(candidate.charAt(tokenEnd));
     }
 
     private static Element child(Element parent, String localName) {

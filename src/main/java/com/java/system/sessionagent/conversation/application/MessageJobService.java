@@ -3,7 +3,6 @@ package com.java.system.sessionagent.conversation.application;
 import com.java.system.sessionagent.conversation.domain.MessageWorkClaim;
 import com.java.system.sessionagent.conversation.domain.ModelReply;
 import com.java.system.sessionagent.conversation.domain.ModelCallResult;
-import com.java.system.sessionagent.conversation.domain.ContextUsageCheckpoint;
 import com.java.system.sessionagent.conversation.domain.ContextCompaction;
 import com.java.system.sessionagent.conversation.domain.ContextCompactionRequest;
 import com.java.system.sessionagent.conversation.domain.ContextSummary;
@@ -194,7 +193,7 @@ public final class MessageJobService implements MessageJobPort {
                 if (reply instanceof ModelReply.Text text) {
                     appendResponse(claim, guard, List.of(new ConversationStore.AssistantData(text.message())),
                             ConversationStore.JobUpdate.COMPLETE, Optional.empty(), checkpoint(result, activeModelDescriptor, ordinal,
-                                    requestShapeFingerprint, context.compaction().map(ContextCompaction::generation).orElse(0L)), resultTracker);
+                                    requestShapeFingerprint, context.compaction().map(value -> value.generation()).orElse(0L)), resultTracker);
                     return;
                 }
                 ModelReply.UseTools useTools = (ModelReply.UseTools) reply;
@@ -209,7 +208,7 @@ public final class MessageJobService implements MessageJobPort {
                 }
                 if (!appendResponse(claim, guard, messages, ConversationStore.JobUpdate.KEEP_WORKING, continuation,
                         checkpoint(result, activeModelDescriptor, ordinal, requestShapeFingerprint,
-                                context.compaction().map(ContextCompaction::generation).orElse(0L)), resultTracker)) {
+                                context.compaction().map(value -> value.generation()).orElse(0L)), resultTracker)) {
                     return;
                 }
             }
@@ -238,8 +237,8 @@ public final class MessageJobService implements MessageJobPort {
         Optional<ContextCompaction> compaction = conversationStore.loadCompaction(claim.sessionId());
         List<SessionMessage> visibleHistory = compactedSuffix(history, compaction);
         Map<SessionSequence, ModelContinuation> visibleContinuations = continuationsAfter(continuations, compaction);
-        Optional<ContextSummary> summary = compaction.map(ContextCompaction::summary);
-        long generation = compaction.map(ContextCompaction::generation).orElse(0L);
+        Optional<ContextSummary> summary = compaction.map(value -> value.summary());
+        long generation = compaction.map(value -> value.generation()).orElse(0L);
         ContextUsageProjection projection = new ContextUsageProjection(descriptor, conversationModel.systemPrompt(), tools.definitions(),
                 visibleHistory, generation, summary);
         String fingerprint = contextUsageEstimator.requestShapeFingerprint(projection);
@@ -294,7 +293,7 @@ public final class MessageJobService implements MessageJobPort {
         logCompaction(claim, "compact_started", reason.name(), context.estimateTokens(), projection.model().contextWindowTokens());
         String summary;
         try {
-            summary = conversationModel.summarize(new ContextCompactionRequest(context.compaction().map(ContextCompaction::summary),
+            summary = conversationModel.summarize(new ContextCompactionRequest(context.compaction().map(value -> value.summary()),
                     selected.history()), () -> reserveAndLogModelRequest(claim, guard, reservation, projection.model(),
                     selected.history().size(), 0));
         } catch (BudgetExhausted exception) {
@@ -319,7 +318,7 @@ public final class MessageJobService implements MessageJobPort {
             return false;
         }
         ContextUsageProjection afterProjection = new ContextUsageProjection(projection.model(), projection.systemPrompt(),
-                projection.toolDefinitions(), selected.suffix(), context.compaction().map(ContextCompaction::generation).orElse(0L) + 1,
+                projection.toolDefinitions(), selected.suffix(), context.compaction().map(value -> value.generation()).orElse(0L) + 1,
                 Optional.of(compactedSummary));
         long afterEstimate = contextUsageEstimator.estimate(afterProjection, Optional.empty()).tokens();
         if (afterEstimate >= fourFifths(projection.model().contextWindowTokens())) {
@@ -330,7 +329,7 @@ public final class MessageJobService implements MessageJobPort {
         }
         try {
             conversationStore.compact(claim, new ConversationStore.CompactionData(
-                    context.compaction().map(ContextCompaction::generation).orElse(0L) + 1, reason, compactedSummary.text(),
+                    context.compaction().map(value -> value.generation()).orElse(0L) + 1, reason, compactedSummary.text(),
                     selected.boundary(), projection.model(), context.requestShapeFingerprint(), context.estimateTokens(), afterEstimate), clock.instant());
             logCompaction(claim, "compact_succeeded", reason.name(), afterEstimate, projection.model().contextWindowTokens());
             return guard.stillOwned();
@@ -367,7 +366,7 @@ public final class MessageJobService implements MessageJobPort {
             }
             List<SessionMessage> candidate = full.subList(start, end + 1);
             ContextUsageProjection summaryProjection = new ContextUsageProjection(descriptor, conversationModel.compactionPrompt(), List.of(), candidate,
-                    0, context.compaction().map(ContextCompaction::summary));
+                    0, context.compaction().map(value -> value.summary()));
             long summaryEstimate = contextUsageEstimator.estimate(summaryProjection, Optional.empty()).tokens();
             if (summaryEstimate < descriptor.contextWindowTokens()) {
                 return Optional.of(new CompactionBoundary(new SessionSequence(full.get(end).sequence().value()), List.copyOf(candidate),
@@ -438,7 +437,7 @@ public final class MessageJobService implements MessageJobPort {
         }
         long boundary = compaction.orElseThrow().coveredThrough().value();
         return continuations.entrySet().stream().filter(entry -> entry.getKey().value() > boundary)
-                .collect(java.util.stream.Collectors.toUnmodifiableMap(Map.Entry::getKey, Map.Entry::getValue));
+                .collect(java.util.stream.Collectors.toUnmodifiableMap(entry -> entry.getKey(), entry -> entry.getValue()));
     }
 
     private static boolean hasContinuationForAnotherRoute(

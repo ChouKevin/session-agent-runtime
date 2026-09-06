@@ -56,3 +56,10 @@ spring:
           options:
             model: ${GOOGLE_GENAI_MODEL:gemini-3.1-flash-lite}
             include-thoughts: false
+mybatis-plus:
+  configuration:
+    cache-enabled: false
+    local-cache-scope: STATEMENT
+    return-instance-for-empty-row: true
+    map-underscore-to-camel-case: true
+    arg-name-based-constructor-auto-mapping: true

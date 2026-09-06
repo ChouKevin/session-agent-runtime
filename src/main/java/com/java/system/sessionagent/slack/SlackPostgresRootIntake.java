@@ -4,7 +4,6 @@ import com.java.system.sessionagent.conversation.domain.IncomingMessage;
 import com.java.system.sessionagent.conversation.domain.MessageReceipt;
 import com.java.system.sessionagent.conversation.port.in.MessageConflictException;
 import com.java.system.sessionagent.conversation.port.in.MessageIntakePort;
-import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -20,14 +19,19 @@ import java.util.UUID;
 
 public final class SlackPostgresRootIntake implements SlackRootIntakePort {
 
-    private final JdbcTemplate jdbcTemplate;
+    private final SlackDatabaseMapper mapper;
     private final TransactionTemplate transactionTemplate;
     private final MessageIntakePort messageIntakePort;
     private final Clock clock;
 
     public SlackPostgresRootIntake(DataSource dataSource, MessageIntakePort messageIntakePort, Clock clock) {
+        this(SlackMybatisMapperFactory.create(dataSource), dataSource, messageIntakePort, clock);
+    }
+
+    public SlackPostgresRootIntake(
+            SlackDatabaseMapper mapper, DataSource dataSource, MessageIntakePort messageIntakePort, Clock clock) {
         DataSource requiredDataSource = Objects.requireNonNull(dataSource, "Data source must not be null");
-        this.jdbcTemplate = new JdbcTemplate(requiredDataSource);
+        this.mapper = Objects.requireNonNull(mapper, "Slack database mapper must not be null");
         DataSourceTransactionManager transactionManager = new DataSourceTransactionManager(requiredDataSource);
         this.transactionTemplate = new TransactionTemplate(transactionManager);
         this.transactionTemplate.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRED);
@@ -78,11 +82,7 @@ public final class SlackPostgresRootIntake implements SlackRootIntakePort {
     private SlackIntakeResult acceptRoot(SlackRootIntake intake) {
         MessageReceipt receipt = receiveMessage(intake);
         UUID sessionId = UUID.fromString(receipt.sessionId().value());
-        jdbcTemplate.update("""
-                insert into slack_thread_binding(team_id, channel_id, root_thread_ts, session_id, created_at)
-                values (?, ?, ?, ?, ?)
-                on conflict (team_id, channel_id, root_thread_ts) do nothing
-                """, intake.teamId(), intake.channelId(), intake.rootThreadTs(), sessionId, createdAt());
+        mapper.insertThreadBinding(intake.teamId(), intake.channelId(), intake.rootThreadTs(), sessionId, createdAt());
         Optional<UUID> binding = findThreadBinding(intake);
         Assert.isTrue(binding.isPresent() && binding.orElseThrow().equals(sessionId), "Slack thread binding must be immutable");
         return finishAccepted(intake, receipt, SlackSessionResolution.CREATED);
@@ -168,19 +168,8 @@ public final class SlackPostgresRootIntake implements SlackRootIntakePort {
             SlackIntakeClassification classification,
             UUID sessionId,
             UUID jobId) {
-        int insertedRows = jdbcTemplate.update("""
-                insert into slack_message_receipt(team_id, channel_id, message_ts, top_level, classification, session_id, message_job_id, created_at)
-                values (?, ?, ?, ?, ?, ?, ?, ?)
-                on conflict (team_id, channel_id, message_ts) do update
-                set classification = excluded.classification,
-                    session_id = excluded.session_id,
-                    message_job_id = excluded.message_job_id
-                where slack_message_receipt.top_level
-                    and slack_message_receipt.classification <> 'ACCEPTED'
-                    and excluded.top_level
-                    and excluded.classification = 'ACCEPTED'
-                """, intake.teamId(), intake.channelId(), intake.messageTs(), !isThreadReply(intake), classification.name(), sessionId, jobId,
-                createdAt());
+        int insertedRows = mapper.insertLogicalReceipt(intake.teamId(), intake.channelId(), intake.messageTs(),
+                !isThreadReply(intake), classification.name(), sessionId, jobId, createdAt());
         Optional<StoredMessageReceipt> messageReceipt = findMessageReceipt(intake);
         Assert.isTrue(messageReceipt.isPresent(), "Slack logical message receipt must be committed");
         if (!messageReceipt.orElseThrow().matches(classification, sessionId, jobId)) {
@@ -193,11 +182,7 @@ public final class SlackPostgresRootIntake implements SlackRootIntakePort {
             SlackRootIntake intake,
             SlackIntakeClassification classification,
             UUID correlationId) {
-        jdbcTemplate.update("""
-                insert into slack_event_receipt(event_id, team_id, channel_id, message_ts, classification, correlation_id, created_at)
-                values (?, ?, ?, ?, ?, ?, ?)
-                on conflict (event_id) do nothing
-                """, intake.eventId(), intake.teamId(), intake.channelId(), intake.messageTs(), classification.name(),
+        mapper.insertEventReceipt(intake.eventId(), intake.teamId(), intake.channelId(), intake.messageTs(), classification.name(),
                 correlationId, createdAt());
         Optional<StoredEventReceipt> eventReceipt = findEventReceipt(intake.eventId());
         Assert.isTrue(eventReceipt.isPresent() && eventReceipt.orElseThrow().matchesEnvelope(intake)
@@ -206,32 +191,18 @@ public final class SlackPostgresRootIntake implements SlackRootIntakePort {
     }
 
     private Optional<UUID> findThreadBinding(SlackRootIntake intake) {
-        return jdbcTemplate.query("""
-                select session_id from slack_thread_binding
-                where team_id = ? and channel_id = ? and root_thread_ts = ?
-                """, (resultSet, rowNumber) -> resultSet.getObject("session_id", UUID.class), intake.teamId(), intake.channelId(),
-                intake.rootThreadTs()).stream().findFirst();
+        return mapper.findThreadBinding(intake.teamId(), intake.channelId(), intake.rootThreadTs()).stream().findFirst();
     }
 
     private Optional<StoredEventReceipt> findEventReceipt(String eventId) {
-        return jdbcTemplate.query("""
-                select team_id, channel_id, message_ts, classification, correlation_id
-                from slack_event_receipt where event_id = ?
-                """, (resultSet, rowNumber) -> new StoredEventReceipt(resultSet.getString("team_id"),
-                resultSet.getString("channel_id"), resultSet.getString("message_ts"),
-                SlackIntakeClassification.valueOf(resultSet.getString("classification")),
-                resultSet.getObject("correlation_id", UUID.class)), eventId).stream().findFirst();
+        return mapper.findEventReceipt(eventId).stream().map(row -> new StoredEventReceipt(row.teamId(), row.channelId(),
+                row.messageTs(), SlackIntakeClassification.valueOf(row.classification()), row.correlationId())).findFirst();
     }
 
     private Optional<StoredMessageReceipt> findMessageReceipt(SlackRootIntake intake) {
-        return jdbcTemplate.query("""
-                select top_level, classification, session_id, message_job_id from slack_message_receipt
-                where team_id = ? and channel_id = ? and message_ts = ?
-                """, (resultSet, rowNumber) -> new StoredMessageReceipt(
-                resultSet.getBoolean("top_level"), SlackIntakeClassification.valueOf(resultSet.getString("classification")),
-                resultSet.getObject("session_id", UUID.class),
-                resultSet.getObject("message_job_id", UUID.class)), intake.teamId(), intake.channelId(), intake.messageTs())
-                .stream().findFirst();
+        return mapper.findLogicalReceipt(intake.teamId(), intake.channelId(), intake.messageTs()).stream()
+                .map(row -> new StoredMessageReceipt(row.topLevel(), SlackIntakeClassification.valueOf(row.classification()),
+                        row.sessionId(), row.messageJobId())).findFirst();
     }
 
     private static boolean canAcceptTopLevelRootAfterIgnored(SlackRootIntake intake, StoredMessageReceipt existing) {
@@ -241,9 +212,7 @@ public final class SlackPostgresRootIntake implements SlackRootIntakePort {
     }
 
     private void acquireLogicalMessageLock(SlackRootIntake intake) {
-        jdbcTemplate.query("""
-                select pg_advisory_xact_lock(hashtextextended(json_build_array(?, ?, ?)::text, 0))
-                """, resultSet -> { }, intake.teamId(), intake.channelId(), intake.messageTs());
+        mapper.acquireLogicalMessageLock(intake.teamId(), intake.channelId(), intake.messageTs());
     }
 
     private OffsetDateTime createdAt() {

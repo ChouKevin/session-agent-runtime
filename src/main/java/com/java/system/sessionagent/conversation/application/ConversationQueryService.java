@@ -70,11 +70,11 @@ public final class ConversationQueryService implements ConversationQueryPort {
                 List<SessionMessage> history = conversationStore.loadHistory(requiredSessionId).stream()
                         .sorted(Comparator.comparingLong(message -> message.sequence().value())).toList();
                 compaction = conversationStore.loadCompaction(requiredSessionId);
-                long generation = compaction.map(ContextCompaction::generation).orElse(0L);
+                long generation = compaction.map(value -> value.generation()).orElse(0L);
                 List<SessionMessage> visibleHistory = compaction.map(value -> history.stream()
                         .filter(message -> message.sequence().value() > value.coveredThrough().value()).toList()).orElse(history);
                 contextProjection = new ContextUsageProjection(conversationModel.descriptor(), conversationModel.systemPrompt(),
-                        snapshot.definitions(), visibleHistory, generation, compaction.map(ContextCompaction::summary));
+                        snapshot.definitions(), visibleHistory, generation, compaction.map(value -> value.summary()));
             }
             ContextEstimate estimate = contextUsageEstimator.estimate(contextProjection,
                     conversationStore.loadUsageCheckpoint(requiredSessionId, conversationModel.descriptor(),

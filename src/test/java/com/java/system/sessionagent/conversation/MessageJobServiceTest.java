@@ -212,7 +212,7 @@ class MessageJobServiceTest {
                         Map.of("isError", false, "result", Map.of("value", "y".repeat(20_000)))));
         AtomicReference<ContextCompaction> compacted = new AtomicReference<>();
         AtomicReference<Map<SessionSequence, ModelContinuation>> continuations = new AtomicReference<>(Map.of());
-        when(store.loadHistory(claim.sessionId())).thenReturn(List.of(currentUser), committedHistory);
+        when(store.loadHistory(claim.sessionId())).thenReturn(List.of(currentUser)).thenReturn(committedHistory);
         when(store.loadContinuations(claim)).thenAnswer(invocation -> continuations.get());
         when(store.loadCompaction(claim.sessionId())).thenAnswer(invocation -> Optional.ofNullable(compacted.get()));
         when(store.reserveModelCall(eq(claim), eq(3), any(Instant.class))).thenReturn(OptionalInt.of(1), OptionalInt.of(2), OptionalInt.of(3));

@@ -34,8 +34,6 @@ import com.java.system.sessionagent.conversation.port.out.StaleWorkClaimExceptio
 import org.springframework.dao.DataAccessResourceFailureException;
 import org.springframework.dao.QueryTimeoutException;
 import org.springframework.dao.TransientDataAccessException;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.jdbc.core.PreparedStatementCallback;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -47,7 +45,6 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.sql.SQLRecoverableException;
-import java.sql.ResultSet;
 import java.sql.SQLTimeoutException;
 import java.sql.SQLTransientException;
 import java.time.Clock;
@@ -68,15 +65,20 @@ import java.util.function.Supplier;
 
 public final class PostgresConversationStore implements ConversationStore {
 
-    private final JdbcTemplate jdbcTemplate;
+    private final PostgresConversationMapper mapper;
     private final TransactionTemplate transactionTemplate;
     private final TransactionTemplate historyTransactionTemplate;
     private final Clock clock;
     private final ObjectMapper objectMapper;
 
     public PostgresConversationStore(DataSource dataSource, Clock clock, ObjectMapper objectMapper) {
+        this(PostgresMybatisMapperFactory.create(dataSource), dataSource, clock, objectMapper);
+    }
+
+    public PostgresConversationStore(
+            PostgresConversationMapper mapper, DataSource dataSource, Clock clock, ObjectMapper objectMapper) {
         DataSource requiredDataSource = Objects.requireNonNull(dataSource, "Data source must not be null");
-        this.jdbcTemplate = new JdbcTemplate(requiredDataSource);
+        this.mapper = Objects.requireNonNull(mapper, "Conversation mapper must not be null");
         DataSourceTransactionManager transactionManager = new DataSourceTransactionManager(requiredDataSource);
         this.transactionTemplate = new TransactionTemplate(transactionManager);
         this.transactionTemplate.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRED);
@@ -128,75 +130,44 @@ public final class PostgresConversationStore implements ConversationStore {
         ByteBuffer buffer = ByteBuffer.wrap(sha256(sourceType, sourceMessageId));
         int firstLockKey = buffer.getInt();
         int secondLockKey = buffer.getInt();
-        jdbcTemplate.execute("select pg_advisory_xact_lock(?, ?)", (PreparedStatementCallback<Void>) statement -> {
-            statement.setInt(1, firstLockKey);
-            statement.setInt(2, secondLockKey);
-            statement.execute();
-            return null;
-        });
+        mapper.lockSourceIdentity(firstLockKey, secondLockKey);
     }
 
     private StoredSession lockOrCreateSession(String sourceType, String sessionKey) {
         UUID generatedSessionId = UUID.randomUUID();
-        jdbcTemplate.update("""
-                insert into conversation_session(session_id, source_type, session_key, created_at)
-                values (?, ?, ?, ?)
-                on conflict (source_type, session_key) do nothing
-                """, generatedSessionId, sourceType, sessionKey, timestamp(clock.instant()));
-        return jdbcTemplate.query("""
-                select session_id from conversation_session
-                where source_type = ? and session_key = ? for update
-                """, (resultSet, rowNumber) -> new StoredSession(resultSet.getObject("session_id", UUID.class)), sourceType, sessionKey)
-                .stream().findFirst().orElseThrow(() -> ConversationStoreFailure.contract(
+        mapper.insertSessionIfAbsent(generatedSessionId, sourceType, sessionKey, timestamp(clock.instant()));
+        return mapper.lockSession(sourceType, sessionKey).stream()
+                .map(row -> new StoredSession(row.sessionId()))
+                .findFirst().orElseThrow(() -> ConversationStoreFailure.contract(
                         new IllegalStateException("Conversation session was not created")));
     }
 
     private Optional<StoredSourceMessage> findSourceMessage(String sourceType, String sourceMessageId) {
-        return jdbcTemplate.query("""
-                select source.session_id, source.content_hash, job.message_job_id
-                from source_message source
-                join message_job job on job.session_id = source.session_id
-                    and job.user_message_sequence = source.user_message_sequence
-                where source.source_type = ? and source.source_message_id = ?
-                """, (resultSet, rowNumber) -> new StoredSourceMessage(
-                resultSet.getObject("session_id", UUID.class), resultSet.getString("content_hash"),
-                resultSet.getObject("message_job_id", UUID.class)), sourceType, sourceMessageId).stream().findFirst();
+        return mapper.findSourceMessage(sourceType, sourceMessageId).stream()
+                .map(row -> new StoredSourceMessage(row.sessionId(), row.contentHash(), row.messageJobId()))
+                .findFirst();
     }
 
     private long allocateSequence(UUID sessionId) {
-        Long sequence = jdbcTemplate.queryForObject("""
-                update conversation_session set next_sequence = next_sequence + 1
-                where session_id = ? returning next_sequence - 1
-                """, Long.class, sessionId);
+        Long sequence = mapper.allocateSequence(sessionId).stream().findFirst().orElse(null); // cs-allow mapper uses nullable empty RETURNING result
         return Objects.requireNonNull(sequence, "Session sequence must not be null");
     }
 
     private void insertSourceMessage(String sourceType, String sourceMessageId, UUID sessionId, long sequence, String contentHash, Instant createdAt) {
-        jdbcTemplate.update("""
-                insert into source_message(source_type, source_message_id, session_id, user_message_sequence, content_hash, created_at)
-                values (?, ?, ?, ?, ?, ?)
-                """, sourceType, sourceMessageId, sessionId, sequence, contentHash, timestamp(createdAt));
+        mapper.insertSourceMessage(sourceType, sourceMessageId, sessionId, sequence, contentHash, timestamp(createdAt));
     }
 
     private void insertUserSessionMessage(UUID sessionId, long sequence, Instant createdAt) {
-        jdbcTemplate.update("""
-                insert into session_message(session_id, sequence, message_job_id, role, created_at)
-                values (?, ?, null, 'USER', ?)
-                """, sessionId, sequence, timestamp(createdAt));
+        mapper.insertUserSessionMessage(sessionId, sequence, timestamp(createdAt));
     }
 
     private void insertUserMessage(IncomingMessage message, UUID sessionId, long sequence) {
-        jdbcTemplate.update("""
-                insert into user_message(session_id, sequence, participant_id, source_type, source_message_id, message)
-                values (?, ?, ?, ?, ?, ?)
-                """, sessionId, sequence, message.participantId(), message.source().storageValue(), message.sourceMessageId(), message.message());
+        mapper.insertUserMessage(sessionId, sequence, message.participantId(), message.source().storageValue(),
+                message.sourceMessageId(), message.message());
     }
 
     private void insertMessageJob(UUID jobId, UUID sessionId, long sequence, Instant createdAt) {
-        jdbcTemplate.update("""
-                insert into message_job(message_job_id, session_id, user_message_sequence, status, available_at, created_at)
-                values (?, ?, ?, 'PENDING', clock_timestamp(), ?)
-                """, jobId, sessionId, sequence, timestamp(createdAt));
+        mapper.insertMessageJob(jobId, sessionId, sequence, timestamp(createdAt));
     }
 
     @Override
@@ -205,34 +176,12 @@ public final class PostgresConversationStore implements ConversationStore {
         Duration requiredLeaseDuration = Objects.requireNonNull(leaseDuration, "Lease duration must not be null");
         Assert.isTrue(!requiredLeaseDuration.isNegative() && !requiredLeaseDuration.isZero(), "Lease duration must be positive");
         try {
-            Optional<MessageWorkClaim> claim = transactionTemplate.execute(status -> jdbcTemplate.query("""
-                    with candidate as (
-                        select candidate.message_job_id, candidate.session_id
-                        from message_job candidate
-                        where ((candidate.status in ('PENDING', 'RETRY') and candidate.available_at <= clock_timestamp())
-                                or (candidate.status = 'WORKING' and candidate.locked_until <= clock_timestamp()))
-                          and not exists (
-                              select 1 from message_job earlier
-                              where earlier.session_id = candidate.session_id
-                                and earlier.message_job_id <> candidate.message_job_id
-                                and earlier.user_message_sequence < candidate.user_message_sequence
-                                and earlier.status in ('PENDING', 'RETRY', 'WORKING'))
-                          and not exists (
-                              select 1 from message_job working
-                              where working.session_id = candidate.session_id
-                                and working.message_job_id <> candidate.message_job_id and working.status = 'WORKING')
-                        order by candidate.available_at, candidate.created_at, candidate.message_job_id
-                        for update skip locked limit 1)
-                    update message_job job set status = 'WORKING', worker_id = ?,
-                        locked_until = clock_timestamp() + (? * interval '1 millisecond'), claim_number = job.claim_number + 1
-                    from candidate where job.message_job_id = candidate.message_job_id and job.session_id = candidate.session_id
-                    returning job.message_job_id, job.session_id, job.worker_id, job.claim_number, job.locked_until, clock_timestamp() as claimed_at
-                    """, (resultSet, rowNumber) -> new MessageWorkClaim(
-                    new MessageJobId(resultSet.getObject("message_job_id", UUID.class).toString()),
-                    new SessionId(resultSet.getObject("session_id", UUID.class).toString()), resultSet.getString("worker_id"),
-                    resultSet.getLong("claim_number"), resultSet.getObject("claimed_at", OffsetDateTime.class).toInstant(),
-                    resultSet.getObject("locked_until", OffsetDateTime.class).toInstant()), workerId,
-                    positiveLeaseMilliseconds(requiredLeaseDuration)).stream().findFirst());
+            Optional<MessageWorkClaim> claim = transactionTemplate.execute(status -> mapper.claimNext(
+                    workerId, positiveLeaseMilliseconds(requiredLeaseDuration)).stream()
+                    .map(row -> new MessageWorkClaim(
+                            new MessageJobId(row.messageJobId().toString()), new SessionId(row.sessionId().toString()),
+                            row.workerId(), row.claimNumber(), row.claimedAt().toInstant(), row.lockedUntil().toInstant()))
+                    .findFirst());
             return Objects.requireNonNull(claim, "Claim result must not be null");
         } catch (RuntimeException exception) {
             throw translate(exception);
@@ -245,13 +194,8 @@ public final class PostgresConversationStore implements ConversationStore {
         Duration requiredLeaseDuration = Objects.requireNonNull(leaseDuration, "Lease duration must not be null");
         Assert.isTrue(!requiredLeaseDuration.isNegative() && !requiredLeaseDuration.isZero(), "Lease duration must be positive");
         try {
-            return jdbcTemplate.update("""
-                    update message_job set locked_until = clock_timestamp() + (? * interval '1 millisecond')
-                    where message_job_id = ? and session_id = ? and status = 'WORKING' and worker_id = ?
-                      and claim_number = ? and locked_until > clock_timestamp()
-                      and locked_until < clock_timestamp() + (? * interval '1 millisecond')
-                    """, positiveLeaseMilliseconds(requiredLeaseDuration), messageJobId(requiredClaim), sessionId(requiredClaim),
-                    requiredClaim.workerId(), requiredClaim.claimNumber(), positiveLeaseMilliseconds(requiredLeaseDuration)) == 1;
+            return mapper.extendClaim(positiveLeaseMilliseconds(requiredLeaseDuration), messageJobId(requiredClaim),
+                    sessionId(requiredClaim), requiredClaim.workerId(), requiredClaim.claimNumber()) == 1;
         } catch (RuntimeException exception) {
             throw translate(exception);
         }
@@ -276,35 +220,12 @@ public final class PostgresConversationStore implements ConversationStore {
         Assert.isTrue(afterSequence >= 0 && limit > 0,
                 "History pagination must be nonnegative with a positive limit");
         try {
-            List<Optional<SessionMessage>> rows = jdbcTemplate.query("""
-                    select message.sequence, message.message_job_id as event_message_job_id, user_job.message_job_id as user_message_job_id,
-                        message.created_at, message.role, user_detail.participant_id, user_detail.message as user_message,
-                        assistant_detail.message as assistant_message, calls_detail.message as assistant_tool_calls_message,
-                        calls_detail.calls, observation_detail.tool_call_id, observation_detail.tool_name, observation_detail.output,
-                        runtime_detail.code, runtime_detail.message as runtime_message
-                    from conversation_session session
-                    left join session_message message on message.session_id = session.session_id and message.sequence > ?
-                    left join user_message user_detail on user_detail.session_id = message.session_id
-                        and user_detail.sequence = message.sequence
-                    left join message_job user_job on user_job.session_id = message.session_id
-                        and user_job.user_message_sequence = message.sequence
-                    left join assistant_message assistant_detail on assistant_detail.session_id = message.session_id
-                        and assistant_detail.sequence = message.sequence
-                    left join assistant_tool_calls calls_detail on calls_detail.session_id = message.session_id
-                        and calls_detail.sequence = message.sequence
-                    left join tool_observation observation_detail on observation_detail.session_id = message.session_id
-                        and observation_detail.sequence = message.sequence
-                    left join runtime_message runtime_detail on runtime_detail.session_id = message.session_id
-                        and runtime_detail.sequence = message.sequence
-                    where session.session_id = ?
-                    order by message.sequence asc
-                    limit ?
-                    """, (resultSet, rowNumber) -> storedPagedHistoryMessage(requiredSessionId, resultSet), afterSequence,
-                    UUID.fromString(requiredSessionId.value()), limit);
+            List<Optional<SessionMessage>> rows = mapper.loadHistoryPage(UUID.fromString(requiredSessionId.value()), afterSequence, limit)
+                    .stream().map(row -> storedPagedHistoryMessage(requiredSessionId, row)).toList();
             if (rows.isEmpty()) {
                 return Optional.empty();
             }
-            return Optional.of(rows.stream().flatMap(Optional::stream).toList());
+            return Optional.of(rows.stream().flatMap(value -> value.stream()).toList());
         } catch (InvalidStoredNativeHistoryException exception) {
             throw ConversationStoreFailure.invalidHistory(exception);
         } catch (RuntimeException exception) {
@@ -318,17 +239,12 @@ public final class PostgresConversationStore implements ConversationStore {
         ModelRouteId requiredRouteId = Objects.requireNonNull(modelRouteId, "Model route ID must not be null");
         inTransaction(() -> {
             requireLiveClaim(requiredClaim);
-            List<Optional<String>> routes = jdbcTemplate.query("""
-                    select model_route_id from message_job
-                    where message_job_id = ? and session_id = ? for update
-                    """, (resultSet, rowNumber) -> Optional.ofNullable(resultSet.getString("model_route_id")),
-                    messageJobId(requiredClaim), sessionId(requiredClaim));
-            Optional<String> storedRoute = routes.stream().findFirst().orElseThrow(StaleWorkClaimException::new);
+            PostgresConversationMapper.ModelRouteRow route = mapper.lockModelRoute(
+                    messageJobId(requiredClaim), sessionId(requiredClaim)).stream()
+                    .findFirst().orElseThrow(StaleWorkClaimException::new);
+            Optional<String> storedRoute = Optional.ofNullable(route.modelRouteId());
             if (storedRoute.isEmpty()) {
-                jdbcTemplate.update("""
-                        update message_job set model_route_id = ?
-                        where message_job_id = ? and session_id = ?
-                        """, requiredRouteId.value(), messageJobId(requiredClaim), sessionId(requiredClaim));
+                mapper.bindModelRoute(requiredRouteId.value(), messageJobId(requiredClaim), sessionId(requiredClaim));
             } else if (!storedRoute.orElseThrow().equals(requiredRouteId.value())) {
                 throw new ModelRouteMismatchException();
             }
@@ -340,19 +256,10 @@ public final class PostgresConversationStore implements ConversationStore {
     public Map<SessionSequence, ModelContinuation> loadContinuations(MessageWorkClaim claim) {
         MessageWorkClaim requiredClaim = Objects.requireNonNull(claim, "Message work claim must not be null");
         try {
-            Map<SessionSequence, ModelContinuation> continuations = jdbcTemplate.query("""
-                    select continuation.assistant_sequence, continuation.model_route_id, continuation.format, continuation.payload
-                    from model_continuation continuation
-                    join message_job job on job.message_job_id = continuation.message_job_id
-                        and job.session_id = continuation.session_id
-                    where continuation.message_job_id = ? and continuation.session_id = ?
-                      and job.status = 'WORKING' and job.worker_id = ? and job.claim_number = ?
-                      and job.locked_until > clock_timestamp()
-                    order by continuation.assistant_sequence
-                    """, (resultSet, rowNumber) -> Map.entry(new SessionSequence(resultSet.getLong("assistant_sequence")),
-                    new ModelContinuation(new ModelRouteId(resultSet.getString("model_route_id")), resultSet.getString("format"),
-                            resultSet.getBytes("payload"))), messageJobId(requiredClaim), sessionId(requiredClaim),
-                    requiredClaim.workerId(), requiredClaim.claimNumber()).stream()
+            Map<SessionSequence, ModelContinuation> continuations = mapper.loadContinuations(messageJobId(requiredClaim),
+                    sessionId(requiredClaim), requiredClaim.workerId(), requiredClaim.claimNumber()).stream()
+                    .map(row -> Map.entry(new SessionSequence(row.assistantSequence()),
+                            new ModelContinuation(new ModelRouteId(row.modelRouteId()), row.format(), row.payload())))
                     .collect(java.util.stream.Collectors.toUnmodifiableMap(
                             entry -> entry.getKey(), entry -> entry.getValue()));
             return Map.copyOf(continuations);
@@ -369,16 +276,11 @@ public final class PostgresConversationStore implements ConversationStore {
         Assert.hasText(requestShapeFingerprint, "Request shape fingerprint must not be blank");
         Assert.isTrue(compactGeneration >= 0, "Compact generation must not be negative");
         try {
-            return jdbcTemplate.query("""
-                    select response_sequence, model_call_ordinal, prompt_tokens, completion_tokens, total_tokens, created_at
-                    from context_usage_checkpoint where session_id = ? and model_route_id = ? and model_id = ?
-                      and request_shape_fingerprint = ? and compact_generation = ? order by response_sequence desc limit 1
-                    """, (resultSet, rowNumber) -> new ContextUsageCheckpoint(requiredModel,
-                    resultSet.getInt("model_call_ordinal"), new SessionSequence(resultSet.getLong("response_sequence")),
-                    resultSet.getLong("prompt_tokens"), resultSet.getLong("completion_tokens"), resultSet.getLong("total_tokens"),
-                    requestShapeFingerprint, compactGeneration, resultSet.getObject("created_at", OffsetDateTime.class).toInstant()),
-                    UUID.fromString(requiredSessionId.value()), requiredModel.routeId().value(), requiredModel.modelId(),
-                    requestShapeFingerprint, compactGeneration).stream().findFirst();
+            return mapper.loadUsageCheckpoint(UUID.fromString(requiredSessionId.value()), requiredModel.routeId().value(),
+                    requiredModel.modelId(), requestShapeFingerprint, compactGeneration).stream().findFirst()
+                    .map(row -> new ContextUsageCheckpoint(requiredModel, row.modelCallOrdinal(),
+                            new SessionSequence(row.responseSequence()), row.promptTokens(), row.completionTokens(),
+                            row.totalTokens(), requestShapeFingerprint, compactGeneration, row.createdAt().toInstant()));
         } catch (RuntimeException exception) {
             throw translate(exception);
         }
@@ -388,19 +290,13 @@ public final class PostgresConversationStore implements ConversationStore {
     public Optional<ContextCompaction> loadCompaction(SessionId sessionId) {
         SessionId requiredSessionId = Objects.requireNonNull(sessionId, "Session ID must not be null");
         try {
-            return jdbcTemplate.query("""
-                    select generation, message_job_id, reason, summary, covered_through, model_route_id, model_id,
-                        context_window_tokens, request_shape_fingerprint, estimate_before_tokens, estimate_after_tokens, created_at
-                    from session_compaction where session_id = ? order by generation desc limit 1
-                    """, (resultSet, rowNumber) -> new ContextCompaction(resultSet.getLong("generation"),
-                    new MessageJobId(resultSet.getObject("message_job_id", UUID.class).toString()),
-                    ContextCompaction.Reason.valueOf(resultSet.getString("reason")), new ContextSummary(resultSet.getString("summary")),
-                    new SessionSequence(resultSet.getLong("covered_through")), new ModelDescriptor(
-                    new ModelRouteId(resultSet.getString("model_route_id")), resultSet.getString("model_id"),
-                    resultSet.getLong("context_window_tokens")), resultSet.getString("request_shape_fingerprint"),
-                    resultSet.getLong("estimate_before_tokens"), resultSet.getLong("estimate_after_tokens"),
-                    resultSet.getObject("created_at", OffsetDateTime.class).toInstant()), UUID.fromString(requiredSessionId.value()))
-                    .stream().findFirst();
+            return mapper.loadCompaction(UUID.fromString(requiredSessionId.value())).stream().findFirst()
+                    .map(row -> new ContextCompaction(row.generation(), new MessageJobId(row.messageJobId().toString()),
+                            ContextCompaction.Reason.valueOf(row.reason()), new ContextSummary(row.summary()),
+                            new SessionSequence(row.coveredThrough()), new ModelDescriptor(
+                            new ModelRouteId(row.modelRouteId()), row.modelId(), row.contextWindowTokens()),
+                            row.requestShapeFingerprint(), row.estimateBeforeTokens(), row.estimateAfterTokens(),
+                            row.createdAt().toInstant()));
         } catch (RuntimeException exception) {
             throw translate(exception);
         }
@@ -410,9 +306,7 @@ public final class PostgresConversationStore implements ConversationStore {
     public boolean hasOverflowCompaction(MessageJobId messageJobId) {
         MessageJobId requiredMessageJobId = Objects.requireNonNull(messageJobId, "Message job ID must not be null");
         try {
-            return Boolean.TRUE.equals(jdbcTemplate.queryForObject("""
-                    select exists(select 1 from session_compaction where message_job_id = ? and reason = 'OVERFLOW')
-                    """, Boolean.class, UUID.fromString(requiredMessageJobId.value())));
+            return Boolean.TRUE.equals(mapper.hasOverflowCompaction(UUID.fromString(requiredMessageJobId.value())));
         } catch (RuntimeException exception) {
             throw translate(exception);
         }
@@ -426,19 +320,12 @@ public final class PostgresConversationStore implements ConversationStore {
         inTransaction(() -> {
             requireLiveClaim(requiredClaim);
             UUID sessionId = sessionId(requiredClaim);
-            jdbcTemplate.update("""
-                    insert into session_compaction(session_id, generation, message_job_id, reason, summary, covered_through,
-                        model_route_id, model_id, context_window_tokens, request_shape_fingerprint, estimate_before_tokens,
-                        estimate_after_tokens, created_at)
-                    values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """, sessionId, requiredCompaction.generation(), messageJobId(requiredClaim), requiredCompaction.reason().name(),
-                    requiredCompaction.summary(), requiredCompaction.coveredThrough().value(),
+            mapper.insertCompaction(sessionId, requiredCompaction.generation(), messageJobId(requiredClaim),
+                    requiredCompaction.reason().name(), requiredCompaction.summary(), requiredCompaction.coveredThrough().value(),
                     requiredCompaction.model().routeId().value(), requiredCompaction.model().modelId(),
                     requiredCompaction.model().contextWindowTokens(), requiredCompaction.requestShapeFingerprint(),
                     requiredCompaction.estimateBeforeTokens(), requiredCompaction.estimateAfterTokens(), timestamp(requiredCreatedAt));
-            jdbcTemplate.update("""
-                    delete from model_continuation where message_job_id = ? and session_id = ? and assistant_sequence <= ?
-                    """, messageJobId(requiredClaim), sessionId, requiredCompaction.coveredThrough().value());
+            mapper.deleteCoveredContinuations(messageJobId(requiredClaim), sessionId, requiredCompaction.coveredThrough().value());
             requireLiveClaim(requiredClaim);
             return Boolean.TRUE;
         });
@@ -456,38 +343,37 @@ public final class PostgresConversationStore implements ConversationStore {
         return List.copyOf(messages);
     }
 
-    private Optional<SessionMessage> storedPagedHistoryMessage(SessionId sessionId, ResultSet resultSet) throws java.sql.SQLException {
-        Optional<Long> sequence = Optional.ofNullable(resultSet.getObject("sequence", Long.class));
+    private Optional<SessionMessage> storedPagedHistoryMessage(
+            SessionId sessionId, PostgresConversationMapper.HistoryPageRow row) {
+        Optional<Long> sequence = Optional.ofNullable(row.sequence());
         if (sequence.isEmpty()) {
             return Optional.empty();
         }
         try {
             SessionSequence messageSequence = new SessionSequence(sequence.orElseThrow());
-            Instant createdAt = resultSet.getObject("created_at", OffsetDateTime.class).toInstant();
-            MessageRole role = MessageRole.valueOf(resultSet.getString("role"));
+            Instant createdAt = row.createdAt().toInstant();
+            MessageRole role = MessageRole.valueOf(row.role());
             return Optional.of(switch (role) {
                 case USER -> new UserMessage(sessionId, messageSequence, Optional.of(new MessageJobId(
-                        resultSet.getObject("user_message_job_id", UUID.class).toString())), createdAt, MessageRole.USER,
-                        resultSet.getString("participant_id"), resultSet.getString("user_message"));
-                case ASSISTANT -> new AssistantMessage(sessionId, messageSequence, storedPageMessageJobId(resultSet), createdAt,
-                        MessageRole.ASSISTANT, resultSet.getString("assistant_message"));
-                case ASSISTANT_TOOL_CALLS -> new AssistantToolCallsMessage(sessionId, messageSequence, storedPageMessageJobId(resultSet),
+                        row.userMessageJobId().toString())), createdAt, MessageRole.USER,
+                        row.participantId(), row.userMessage());
+                case ASSISTANT -> new AssistantMessage(sessionId, messageSequence, storedPageMessageJobId(row), createdAt,
+                        MessageRole.ASSISTANT, row.assistantMessage());
+                case ASSISTANT_TOOL_CALLS -> new AssistantToolCallsMessage(sessionId, messageSequence, storedPageMessageJobId(row),
                         createdAt, MessageRole.ASSISTANT_TOOL_CALLS,
-                        Optional.ofNullable(resultSet.getString("assistant_tool_calls_message")),
-                        toolRequests(resultSet.getString("calls")));
-                case TOOL -> new ToolObservation(sessionId, messageSequence, storedPageMessageJobId(resultSet), createdAt,
-                        MessageRole.TOOL, new ToolCallId(resultSet.getString("tool_call_id")), resultSet.getString("tool_name"),
-                        structuredValue(resultSet.getString("output")));
-                case RUNTIME -> new RuntimeMessage(sessionId, messageSequence, storedPageMessageJobId(resultSet), createdAt,
-                        MessageRole.RUNTIME, resultSet.getString("code"), resultSet.getString("runtime_message"));
+                        Optional.ofNullable(row.assistantToolCallsMessage()), toolRequests(row.calls()));
+                case TOOL -> new ToolObservation(sessionId, messageSequence, storedPageMessageJobId(row), createdAt,
+                        MessageRole.TOOL, new ToolCallId(row.toolCallId()), row.toolName(), structuredValue(row.output()));
+                case RUNTIME -> new RuntimeMessage(sessionId, messageSequence, storedPageMessageJobId(row), createdAt,
+                        MessageRole.RUNTIME, row.code(), row.runtimeMessage());
             });
         } catch (IllegalArgumentException | NullPointerException exception) {
             throw new InvalidStoredNativeHistoryException(exception);
         }
     }
 
-    private static Optional<MessageJobId> storedPageMessageJobId(ResultSet resultSet) throws java.sql.SQLException {
-        return Optional.of(new MessageJobId(resultSet.getObject("event_message_job_id", UUID.class).toString()));
+    private static Optional<MessageJobId> storedPageMessageJobId(PostgresConversationMapper.HistoryPageRow row) {
+        return Optional.of(new MessageJobId(row.eventMessageJobId().toString()));
     }
 
     @Override
@@ -496,14 +382,8 @@ public final class PostgresConversationStore implements ConversationStore {
         Assert.isTrue(maxModelCalls > 0, "Maximum model calls must be positive");
         Objects.requireNonNull(now, "Current time must not be null");
         try {
-            return jdbcTemplate.query("""
-                    update message_job set model_calls = model_calls + 1
-                    where message_job_id = ? and session_id = ? and status = 'WORKING' and worker_id = ?
-                      and claim_number = ? and locked_until > clock_timestamp() and model_calls < ?
-                    returning model_calls
-                    """, (resultSet, rowNumber) -> resultSet.getInt("model_calls"), messageJobId(requiredClaim),
-                    sessionId(requiredClaim), requiredClaim.workerId(), requiredClaim.claimNumber(), maxModelCalls)
-                    .stream().findFirst().map(modelCalls -> OptionalInt.of(modelCalls))
+            return mapper.reserveModelCall(messageJobId(requiredClaim), sessionId(requiredClaim), requiredClaim.workerId(),
+                    requiredClaim.claimNumber(), maxModelCalls).stream().findFirst().map(value -> OptionalInt.of(value))
                     .orElseGet(OptionalInt::empty);
         } catch (RuntimeException exception) {
             throw translate(exception);
@@ -525,51 +405,39 @@ public final class PostgresConversationStore implements ConversationStore {
                 requireLiveClaim(requiredClaim);
                 if (message instanceof AssistantData assistant) {
                     insertSessionMessage(sessionId, sequence, messageJobId(requiredClaim), "ASSISTANT", requiredCreatedAt);
-                    jdbcTemplate.update("insert into assistant_message(session_id, sequence, message) values (?, ?, ?)",
-                            sessionId, sequence, assistant.message());
+                    mapper.insertAssistantMessage(sessionId, sequence, assistant.message());
                     responseSequence = Optional.of(new SessionSequence(sequence));
                 } else if (message instanceof AssistantToolCallsData assistantToolCalls) {
                     insertSessionMessage(sessionId, sequence, messageJobId(requiredClaim), "ASSISTANT_TOOL_CALLS", requiredCreatedAt);
-                    jdbcTemplate.update("insert into assistant_tool_calls(session_id, sequence, message, calls) values (?, ?, ?, ?::jsonb)",
-                            sessionId, sequence, assistantToolCalls.message().orElse(null), json(storedToolCalls(assistantToolCalls.calls()))); // cs-allow nullable database column represents optional assistant text
+                    mapper.insertAssistantToolCalls(sessionId, sequence, assistantToolCalls.message().orElse(null),
+                            json(storedToolCalls(assistantToolCalls.calls()))); // cs-allow nullable database column represents optional assistant text
                     continuationSequence = Optional.of(new SessionSequence(sequence));
                     responseSequence = Optional.of(new SessionSequence(sequence));
                 } else if (message instanceof ToolObservationData observation) {
                     insertSessionMessage(sessionId, sequence, messageJobId(requiredClaim), "TOOL", requiredCreatedAt);
-                    jdbcTemplate.update("""
-                            insert into tool_observation(session_id, sequence, tool_call_id, tool_name, output)
-                            values (?, ?, ?, ?, ?::jsonb)
-                            """, sessionId, sequence, observation.toolCallId().value(), observation.toolName(),
+                    mapper.insertToolObservation(sessionId, sequence, observation.toolCallId().value(), observation.toolName(),
                             json(observation.output()));
                 } else if (message instanceof RuntimeData runtime) {
                     insertSessionMessage(sessionId, sequence, messageJobId(requiredClaim), "RUNTIME", requiredCreatedAt);
-                    jdbcTemplate.update("insert into runtime_message(session_id, sequence, code, message) values (?, ?, ?, ?)",
-                            sessionId, sequence, runtime.code(), runtime.message());
+                    mapper.insertRuntimeMessage(sessionId, sequence, runtime.code(), runtime.message());
                 }
             }
             if (requiredBatch.usageCheckpoint().isPresent()) {
                 ConversationStore.UsageCheckpointData checkpoint = requiredBatch.usageCheckpoint().orElseThrow();
                 SessionSequence boundary = responseSequence.orElseThrow();
-                jdbcTemplate.update("""
-                        insert into context_usage_checkpoint(session_id, response_sequence, model_route_id, model_id, model_call_ordinal,
-                            prompt_tokens, completion_tokens, total_tokens, request_shape_fingerprint, compact_generation, created_at)
-                        values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """, sessionId, boundary.value(), checkpoint.model().routeId().value(), checkpoint.model().modelId(),
-                        checkpoint.modelCallOrdinal(), checkpoint.promptTokens(), checkpoint.completionTokens(), checkpoint.totalTokens(),
-                        checkpoint.requestShapeFingerprint(), checkpoint.compactGeneration(), timestamp(requiredCreatedAt));
+                mapper.insertUsageCheckpoint(sessionId, boundary.value(), checkpoint.model().routeId().value(),
+                        checkpoint.model().modelId(), checkpoint.modelCallOrdinal(), checkpoint.promptTokens(),
+                        checkpoint.completionTokens(), checkpoint.totalTokens(), checkpoint.requestShapeFingerprint(),
+                        checkpoint.compactGeneration(), timestamp(requiredCreatedAt));
             }
             if (requiredBatch.continuation().isPresent()) {
                 SessionSequence assistantSequence = continuationSequence.orElseThrow();
                 ModelContinuation continuation = requiredBatch.continuation().orElseThrow();
-                jdbcTemplate.update("""
-                        insert into model_continuation(message_job_id, session_id, assistant_sequence, model_route_id, format, payload)
-                        values (?, ?, ?, ?, ?, ?)
-                        """, messageJobId(requiredClaim), sessionId, assistantSequence.value(), continuation.modelRouteId().value(),
-                        continuation.format(), continuation.payload());
+                mapper.insertContinuation(messageJobId(requiredClaim), sessionId, assistantSequence.value(),
+                        continuation.modelRouteId().value(), continuation.format(), continuation.payload());
             }
             if (requiredBatch.jobUpdate() == JobUpdate.COMPLETE) {
-                jdbcTemplate.update("delete from model_continuation where message_job_id = ? and session_id = ?",
-                        messageJobId(requiredClaim), sessionId);
+                mapper.deleteContinuations(messageJobId(requiredClaim), sessionId);
                 completeJob(requiredClaim, clock.instant());
             }
             return Boolean.TRUE;
@@ -582,12 +450,7 @@ public final class PostgresConversationStore implements ConversationStore {
         Duration requiredDelay = Objects.requireNonNull(retryDelay, "Retry delay must not be null");
         Assert.isTrue(!requiredDelay.isNegative(), "Retry delay must not be negative");
         try {
-            return jdbcTemplate.update("""
-                    update message_job set status = 'RETRY', retry_count = retry_count + 1,
-                        available_at = clock_timestamp() + (? * interval '1 millisecond'), worker_id = null, locked_until = null
-                    where message_job_id = ? and session_id = ? and status = 'WORKING' and worker_id = ?
-                      and claim_number = ? and locked_until > clock_timestamp()
-                    """, requiredDelay.toMillis(), messageJobId(requiredClaim), sessionId(requiredClaim),
+            return mapper.scheduleRetry(requiredDelay.toMillis(), messageJobId(requiredClaim), sessionId(requiredClaim),
                     requiredClaim.workerId(), requiredClaim.claimNumber()) == 1;
         } catch (RuntimeException exception) {
             throw translate(exception);
@@ -606,118 +469,84 @@ public final class PostgresConversationStore implements ConversationStore {
     }
 
     private void requireLiveClaim(MessageWorkClaim claim) {
-        int rows = jdbcTemplate.update("""
-                update message_job set locked_until = locked_until
-                where message_job_id = ? and session_id = ? and status = 'WORKING' and worker_id = ?
-                  and claim_number = ? and locked_until > clock_timestamp()
-                """, messageJobId(claim), sessionId(claim), claim.workerId(), claim.claimNumber());
+        int rows = mapper.requireLiveClaim(messageJobId(claim), sessionId(claim), claim.workerId(), claim.claimNumber());
         if (rows != 1) {
             throw new StaleWorkClaimException();
         }
     }
 
     private void insertSessionMessage(UUID sessionId, long sequence, UUID jobId, String role, Instant createdAt) {
-        jdbcTemplate.update("""
-                insert into session_message(session_id, sequence, message_job_id, role, created_at)
-                values (?, ?, ?, ?, ?)
-                """, sessionId, sequence, jobId, role, timestamp(createdAt));
+        mapper.insertSessionMessage(sessionId, sequence, jobId, role, timestamp(createdAt));
     }
 
     private void completeJob(MessageWorkClaim claim, Instant completedAt) {
-        int rows = jdbcTemplate.update("""
-                update message_job set status = 'DONE', completed_at = ?, worker_id = null, locked_until = null
-                where message_job_id = ? and session_id = ? and status = 'WORKING' and worker_id = ?
-                  and claim_number = ? and locked_until > clock_timestamp()
-                """, timestamp(completedAt), messageJobId(claim), sessionId(claim), claim.workerId(), claim.claimNumber());
+        int rows = mapper.completeJob(timestamp(completedAt), messageJobId(claim), sessionId(claim), claim.workerId(),
+                claim.claimNumber());
         if (rows != 1) {
             throw new StaleWorkClaimException();
         }
     }
 
     private List<SessionMessage> loadUserMessages(UUID sessionId) {
-        return jdbcTemplate.query("""
-                select message.sequence, message.created_at, detail.participant_id, detail.message, job.message_job_id
-                from session_message message join user_message detail on detail.session_id = message.session_id and detail.sequence = message.sequence
-                join message_job job on job.session_id = message.session_id and job.user_message_sequence = message.sequence
-                where message.session_id = ?
-                """, (resultSet, rowNumber) -> new UserMessage(new SessionId(sessionId.toString()),
-                new SessionSequence(resultSet.getLong("sequence")), Optional.of(new MessageJobId(
-                resultSet.getObject("message_job_id", UUID.class).toString())), resultSet.getObject("created_at", OffsetDateTime.class).toInstant(),
-                MessageRole.USER, resultSet.getString("participant_id"), resultSet.getString("message")), sessionId);
+        return mapper.loadUserMessages(sessionId).stream().map(row -> (SessionMessage) new UserMessage(new SessionId(sessionId.toString()),
+                new SessionSequence(row.sequence()), Optional.of(new MessageJobId(row.messageJobId().toString())),
+                row.createdAt().toInstant(), MessageRole.USER, row.participantId(), row.message())).toList();
     }
 
     private List<SessionMessage> loadToolObservations(UUID sessionId) {
-        return jdbcTemplate.query("""
-                select message.sequence, message.message_job_id, message.created_at, detail.tool_call_id, detail.tool_name, detail.output
-                from session_message message join tool_observation detail on detail.session_id = message.session_id and detail.sequence = message.sequence
-                where message.session_id = ?
-                """, (resultSet, rowNumber) -> storedToolObservation(sessionId, resultSet), sessionId);
+        return mapper.loadToolObservations(sessionId).stream().map(row -> (SessionMessage) storedToolObservation(sessionId, row)).toList();
     }
 
     private List<SessionMessage> loadAssistantToolCallsMessages(UUID sessionId) {
-        return jdbcTemplate.query("""
-                select message.sequence, message.message_job_id, message.created_at, detail.message, detail.calls
-                from session_message message join assistant_tool_calls detail on detail.session_id = message.session_id and detail.sequence = message.sequence
-                where message.session_id = ?
-                """, (resultSet, rowNumber) -> storedAssistantToolCalls(sessionId, resultSet), sessionId);
+        return mapper.loadAssistantToolCalls(sessionId).stream()
+                .map(row -> (SessionMessage) storedAssistantToolCalls(sessionId, row)).toList();
     }
 
-    private ToolObservation storedToolObservation(UUID sessionId, ResultSet resultSet) throws java.sql.SQLException {
+    private ToolObservation storedToolObservation(UUID sessionId, PostgresConversationMapper.ToolObservationRow row) {
         try {
             return new ToolObservation(new SessionId(sessionId.toString()),
-                    new SessionSequence(resultSet.getLong("sequence")), Optional.of(new MessageJobId(
-                    resultSet.getObject("message_job_id", UUID.class).toString())), resultSet.getObject("created_at", OffsetDateTime.class).toInstant(),
-                    MessageRole.TOOL, new ToolCallId(resultSet.getString("tool_call_id")),
-                    resultSet.getString("tool_name"), structuredValue(resultSet.getString("output")));
+                    new SessionSequence(row.sequence()), Optional.of(new MessageJobId(row.messageJobId().toString())),
+                    row.createdAt().toInstant(), MessageRole.TOOL, new ToolCallId(row.toolCallId()), row.toolName(),
+                    structuredValue(row.output()));
         } catch (IllegalArgumentException | NullPointerException exception) {
             throw new InvalidStoredNativeHistoryException(exception);
         }
     }
 
-    private AssistantToolCallsMessage storedAssistantToolCalls(UUID sessionId, ResultSet resultSet) throws java.sql.SQLException {
+    private AssistantToolCallsMessage storedAssistantToolCalls(
+            UUID sessionId, PostgresConversationMapper.AssistantToolCallsRow row) {
         try {
             return new AssistantToolCallsMessage(new SessionId(sessionId.toString()),
-                    new SessionSequence(resultSet.getLong("sequence")), Optional.of(new MessageJobId(
-                    resultSet.getObject("message_job_id", UUID.class).toString())), resultSet.getObject("created_at", OffsetDateTime.class).toInstant(),
-                    MessageRole.ASSISTANT_TOOL_CALLS, Optional.ofNullable(resultSet.getString("message")), toolRequests(resultSet.getString("calls")));
+                    new SessionSequence(row.sequence()), Optional.of(new MessageJobId(row.messageJobId().toString())),
+                    row.createdAt().toInstant(), MessageRole.ASSISTANT_TOOL_CALLS, Optional.ofNullable(row.message()),
+                    toolRequests(row.calls()));
         } catch (IllegalArgumentException | NullPointerException exception) {
             throw new InvalidStoredNativeHistoryException(exception);
         }
     }
 
     private List<SessionMessage> loadAssistantMessages(UUID sessionId) {
-        return jdbcTemplate.query("""
-                select message.sequence, message.message_job_id, message.created_at, detail.message
-                from session_message message join assistant_message detail on detail.session_id = message.session_id and detail.sequence = message.sequence
-                where message.session_id = ?
-                """, (resultSet, rowNumber) -> new AssistantMessage(new SessionId(sessionId.toString()),
-                new SessionSequence(resultSet.getLong("sequence")), Optional.of(new MessageJobId(
-                resultSet.getObject("message_job_id", UUID.class).toString())), resultSet.getObject("created_at", OffsetDateTime.class).toInstant(),
-                MessageRole.ASSISTANT, resultSet.getString("message")), sessionId);
+        return mapper.loadAssistantMessages(sessionId).stream().map(row -> (SessionMessage) new AssistantMessage(
+                new SessionId(sessionId.toString()), new SessionSequence(row.sequence()),
+                Optional.of(new MessageJobId(row.messageJobId().toString())), row.createdAt().toInstant(), MessageRole.ASSISTANT,
+                row.message())).toList();
     }
 
     private List<SessionMessage> loadRuntimeMessages(UUID sessionId) {
-        return jdbcTemplate.query("""
-                select message.sequence, message.message_job_id, message.created_at, detail.code, detail.message
-                from session_message message join runtime_message detail on detail.session_id = message.session_id and detail.sequence = message.sequence
-                where message.session_id = ?
-                """, (resultSet, rowNumber) -> new RuntimeMessage(new SessionId(sessionId.toString()),
-                new SessionSequence(resultSet.getLong("sequence")), Optional.of(new MessageJobId(
-                resultSet.getObject("message_job_id", UUID.class).toString())), resultSet.getObject("created_at", OffsetDateTime.class).toInstant(),
-                MessageRole.RUNTIME, resultSet.getString("code"), resultSet.getString("message")), sessionId);
+        return mapper.loadRuntimeMessages(sessionId).stream().map(row -> (SessionMessage) new RuntimeMessage(
+                new SessionId(sessionId.toString()), new SessionSequence(row.sequence()),
+                Optional.of(new MessageJobId(row.messageJobId().toString())), row.createdAt().toInstant(), MessageRole.RUNTIME,
+                row.code(), row.message())).toList();
     }
 
     @Override
     public Optional<MessageJobProjection> readJob(MessageJobId messageJobId) {
         MessageJobId requiredMessageJobId = Objects.requireNonNull(messageJobId, "Message job ID must not be null");
         try {
-            return jdbcTemplate.query("""
-                    select message_job_id, session_id, status, retry_count, model_calls from message_job where message_job_id = ?
-                    """, (resultSet, rowNumber) -> new MessageJobProjection(
-                    new MessageJobId(resultSet.getObject("message_job_id", UUID.class).toString()),
-                    new SessionId(resultSet.getObject("session_id", UUID.class).toString()), JobStatus.valueOf(resultSet.getString("status")),
-                    resultSet.getInt("retry_count"), resultSet.getInt("model_calls")), UUID.fromString(requiredMessageJobId.value()))
-                    .stream().findFirst();
+            PostgresConversationMapper.MessageJobEntity job = mapper.selectById(UUID.fromString(requiredMessageJobId.value()));
+            return Optional.ofNullable(job).map(value -> new MessageJobProjection(
+                    new MessageJobId(value.getMessageJobId().toString()), new SessionId(value.getSessionId().toString()),
+                    JobStatus.valueOf(value.getStatus()), value.getRetryCount(), value.getModelCalls()));
         } catch (RuntimeException exception) {
             throw translate(exception);
         }
@@ -727,26 +556,16 @@ public final class PostgresConversationStore implements ConversationStore {
     public Optional<SessionProjection> readSession(SessionId sessionId) {
         SessionId requiredSessionId = Objects.requireNonNull(sessionId, "Session ID must not be null");
         try {
-            return jdbcTemplate.query("""
-                    select session.session_id, session.created_at, job.message_job_id, job.status, job.retry_count, job.model_calls
-                    from conversation_session session
-                    left join lateral (
-                        select message_job_id, session_id, status, retry_count, model_calls
-                        from message_job where session_id = session.session_id
-                        order by user_message_sequence desc, message_job_id desc limit 1
-                    ) job on true
-                    where session.session_id = ?
-                    """, (resultSet, rowNumber) -> {
-                Optional<UUID> storedJobId = Optional.ofNullable(resultSet.getObject("message_job_id", UUID.class));
+            return mapper.readSession(UUID.fromString(requiredSessionId.value())).stream().findFirst().map(row -> {
+                Optional<UUID> storedJobId = Optional.ofNullable(row.messageJobId());
                 Optional<MessageJobProjection> currentJob = Optional.empty();
                 if (storedJobId.isPresent()) {
                     currentJob = Optional.of(new MessageJobProjection(new MessageJobId(storedJobId.orElseThrow().toString()),
-                            new SessionId(resultSet.getObject("session_id", UUID.class).toString()),
-                            JobStatus.valueOf(resultSet.getString("status")), resultSet.getInt("retry_count"), resultSet.getInt("model_calls")));
+                            new SessionId(row.sessionId().toString()), JobStatus.valueOf(row.status()), row.retryCount(),
+                            row.modelCalls()));
                 }
-                return new SessionProjection(new SessionId(resultSet.getObject("session_id", UUID.class).toString()),
-                        resultSet.getObject("created_at", OffsetDateTime.class).toInstant(), currentJob);
-            }, UUID.fromString(requiredSessionId.value())).stream().findFirst();
+                return new SessionProjection(new SessionId(row.sessionId().toString()), row.createdAt().toInstant(), currentJob);
+            });
         } catch (RuntimeException exception) {
             throw translate(exception);
         }

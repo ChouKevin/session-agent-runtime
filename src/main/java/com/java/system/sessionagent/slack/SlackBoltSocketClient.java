@@ -145,12 +145,12 @@ public final class SlackBoltSocketClient implements SlackSocketClient {
         app.event(MessageDeletedEvent.class, (request, context) -> {
             MessageDeletedEvent event = request.getEvent();
             Optional<MessageDeletedEvent.Message> previousMessage = Optional.ofNullable(event.getPreviousMessage());
-            String messageTs = firstText(previousMessage.map(MessageDeletedEvent.Message::getTs).orElse(""),
+            String messageTs = firstText(previousMessage.map(message -> message.getTs()).orElse(""),
                     firstText(event.getDeletedTs(), event.getTs()));
             handle(request.getEventId(), context.getTeamId(), event.getChannel(), messageTs,
-                    previousMessage.map(MessageDeletedEvent.Message::getThreadTs).orElse(""),
-                    previousMessage.map(MessageDeletedEvent.Message::getUser).orElse(""),
-                    previousMessage.map(MessageDeletedEvent.Message::getBotId).orElse(""), event.getChannelType(), "", event.getSubtype(),
+                    previousMessage.map(message -> message.getThreadTs()).orElse(""),
+                    previousMessage.map(message -> message.getUser()).orElse(""),
+                    previousMessage.map(message -> message.getBotId()).orElse(""), event.getChannelType(), "", event.getSubtype(),
                     event.isHidden(), false);
             return context.ack();
         });

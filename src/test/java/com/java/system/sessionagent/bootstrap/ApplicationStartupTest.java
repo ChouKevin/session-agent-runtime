@@ -1,5 +1,6 @@
 package com.java.system.sessionagent.bootstrap;
 
+import com.baomidou.mybatisplus.autoconfigure.MybatisPlusAutoConfiguration;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.java.system.sessionagent.conversation.domain.ModelDescriptor;
 import com.java.system.sessionagent.conversation.domain.ModelRouteId;
@@ -16,10 +17,12 @@ import org.springframework.ai.google.genai.GoogleGenAiChatOptions;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 import org.springframework.ai.chat.model.ChatModel;
+import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.env.Environment;
+import org.mybatis.spring.annotation.MapperScan;
 
 import javax.sql.DataSource;
 
@@ -28,6 +31,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 class ApplicationStartupTest {
 
     private final ApplicationContextRunner contextRunner = new ApplicationContextRunner()
+            .withConfiguration(AutoConfigurations.of(MybatisPlusAutoConfiguration.class))
             .withBean(SlackSocketClient.class, UnreachableSocketClient::new)
             .withUserConfiguration(RuntimeConfiguration.class, McpConfiguration.class, TestDependencies.class)
             .withPropertyValues(
@@ -96,6 +100,9 @@ class ApplicationStartupTest {
     }
 
     @Configuration(proxyBeanMethods = false)
+    @MapperScan(
+            basePackages = {"com.java.system.sessionagent.storage", "com.java.system.sessionagent.slack"},
+            annotationClass = org.apache.ibatis.annotations.Mapper.class)
     static class TestDependencies {
         @Bean
         DataSource dataSource() {

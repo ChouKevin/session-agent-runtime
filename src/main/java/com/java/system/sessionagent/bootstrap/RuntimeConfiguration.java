@@ -1,5 +1,6 @@
 package com.java.system.sessionagent.bootstrap;
 
+import com.baomidou.mybatisplus.autoconfigure.ConfigurationCustomizer;
 import com.java.system.sessionagent.conversation.application.ConversationMessageService;
 import com.java.system.sessionagent.conversation.application.ConversationQueryService;
 import com.java.system.sessionagent.conversation.application.MessageJobRetryPolicy;
@@ -17,6 +18,8 @@ import com.java.system.sessionagent.conversation.domain.ModelDescriptor;
 import com.java.system.sessionagent.conversation.domain.ContextUsageEstimator;
 import com.java.system.sessionagent.model.PromptResource;
 import com.java.system.sessionagent.storage.PostgresConversationStore;
+import com.java.system.sessionagent.storage.PostgresConversationMapper;
+import com.java.system.sessionagent.storage.PostgresUuidTypeHandler;
 import com.java.system.sessionagent.slack.SlackBoltSocketClient;
 import com.java.system.sessionagent.slack.SlackEventAdapter;
 import com.java.system.sessionagent.slack.SlackPostgresRootIntake;
@@ -31,6 +34,7 @@ import com.java.system.sessionagent.slack.SlackDeliveryLifecycle;
 import com.java.system.sessionagent.slack.SlackDeliveryStore;
 import com.java.system.sessionagent.slack.SlackDeliveryWorker;
 import com.java.system.sessionagent.slack.SlackPostgresDeliveryStore;
+import com.java.system.sessionagent.slack.SlackDatabaseMapper;
 import com.java.system.sessionagent.slack.SlackSdkWebApi;
 import com.java.system.sessionagent.slack.SlackWebApi;
 import com.java.system.sessionagent.tool.port.ToolCatalog;
@@ -46,6 +50,7 @@ import com.fasterxml.jackson.databind.type.LogicalType;
 import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.chat.prompt.ChatOptions;
 import org.springframework.ai.google.genai.GoogleGenAiChatOptions;
+import org.apache.ibatis.session.LocalCacheScope;
 import org.springframework.boot.jackson.autoconfigure.JsonMapperBuilderCustomizer;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
@@ -59,6 +64,7 @@ import javax.sql.DataSource;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.Objects;
+import java.util.UUID;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 
@@ -139,8 +145,24 @@ public class RuntimeConfiguration {
     }
 
     @Bean
-    ConversationStore conversationStore(DataSource dataSource, Clock runtimeClock, ObjectMapper objectMapper) {
-        return new PostgresConversationStore(dataSource, runtimeClock, objectMapper);
+    ConfigurationCustomizer runtimeMybatisConfigurationCustomizer() {
+        return configuration -> {
+            configuration.setCacheEnabled(false);
+            configuration.setLocalCacheScope(LocalCacheScope.STATEMENT);
+            configuration.setReturnInstanceForEmptyRow(true);
+            configuration.setMapUnderscoreToCamelCase(true);
+            configuration.setArgNameBasedConstructorAutoMapping(true);
+            configuration.getTypeHandlerRegistry().register(UUID.class, PostgresUuidTypeHandler.class);
+        };
+    }
+
+    @Bean
+    ConversationStore conversationStore(
+            PostgresConversationMapper mapper,
+            DataSource dataSource,
+            Clock runtimeClock,
+            ObjectMapper objectMapper) {
+        return new PostgresConversationStore(mapper, dataSource, runtimeClock, objectMapper);
     }
 
     @Bean
@@ -154,8 +176,12 @@ public class RuntimeConfiguration {
     }
 
     @Bean
-    SlackRootIntakePort slackRootIntakePort(DataSource dataSource, MessageIntakePort messageIntakePort, Clock runtimeClock) {
-        return new SlackPostgresRootIntake(dataSource, messageIntakePort, runtimeClock);
+    SlackRootIntakePort slackRootIntakePort(
+            SlackDatabaseMapper mapper,
+            DataSource dataSource,
+            MessageIntakePort messageIntakePort,
+            Clock runtimeClock) {
+        return new SlackPostgresRootIntake(mapper, dataSource, messageIntakePort, runtimeClock);
     }
 
     @Bean
@@ -182,8 +208,8 @@ public class RuntimeConfiguration {
     }
 
     @Bean
-    SlackDeliveryStore slackDeliveryStore(DataSource dataSource) {
-        return new SlackPostgresDeliveryStore(dataSource);
+    SlackDeliveryStore slackDeliveryStore(SlackDatabaseMapper mapper, DataSource dataSource) {
+        return new SlackPostgresDeliveryStore(mapper, dataSource);
     }
 
     @Bean(destroyMethod = "close")
@@ -220,9 +246,10 @@ public class RuntimeConfiguration {
 
     @Bean
     ExternalSessionReferenceQueryPort externalSessionReferenceQueryPort(
+            SlackDatabaseMapper mapper,
             DataSource dataSource,
             SlackPermalinkParser slackPermalinkParser) {
-        return new SlackPostgresSessionLookup(dataSource, slackPermalinkParser);
+        return new SlackPostgresSessionLookup(mapper, slackPermalinkParser);
     }
 
     @Bean

@@ -85,9 +85,11 @@ class SlackSdkWebApiTest {
         Mockito.when(slack.methods("xoxb-test")).thenReturn(methods);
         Mockito.doThrow(sdkFailure).when(methods).chatPostMessage(
                 Mockito.<RequestConfigurator<ChatPostMessageRequest.ChatPostMessageRequestBuilder>>any());
-        Throwable thrown = catchThrowable(() -> new SlackSdkWebApi(properties(), slack).post(request()));
-        assertThat(thrown).isInstanceOf(SlackPostFailure.class);
-        return (SlackPostFailure) thrown;
+        try (SlackSdkWebApi webApi = new SlackSdkWebApi(properties(), slack)) {
+            Throwable thrown = catchThrowable(() -> webApi.post(request()));
+            assertThat(thrown).isInstanceOf(SlackPostFailure.class);
+            return (SlackPostFailure) thrown;
+        }
     }
 
     private static SlackApiException slackApiException(int status, String error, Map<String, String> headers) {
