@@ -105,6 +105,7 @@ public final class SlackSdkWebApi implements SlackWebApi, AutoCloseable {
     private static Slack slackFor(SlackProperties properties) {
         SlackProperties requiredProperties = java.util.Objects.requireNonNull(properties, "Slack properties must not be null");
         SlackConfig config = new SlackConfig();
+        config.setStatsEnabled(false);
         config.setHttpClientCallTimeoutMillis(Math.toIntExact(requiredProperties.delivery().callTimeout().toMillis()));
         return Slack.getInstance(config);
     }
