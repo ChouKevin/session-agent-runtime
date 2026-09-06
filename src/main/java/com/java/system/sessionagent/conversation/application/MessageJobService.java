@@ -18,6 +18,7 @@ import com.java.system.sessionagent.conversation.domain.SessionMessage;
 import com.java.system.sessionagent.conversation.domain.SessionSequence;
 import com.java.system.sessionagent.conversation.domain.ToolRequest;
 import com.java.system.sessionagent.conversation.port.in.MessageJobPort;
+import com.java.system.sessionagent.conversation.port.in.MessageJobProcessingResult;
 import com.java.system.sessionagent.conversation.port.in.WorkGuard;
 import com.java.system.sessionagent.conversation.port.out.ConversationModel;
 import com.java.system.sessionagent.conversation.port.out.ConversationStore;
@@ -101,17 +102,21 @@ public final class MessageJobService implements MessageJobPort {
     }
 
     @Override
-    public void process(MessageWorkClaim claim, WorkGuard workGuard) {
+    public MessageJobProcessingResult process(MessageWorkClaim claim, WorkGuard workGuard) {
         Assert.notNull(claim, "Message work claim must not be null");
         Assert.notNull(workGuard, "Work guard must not be null");
+        ProcessingResultTracker resultTracker = new ProcessingResultTracker();
         try {
-            processClaim(claim, workGuard);
+            processClaim(claim, workGuard, resultTracker);
+        } catch (StaleWorkClaimException exception) {
+            resultTracker.ownershipLost();
         } catch (ConversationStoreFailure failure) {
-            recoverStorageFailure(claim, workGuard, failure);
+            recoverStorageFailure(claim, workGuard, failure, resultTracker);
         }
+        return resultTracker.result(workGuard);
     }
 
-    private void processClaim(MessageWorkClaim claim, WorkGuard guard) {
+    private void processClaim(MessageWorkClaim claim, WorkGuard guard, ProcessingResultTracker resultTracker) {
         ModelDescriptor modelDescriptor = conversationModel.descriptor();
         ModelRouteId routeId = conversationModel.routeId();
         if (Objects.isNull(modelDescriptor) && !Objects.isNull(routeId)) {
@@ -124,7 +129,7 @@ public final class MessageJobService implements MessageJobPort {
         try {
             conversationStore.bindModelRoute(claim, routeId);
         } catch (ModelRouteMismatchException exception) {
-            appendRuntime(claim, guard, List.of(runtime(MODEL_UNAVAILABLE)), ConversationStore.JobUpdate.COMPLETE);
+            appendRuntime(claim, guard, List.of(runtime(MODEL_UNAVAILABLE)), ConversationStore.JobUpdate.COMPLETE, resultTracker);
             return;
         }
         while (guard.stillOwned()) {
@@ -132,14 +137,14 @@ public final class MessageJobService implements MessageJobPort {
             Map<SessionSequence, ModelContinuation> continuations = Optional.ofNullable(conversationStore.loadContinuations(claim))
                     .orElseGet(Map::of);
             if (hasContinuationForAnotherRoute(continuations, routeId)) {
-                appendRuntime(claim, guard, List.of(runtime(MODEL_UNAVAILABLE)), ConversationStore.JobUpdate.COMPLETE);
+                appendRuntime(claim, guard, List.of(runtime(MODEL_UNAVAILABLE)), ConversationStore.JobUpdate.COMPLETE, resultTracker);
                 return;
             }
             try (ToolSnapshot tools = toolCatalog.snapshot()) {
                 ReservationState reservation = new ReservationState();
                 ContextState context = contextState(claim, history, continuations, tools, activeModelDescriptor);
                 if (context.requiresCompaction()) {
-                    if (!compact(claim, guard, reservation, context, ContextCompaction.Reason.PROACTIVE)) {
+                    if (!compact(claim, guard, reservation, context, ContextCompaction.Reason.PROACTIVE, resultTracker)) {
                         return;
                     }
                     continue;
@@ -156,25 +161,29 @@ public final class MessageJobService implements MessageJobPort {
                     reply = result.reply();
                     continuation = result.continuation();
                 } catch (BudgetExhausted exception) {
-                    appendRuntime(claim, guard, List.of(runtime(MODEL_CALL_LIMIT_REACHED)), ConversationStore.JobUpdate.COMPLETE);
+                    appendRuntime(claim, guard, List.of(runtime(MODEL_CALL_LIMIT_REACHED)),
+                            ConversationStore.JobUpdate.COMPLETE, resultTracker);
                     return;
                 } catch (ModelCallFailure failure) {
                     if (failure.kind() == ModelCallFailure.Kind.INVALID_HISTORY) {
                         logModelFailure(claim, reservation.ordinal(), failure.kind(), elapsedSince(requestStartedAt));
-                        appendRuntime(claim, guard, List.of(runtime(INVALID_CONVERSATION_HISTORY)), ConversationStore.JobUpdate.COMPLETE);
+                        appendRuntime(claim, guard, List.of(runtime(INVALID_CONVERSATION_HISTORY)),
+                                ConversationStore.JobUpdate.COMPLETE, resultTracker);
                         return;
                     }
                     if (failure.kind() == ModelCallFailure.Kind.CONTEXT_TOO_LARGE
-                            && recoverOverflow(claim, guard, reservation, context, elapsedSince(requestStartedAt))) {
+                            && recoverOverflow(claim, guard, reservation, context, elapsedSince(requestStartedAt), resultTracker)) {
                         continue;
                     }
-                    if (handleModelFailure(claim, guard, reservation, failure, elapsedSince(requestStartedAt))) {
+                    if (handleModelFailure(claim, guard, reservation, failure,
+                            elapsedSince(requestStartedAt), resultTracker)) {
                         continue;
                     }
                     return;
                 }
                 if (continuation.isPresent() && !routeId.equals(continuation.orElseThrow().modelRouteId())) {
-                    appendRuntime(claim, guard, List.of(runtime(MODEL_UNAVAILABLE)), ConversationStore.JobUpdate.COMPLETE);
+                    appendRuntime(claim, guard, List.of(runtime(MODEL_UNAVAILABLE)),
+                            ConversationStore.JobUpdate.COMPLETE, resultTracker);
                     return;
                 }
                 if (!guard.stillOwned()) {
@@ -185,12 +194,13 @@ public final class MessageJobService implements MessageJobPort {
                 if (reply instanceof ModelReply.Text text) {
                     appendResponse(claim, guard, List.of(new ConversationStore.AssistantData(text.message())),
                             ConversationStore.JobUpdate.COMPLETE, Optional.empty(), checkpoint(result, activeModelDescriptor, ordinal,
-                                    requestShapeFingerprint, context.compaction().map(ContextCompaction::generation).orElse(0L)));
+                                    requestShapeFingerprint, context.compaction().map(ContextCompaction::generation).orElse(0L)), resultTracker);
                     return;
                 }
                 ModelReply.UseTools useTools = (ModelReply.UseTools) reply;
                 if (ordinal == maxModelCalls) {
-                    appendRuntime(claim, guard, List.of(runtime(MODEL_CALL_LIMIT_REACHED)), ConversationStore.JobUpdate.COMPLETE);
+                    appendRuntime(claim, guard, List.of(runtime(MODEL_CALL_LIMIT_REACHED)),
+                            ConversationStore.JobUpdate.COMPLETE, resultTracker);
                     return;
                 }
                 List<ConversationStore.MessageData> messages = toolBatch(claim, guard, ordinal, useTools, tools);
@@ -199,7 +209,7 @@ public final class MessageJobService implements MessageJobPort {
                 }
                 if (!appendResponse(claim, guard, messages, ConversationStore.JobUpdate.KEEP_WORKING, continuation,
                         checkpoint(result, activeModelDescriptor, ordinal, requestShapeFingerprint,
-                                context.compaction().map(ContextCompaction::generation).orElse(0L)))) {
+                                context.compaction().map(ContextCompaction::generation).orElse(0L)), resultTracker)) {
                     return;
                 }
             }
@@ -248,13 +258,15 @@ public final class MessageJobService implements MessageJobPort {
             WorkGuard guard,
             ReservationState reservation,
             ContextState context,
-            Duration duration) {
+            Duration duration,
+            ProcessingResultTracker resultTracker) {
         logModelFailure(claim, reservation.ordinal(), ModelCallFailure.Kind.CONTEXT_TOO_LARGE, duration);
         if (conversationStore.hasOverflowCompaction(claim.messageJobId())) {
-            appendRuntime(claim, guard, List.of(runtime(CONTEXT_TOO_LARGE)), ConversationStore.JobUpdate.COMPLETE);
+            appendRuntime(claim, guard, List.of(runtime(CONTEXT_TOO_LARGE)),
+                    ConversationStore.JobUpdate.COMPLETE, resultTracker);
             return false;
         }
-        return compact(claim, guard, new ReservationState(), context, ContextCompaction.Reason.OVERFLOW);
+        return compact(claim, guard, new ReservationState(), context, ContextCompaction.Reason.OVERFLOW, resultTracker);
     }
 
     private boolean compact(
@@ -262,17 +274,20 @@ public final class MessageJobService implements MessageJobPort {
             WorkGuard guard,
             ReservationState reservation,
             ContextState context,
-            ContextCompaction.Reason reason) {
+            ContextCompaction.Reason reason,
+            ProcessingResultTracker resultTracker) {
         if (context.projection().isEmpty()) {
             logCompaction(claim, "compact_failure", "NO_PROJECTION", context.estimateTokens(), 0L);
-            appendRuntime(claim, guard, List.of(runtime(CONTEXT_TOO_LARGE)), ConversationStore.JobUpdate.COMPLETE);
+            appendRuntime(claim, guard, List.of(runtime(CONTEXT_TOO_LARGE)),
+                    ConversationStore.JobUpdate.COMPLETE, resultTracker);
             return false;
         }
         ContextUsageProjection projection = context.projection().orElseThrow();
         Optional<CompactionBoundary> boundary = selectBoundary(claim, context, projection.model());
         if (boundary.isEmpty()) {
             logCompaction(claim, "compact_failure", "NO_BOUNDARY", context.estimateTokens(), projection.model().contextWindowTokens());
-            appendRuntime(claim, guard, List.of(runtime(CONTEXT_TOO_LARGE)), ConversationStore.JobUpdate.COMPLETE);
+            appendRuntime(claim, guard, List.of(runtime(CONTEXT_TOO_LARGE)),
+                    ConversationStore.JobUpdate.COMPLETE, resultTracker);
             return false;
         }
         CompactionBoundary selected = boundary.orElseThrow();
@@ -284,11 +299,12 @@ public final class MessageJobService implements MessageJobPort {
                     selected.history().size(), 0));
         } catch (BudgetExhausted exception) {
             logCompaction(claim, "compact_failure", "MODEL_LIMIT", context.estimateTokens(), projection.model().contextWindowTokens());
-            appendRuntime(claim, guard, List.of(runtime(MODEL_CALL_LIMIT_REACHED)), ConversationStore.JobUpdate.COMPLETE);
+            appendRuntime(claim, guard, List.of(runtime(MODEL_CALL_LIMIT_REACHED)),
+                    ConversationStore.JobUpdate.COMPLETE, resultTracker);
             return false;
         } catch (ModelCallFailure failure) {
             logCompaction(claim, "compact_failure", failureCategory(failure.kind()), context.estimateTokens(), projection.model().contextWindowTokens());
-            return handleCompactionFailure(claim, guard, reservation, failure);
+            return handleCompactionFailure(claim, guard, reservation, failure, resultTracker);
         }
         if (!guard.stillOwned()) {
             return false;
@@ -298,7 +314,8 @@ public final class MessageJobService implements MessageJobPort {
             compactedSummary = new ContextSummary(summary);
         } catch (IllegalArgumentException exception) {
             logCompaction(claim, "compact_failure", "SUMMARY_INVALID", context.estimateTokens(), projection.model().contextWindowTokens());
-            appendRuntime(claim, guard, List.of(runtime(COMPACTION_FAILED)), ConversationStore.JobUpdate.COMPLETE);
+            appendRuntime(claim, guard, List.of(runtime(COMPACTION_FAILED)),
+                    ConversationStore.JobUpdate.COMPLETE, resultTracker);
             return false;
         }
         ContextUsageProjection afterProjection = new ContextUsageProjection(projection.model(), projection.systemPrompt(),
@@ -313,6 +330,7 @@ public final class MessageJobService implements MessageJobPort {
             return guard.stillOwned();
         } catch (StaleWorkClaimException exception) {
             logCompaction(claim, "compact_failure", "OWNERSHIP_LOST", context.estimateTokens(), projection.model().contextWindowTokens());
+            resultTracker.ownershipLost();
             return false;
         }
     }
@@ -321,12 +339,15 @@ public final class MessageJobService implements MessageJobPort {
             MessageWorkClaim claim,
             WorkGuard guard,
             ReservationState reservation,
-            ModelCallFailure failure) {
+            ModelCallFailure failure,
+            ProcessingResultTracker resultTracker) {
         logModelFailure(claim, reservation.ordinal(), failure.kind(), Duration.ZERO);
-        if (failure.kind() == ModelCallFailure.Kind.TRANSIENT && reservation.ordinal() < maxModelCalls && scheduleRetry(claim, guard)) {
+        if (failure.kind() == ModelCallFailure.Kind.TRANSIENT && reservation.ordinal() < maxModelCalls
+                && scheduleRetry(claim, guard, resultTracker)) {
             return false;
         }
-        appendRuntime(claim, guard, List.of(runtime(COMPACTION_FAILED)), ConversationStore.JobUpdate.COMPLETE);
+        appendRuntime(claim, guard, List.of(runtime(COMPACTION_FAILED)),
+                ConversationStore.JobUpdate.COMPLETE, resultTracker);
         return false;
     }
 
@@ -492,28 +513,33 @@ public final class MessageJobService implements MessageJobPort {
             WorkGuard guard,
             ReservationState reservation,
             ModelCallFailure failure,
-            Duration duration) {
+            Duration duration,
+            ProcessingResultTracker resultTracker) {
         int ordinal = reservation.ordinal();
         logModelFailure(claim, ordinal, failure.kind(), duration);
         if (failure.kind() == ModelCallFailure.Kind.CORRECTABLE) {
             ConversationStore.JobUpdate update = ordinal < maxModelCalls
                     ? ConversationStore.JobUpdate.KEEP_WORKING : ConversationStore.JobUpdate.COMPLETE;
-            return appendRuntime(claim, guard, List.of(runtime(MODEL_OUTPUT_INVALID)), update)
+            return appendRuntime(claim, guard, List.of(runtime(MODEL_OUTPUT_INVALID)), update, resultTracker)
                     && update == ConversationStore.JobUpdate.KEEP_WORKING;
         }
         if (failure.kind() == ModelCallFailure.Kind.CONTEXT_TOO_LARGE) {
-            appendRuntime(claim, guard, List.of(runtime(CONTEXT_TOO_LARGE)), ConversationStore.JobUpdate.COMPLETE);
+            appendRuntime(claim, guard, List.of(runtime(CONTEXT_TOO_LARGE)),
+                    ConversationStore.JobUpdate.COMPLETE, resultTracker);
             return false;
         }
-        if (failure.kind() == ModelCallFailure.Kind.TRANSIENT && ordinal < maxModelCalls && scheduleRetry(claim, guard)) {
+        if (failure.kind() == ModelCallFailure.Kind.TRANSIENT && ordinal < maxModelCalls
+                && scheduleRetry(claim, guard, resultTracker)) {
             return false;
         }
-        appendRuntime(claim, guard, List.of(runtime(MODEL_UNAVAILABLE)), ConversationStore.JobUpdate.COMPLETE);
+        appendRuntime(claim, guard, List.of(runtime(MODEL_UNAVAILABLE)),
+                ConversationStore.JobUpdate.COMPLETE, resultTracker);
         return false;
     }
 
-    private boolean scheduleRetry(MessageWorkClaim claim, WorkGuard guard) {
+    private boolean scheduleRetry(MessageWorkClaim claim, WorkGuard guard, ProcessingResultTracker resultTracker) {
         if (!guard.stillOwned()) {
+            resultTracker.ownershipLost();
             return false;
         }
         Optional<ConversationStore.MessageJobProjection> job = conversationStore.readJob(claim.messageJobId());
@@ -523,8 +549,11 @@ public final class MessageJobService implements MessageJobPort {
         Duration delay = retryDelay(job.orElseThrow().retryCount());
         boolean scheduled = conversationStore.scheduleRetry(claim, delay);
         if (scheduled) {
+            resultTracker.retryScheduled();
             telemetry.retry("MODEL", delay);
             logRetry(claim, "MODEL", delay);
+        } else {
+            resultTracker.ownershipLost();
         }
         return scheduled;
     }
@@ -541,8 +570,9 @@ public final class MessageJobService implements MessageJobPort {
             MessageWorkClaim claim,
             WorkGuard guard,
             List<ConversationStore.MessageData> messages,
-            ConversationStore.JobUpdate update) {
-        return appendRuntime(claim, guard, messages, update, Optional.empty());
+            ConversationStore.JobUpdate update,
+            ProcessingResultTracker resultTracker) {
+        return appendRuntime(claim, guard, messages, update, Optional.empty(), resultTracker);
     }
 
     private boolean appendRuntime(
@@ -550,12 +580,17 @@ public final class MessageJobService implements MessageJobPort {
             WorkGuard guard,
             List<ConversationStore.MessageData> messages,
             ConversationStore.JobUpdate update,
-            Optional<ModelContinuation> continuation) {
+            Optional<ModelContinuation> continuation,
+            ProcessingResultTracker resultTracker) {
         if (!guard.stillOwned()) {
+            resultTracker.ownershipLost();
             return false;
         }
         try {
             conversationStore.append(claim, new ConversationStore.MessageBatch(messages, update, continuation), clock.instant());
+            if (update == ConversationStore.JobUpdate.COMPLETE) {
+                resultTracker.completed();
+            }
             for (ConversationStore.MessageData message : messages) {
                 if (message instanceof ConversationStore.RuntimeData runtime) {
                     telemetry.feedback(runtime.code());
@@ -563,30 +598,43 @@ public final class MessageJobService implements MessageJobPort {
             }
             return guard.stillOwned();
         } catch (StaleWorkClaimException exception) {
+            resultTracker.ownershipLost();
             return false;
         }
     }
 
     private boolean appendResponse(MessageWorkClaim claim, WorkGuard guard, List<ConversationStore.MessageData> messages,
             ConversationStore.JobUpdate update, Optional<ModelContinuation> continuation,
-            Optional<ConversationStore.UsageCheckpointData> checkpoint) {
+            Optional<ConversationStore.UsageCheckpointData> checkpoint,
+            ProcessingResultTracker resultTracker) {
         if (!guard.stillOwned()) {
+            resultTracker.ownershipLost();
             return false;
         }
         try {
             conversationStore.append(claim, new ConversationStore.MessageBatch(messages, update, continuation, checkpoint), clock.instant());
+            if (update == ConversationStore.JobUpdate.COMPLETE) {
+                resultTracker.completed();
+            }
             return guard.stillOwned();
         } catch (StaleWorkClaimException exception) {
+            resultTracker.ownershipLost();
             return false;
         }
     }
 
-    private void recoverStorageFailure(MessageWorkClaim claim, WorkGuard guard, ConversationStoreFailure failure) {
+    private void recoverStorageFailure(
+            MessageWorkClaim claim,
+            WorkGuard guard,
+            ConversationStoreFailure failure,
+            ProcessingResultTracker resultTracker) {
         if (!guard.stillOwned()) {
+            resultTracker.ownershipLost();
             return;
         }
         if (failure.kind() == ConversationStoreFailure.Kind.INVALID_HISTORY) {
-            appendRuntime(claim, guard, List.of(runtime(INVALID_CONVERSATION_HISTORY)), ConversationStore.JobUpdate.COMPLETE);
+            appendRuntime(claim, guard, List.of(runtime(INVALID_CONVERSATION_HISTORY)),
+                    ConversationStore.JobUpdate.COMPLETE, resultTracker);
             return;
         }
         try {
@@ -598,14 +646,18 @@ public final class MessageJobService implements MessageJobPort {
                 Duration delay = retryDelay(job.orElseThrow().retryCount());
                 boolean scheduled = conversationStore.scheduleRetry(claim, delay);
                 if (scheduled) {
+                    resultTracker.retryScheduled();
                     telemetry.retry("STORAGE", delay);
                     logRetry(claim, "STORAGE", delay);
+                } else {
+                    resultTracker.ownershipLost();
                 }
                 return;
             }
-            appendRuntime(claim, guard, List.of(runtime(MODEL_UNAVAILABLE)), ConversationStore.JobUpdate.COMPLETE);
+            appendRuntime(claim, guard, List.of(runtime(MODEL_UNAVAILABLE)),
+                    ConversationStore.JobUpdate.COMPLETE, resultTracker);
         } catch (RuntimeException ignored) {
-            return;
+            resultTracker.stateUnconfirmed();
         }
     }
 
@@ -735,6 +787,40 @@ public final class MessageJobService implements MessageJobPort {
     }
 
     private record CompactionBoundary(SessionSequence boundary, List<SessionMessage> history, List<SessionMessage> suffix) {
+    }
+
+    private static final class ProcessingResultTracker {
+
+        private Optional<MessageJobProcessingResult> result = Optional.empty();
+
+        private void completed() {
+            result = Optional.of(MessageJobProcessingResult.COMPLETED);
+        }
+
+        private void retryScheduled() {
+            result = Optional.of(MessageJobProcessingResult.RETRY_SCHEDULED);
+        }
+
+        private void ownershipLost() {
+            if (result.isEmpty()) {
+                result = Optional.of(MessageJobProcessingResult.OWNERSHIP_LOST);
+            }
+        }
+
+        private void stateUnconfirmed() {
+            if (result.isEmpty()) {
+                result = Optional.of(MessageJobProcessingResult.STATE_UNCONFIRMED);
+            }
+        }
+
+        private MessageJobProcessingResult result(WorkGuard guard) {
+            if (result.isPresent()) {
+                return result.orElseThrow();
+            }
+            return guard.stillOwned()
+                    ? MessageJobProcessingResult.STATE_UNCONFIRMED
+                    : MessageJobProcessingResult.OWNERSHIP_LOST;
+        }
     }
 
     private static final class ReservationState {

@@ -1,7 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <configuration>
-    <property name="RUNTIME_LOG_DIR" value="${SESSION_AGENT_RUNTIME_LOG_DIR:-/app/logs}"/>
-
     <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
         <encoder class="ch.qos.logback.classic.encoder.JsonEncoder">
             <withSequenceNumber>false</withSequenceNumber>
@@ -16,9 +14,9 @@
     </appender>
 
     <appender name="ROLLING_FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
-        <file>${RUNTIME_LOG_DIR}/session-agent-runtime.log</file>
+        <file>/app/logs/session-agent-runtime.log</file>
         <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
-            <fileNamePattern>${RUNTIME_LOG_DIR}/session-agent-runtime.%d{yyyy-MM-dd}.%i.log.gz</fileNamePattern>
+            <fileNamePattern>/app/logs/session-agent-runtime.%d{yyyy-MM-dd}.%i.log.gz</fileNamePattern>
             <maxFileSize>100MB</maxFileSize>
             <maxHistory>7</maxHistory>
             <totalSizeCap>500MB</totalSizeCap>

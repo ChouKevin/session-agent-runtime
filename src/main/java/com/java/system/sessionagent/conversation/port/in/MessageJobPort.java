@@ -4,5 +4,5 @@ import com.java.system.sessionagent.conversation.domain.MessageWorkClaim;
 
 public interface MessageJobPort {
 
-    void process(MessageWorkClaim claim, WorkGuard workGuard);
+    MessageJobProcessingResult process(MessageWorkClaim claim, WorkGuard workGuard);
 }

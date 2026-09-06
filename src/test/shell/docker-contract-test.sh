@@ -123,12 +123,13 @@ grep -Fq '${SESSION_AGENT_LOG_DIR:-../logs}:/app/logs' "${compose_file}" || {
 }
 
 logback_configuration="${runtime_root}/src/main/resources/logback-spring.xml"
-grep -Fq 'value="${SESSION_AGENT_RUNTIME_LOG_DIR:-/app/logs}"' "${logback_configuration}" || {
-    printf 'runtime logback configuration must default to the fixed container log directory\n' >&2
+grep -Fq '<file>/app/logs/session-agent-runtime.log</file>' "${logback_configuration}" || {
+    printf 'runtime logback configuration must use the fixed active log filename\n' >&2
     exit 1
 }
-grep -Fq '<file>${RUNTIME_LOG_DIR}/session-agent-runtime.log</file>' "${logback_configuration}" || {
-    printf 'runtime logback configuration must use the fixed active log filename\n' >&2
+grep -Fq '<fileNamePattern>/app/logs/session-agent-runtime.%d{yyyy-MM-dd}.%i.log.gz</fileNamePattern>' \
+        "${logback_configuration}" || {
+    printf 'runtime logback configuration must use the fixed archive path\n' >&2
     exit 1
 }
 grep -Fq '<maxFileSize>100MB</maxFileSize>' "${logback_configuration}" || {

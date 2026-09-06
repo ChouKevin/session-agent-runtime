@@ -100,8 +100,12 @@ public final class SlackPostgresRootIntake implements SlackRootIntakePort {
             SlackSessionResolution sessionResolution) {
         UUID sessionId = UUID.fromString(receipt.sessionId().value());
         UUID jobId = UUID.fromString(receipt.messageJobId().value());
-        persistLogicalReceipt(intake, SlackIntakeClassification.ACCEPTED, sessionId, jobId);
+        boolean newLogicalMessage = persistLogicalReceipt(
+                intake, SlackIntakeClassification.ACCEPTED, sessionId, jobId);
         persistAndVerifyEventReceipt(intake, SlackIntakeClassification.ACCEPTED, jobId);
+        if (!newLogicalMessage) {
+            return SlackIntakeResult.duplicateAccepted(sessionId, jobId);
+        }
         return sessionResolution == SlackSessionResolution.CREATED
                 ? SlackIntakeResult.newSessionAccepted(sessionId, jobId)
                 : SlackIntakeResult.resolvedSessionAccepted(sessionId, jobId);
@@ -147,9 +151,9 @@ public final class SlackPostgresRootIntake implements SlackRootIntakePort {
     }
 
     private SlackIntakeResult ignore(SlackRootIntake intake) {
-        persistLogicalReceipt(intake, intake.classification(), null, null);
+        boolean newLogicalMessage = persistLogicalReceipt(intake, intake.classification(), null, null);
         persistAndVerifyEventReceipt(intake, intake.classification(), null);
-        return SlackIntakeResult.newIgnored();
+        return newLogicalMessage ? SlackIntakeResult.newIgnored() : SlackIntakeResult.duplicateIgnored();
     }
 
     private SlackIntakeResult duplicateAccepted(SlackRootIntake intake) {
@@ -158,12 +162,12 @@ public final class SlackPostgresRootIntake implements SlackRootIntakePort {
         return SlackIntakeResult.duplicateAccepted(receipt.sessionId(), receipt.messageJobId());
     }
 
-    private void persistLogicalReceipt(
+    private boolean persistLogicalReceipt(
             SlackRootIntake intake,
             SlackIntakeClassification classification,
             UUID sessionId,
             UUID jobId) {
-        jdbcTemplate.update("""
+        int insertedRows = jdbcTemplate.update("""
                 insert into slack_message_receipt(team_id, channel_id, message_ts, classification, session_id, message_job_id, created_at)
                 values (?, ?, ?, ?, ?, ?, ?)
                 on conflict (team_id, channel_id, message_ts) do nothing
@@ -173,6 +177,7 @@ public final class SlackPostgresRootIntake implements SlackRootIntakePort {
         if (!messageReceipt.orElseThrow().matches(classification, sessionId, jobId)) {
             throw new CommittedLogicalOutcomeRaceException();
         }
+        return insertedRows == 1;
     }
 
     private void persistAndVerifyEventReceipt(

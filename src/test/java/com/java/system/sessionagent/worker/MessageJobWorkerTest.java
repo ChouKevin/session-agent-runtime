@@ -3,11 +3,11 @@ package com.java.system.sessionagent.worker;
 import ch.qos.logback.classic.Logger;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
-import com.java.system.sessionagent.conversation.domain.JobStatus;
 import com.java.system.sessionagent.conversation.domain.MessageJobId;
 import com.java.system.sessionagent.conversation.domain.MessageWorkClaim;
 import com.java.system.sessionagent.conversation.domain.SessionId;
 import com.java.system.sessionagent.conversation.port.in.MessageJobPort;
+import com.java.system.sessionagent.conversation.port.in.MessageJobProcessingResult;
 import com.java.system.sessionagent.conversation.port.out.ConversationStore;
 import org.junit.jupiter.api.Test;
 import org.slf4j.LoggerFactory;
@@ -27,6 +27,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -78,13 +79,28 @@ class MessageJobWorkerTest {
         org.mockito.Mockito.doAnswer(invocation -> {
             renewalTask.get().run();
             assertThat(invocation.getArgument(1, com.java.system.sessionagent.conversation.port.in.WorkGuard.class).stillOwned()).isFalse();
-            return null;
+            return MessageJobProcessingResult.OWNERSHIP_LOST;
         }).when(jobs).process(org.mockito.Mockito.eq(claim), any());
+        when(store.readJob(claim.messageJobId())).thenReturn(Optional.of(new ConversationStore.MessageJobProjection(
+                claim.messageJobId(), claim.sessionId(), com.java.system.sessionagent.conversation.domain.JobStatus.DONE, 1, 1)));
+        Logger logger = (Logger) LoggerFactory.getLogger(MessageJobWorker.class);
+        ListAppender<ILoggingEvent> appender = new ListAppender<>();
+        appender.start();
+        logger.addAppender(appender);
 
-        assertThat(worker(store, jobs, scheduler).poll()).isTrue();
+        try {
+            assertThat(worker(store, jobs, scheduler).poll()).isTrue();
+        } finally {
+            logger.detachAppender(appender);
+            appender.stop();
+        }
 
         verify(store).extendClaim(claim, Duration.ofSeconds(30));
+        verify(store, never()).readJob(claim.messageJobId());
         verify(renewal).cancel(false);
+        assertThat(appender.list).extracting(event -> keyValues(event).get("event"))
+                .contains("message_job_ownership_lost")
+                .doesNotContain("message_job_completed");
     }
 
     @Test
@@ -93,13 +109,13 @@ class MessageJobWorkerTest {
         MessageWorkClaim claim = new MessageWorkClaim(new MessageJobId("job"), new SessionId("session"), "worker", 1,
                 Instant.parse("2026-08-31T00:00:00Z"), Instant.parse("2026-08-31T00:01:00Z"));
         when(store.claimNext(any(String.class), any(Duration.class))).thenReturn(Optional.of(claim));
-        when(store.readJob(claim.messageJobId())).thenReturn(Optional.of(new ConversationStore.MessageJobProjection(
-                claim.messageJobId(), claim.sessionId(), JobStatus.RETRY, 1, 1)));
         ScheduledExecutorService scheduler = mock(ScheduledExecutorService.class);
         ScheduledFuture<?> renewal = mock(ScheduledFuture.class);
         org.mockito.Mockito.doReturn(renewal).when(scheduler).scheduleAtFixedRate(any(Runnable.class),
                 org.mockito.ArgumentMatchers.anyLong(), org.mockito.ArgumentMatchers.anyLong(), any());
-        MessageJobWorker worker = worker(store, mock(MessageJobPort.class), scheduler);
+        MessageJobPort jobs = mock(MessageJobPort.class);
+        when(jobs.process(org.mockito.Mockito.eq(claim), any())).thenReturn(MessageJobProcessingResult.RETRY_SCHEDULED);
+        MessageJobWorker worker = worker(store, jobs, scheduler);
         Logger logger = (Logger) LoggerFactory.getLogger(MessageJobWorker.class);
         ListAppender<ILoggingEvent> appender = new ListAppender<>();
         appender.start();
@@ -120,7 +136,7 @@ class MessageJobWorkerTest {
         assertThat(keyValues(result)).containsEntry("outcome", "RETRY_SCHEDULED")
                 .containsEntry("sessionId", "session")
                 .containsEntry("messageJobId", "job");
-        verify(store).readJob(claim.messageJobId());
+        verify(store, never()).readJob(claim.messageJobId());
         verify(renewal).cancel(false);
     }
 

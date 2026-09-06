@@ -24,6 +24,7 @@ import com.java.system.sessionagent.conversation.domain.ToolRequest;
 import com.java.system.sessionagent.conversation.domain.UserMessage;
 import com.java.system.sessionagent.conversation.domain.SessionId;
 import com.java.system.sessionagent.conversation.domain.SessionSequence;
+import com.java.system.sessionagent.conversation.port.in.MessageJobProcessingResult;
 import com.java.system.sessionagent.conversation.port.out.ConversationModel;
 import com.java.system.sessionagent.conversation.port.out.ConversationStore;
 import com.java.system.sessionagent.conversation.port.out.ConversationStoreFailure;
@@ -31,6 +32,7 @@ import com.java.system.sessionagent.conversation.port.out.ModelCallFailure;
 import com.java.system.sessionagent.conversation.port.out.ModelCallReservation;
 import com.java.system.sessionagent.conversation.port.out.ModelRouteMismatchException;
 import com.java.system.sessionagent.conversation.port.out.NoOpConversationTelemetry;
+import com.java.system.sessionagent.conversation.port.out.StaleWorkClaimException;
 import com.java.system.sessionagent.tool.domain.ToolName;
 import com.java.system.sessionagent.tool.port.ToolBinding;
 import com.java.system.sessionagent.tool.port.ToolCatalog;
@@ -78,8 +80,9 @@ class MessageJobServiceTest {
             return result(new ModelReply.Text("```json\n{\"answer\":\"plain completion\"}\n```"));
         });
 
-        service(store, model, catalog()).process(claim, () -> true);
+        MessageJobProcessingResult result = service(store, model, catalog()).process(claim, () -> true);
 
+        assertThat(result).isEqualTo(MessageJobProcessingResult.COMPLETED);
         org.mockito.ArgumentCaptor<ConversationStore.MessageBatch> batch = org.mockito.ArgumentCaptor.forClass(ConversationStore.MessageBatch.class);
         verify(store).append(eq(claim), batch.capture(), any(Instant.class));
         assertThat(batch.getValue()).isEqualTo(new ConversationStore.MessageBatch(List.of(
@@ -524,15 +527,51 @@ class MessageJobServiceTest {
         ListAppender<ILoggingEvent> appender = new ListAppender<>();
         appender.start();
         logger.addAppender(appender);
+        MessageJobProcessingResult result;
         try {
-            service(store, model, catalog()).process(claim, () -> true);
+            result = service(store, model, catalog()).process(claim, () -> true);
         } finally {
             logger.detachAppender(appender);
             appender.stop();
         }
 
         verify(store).scheduleRetry(eq(claim), any(Duration.class));
+        assertThat(result).isEqualTo(MessageJobProcessingResult.OWNERSHIP_LOST);
         assertThat(appender.list).noneMatch(event -> "message_job_retry".equals(keyValue(event, "event")));
+    }
+
+    @Test
+    void reports_retry_scheduled_only_after_the_claim_guarded_storage_transition_succeeds() {
+        ConversationStore store = mock(ConversationStore.class);
+        MessageWorkClaim claim = claim();
+        when(store.loadHistory(claim.sessionId())).thenThrow(ConversationStoreFailure.transientFailure(
+                new IllegalStateException("storage unavailable")));
+        when(store.readJob(claim.messageJobId())).thenReturn(Optional.of(new ConversationStore.MessageJobProjection(
+                claim.messageJobId(), claim.sessionId(), JobStatus.WORKING, 0, 0)));
+        when(store.scheduleRetry(eq(claim), any(Duration.class))).thenReturn(true);
+        ConversationModel model = model(TEST_ROUTE_ID, (request, reservation, usage) -> {
+            throw new AssertionError("Provider must not be called after the storage failure");
+        });
+
+        MessageJobProcessingResult result = service(store, model, catalog()).process(claim, () -> true);
+
+        assertThat(result).isEqualTo(MessageJobProcessingResult.RETRY_SCHEDULED);
+        verify(store).scheduleRetry(eq(claim), any(Duration.class));
+    }
+
+    @Test
+    void reports_ownership_lost_when_the_claim_fence_is_stale_before_processing() {
+        ConversationStore store = mock(ConversationStore.class);
+        MessageWorkClaim claim = claim();
+        ConversationModel model = model(TEST_ROUTE_ID, (request, reservation, usage) -> {
+            throw new AssertionError("Provider must not be called for a stale claim");
+        });
+        org.mockito.Mockito.doThrow(new StaleWorkClaimException()).when(store).bindModelRoute(claim, TEST_ROUTE_ID);
+
+        MessageJobProcessingResult result = service(store, model, catalog()).process(claim, () -> true);
+
+        assertThat(result).isEqualTo(MessageJobProcessingResult.OWNERSHIP_LOST);
+        verify(store, org.mockito.Mockito.never()).append(any(), any(), any());
     }
 
     @Test

@@ -13,11 +13,13 @@ import org.junit.jupiter.api.io.TempDir;
 import org.springframework.test.util.ReflectionTestUtils;
 
 import java.io.ByteArrayOutputStream;
+import java.io.InputStream;
 import java.io.PrintStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Objects;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -30,17 +32,27 @@ class LoggingConfigurationTest {
 
     @Test
     void configured_appenders_emit_the_same_one_line_safe_json_and_enforce_the_rolling_contract() throws Exception {
-        String previousLogDirectory = System.getProperty("SESSION_AGENT_RUNTIME_LOG_DIR");
         PrintStream previousOutput = System.out;
         ByteArrayOutputStream consoleBytes = new ByteArrayOutputStream();
         LoggerContext context = new LoggerContext();
         context.setMDCAdapter(new LogbackMDCAdapter());
         try {
-            System.setProperty("SESSION_AGENT_RUNTIME_LOG_DIR", temporaryDirectory.toString());
+            String productionConfiguration;
+            try (InputStream configuration = Objects.requireNonNull(
+                    getClass().getResourceAsStream("/logback-spring.xml"), "Logback configuration must exist")) {
+                productionConfiguration = new String(configuration.readAllBytes(), StandardCharsets.UTF_8);
+            }
+            assertThat(productionConfiguration)
+                    .contains("<file>/app/logs/session-agent-runtime.log</file>")
+                    .contains("<fileNamePattern>/app/logs/session-agent-runtime.%d{yyyy-MM-dd}.%i.log.gz</fileNamePattern>")
+                    .doesNotContain("SESSION_AGENT_RUNTIME_LOG_DIR");
+            String isolatedConfiguration = productionConfiguration.replace("/app/logs", temporaryDirectory.toString());
+            Path isolatedConfigurationFile = temporaryDirectory.resolve("logback-test.xml");
+            Files.writeString(isolatedConfigurationFile, isolatedConfiguration, StandardCharsets.UTF_8);
             System.setOut(new PrintStream(consoleBytes, true, StandardCharsets.UTF_8));
             JoranConfigurator configurator = new JoranConfigurator();
             configurator.setContext(context);
-            configurator.doConfigure(getClass().getResource("/logback-spring.xml"));
+            configurator.doConfigure(isolatedConfigurationFile.toFile());
 
             ch.qos.logback.classic.Logger logger = context.getLogger("logging-contract");
             context.getMDCAdapter().put("unsafeMdc", "forbidden-mdc");
@@ -87,11 +99,6 @@ class LoggingConfigurationTest {
         } finally {
             context.stop();
             System.setOut(previousOutput);
-            if (previousLogDirectory == null) { // cs-allow System property API uses null for absence
-                System.clearProperty("SESSION_AGENT_RUNTIME_LOG_DIR");
-            } else {
-                System.setProperty("SESSION_AGENT_RUNTIME_LOG_DIR", previousLogDirectory);
-            }
         }
     }
 

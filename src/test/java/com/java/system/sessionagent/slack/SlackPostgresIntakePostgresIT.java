@@ -1,5 +1,8 @@
 package com.java.system.sessionagent.slack;
 
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.AppenderBase;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.java.system.sessionagent.conversation.application.ConversationMessageService;
 import com.java.system.sessionagent.conversation.application.MessageJobService;
@@ -32,6 +35,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
+import org.slf4j.LoggerFactory;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import org.testcontainers.postgresql.PostgreSQLContainer;
@@ -44,6 +48,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.Callable;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -52,6 +57,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 import java.util.UUID;
+import java.util.stream.Collectors;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -96,6 +102,48 @@ class SlackPostgresIntakePostgresIT {
         assertThat(count(jdbcTemplate, "select count(*) from source_message where source_type = 'slack'")).isEqualTo(1);
         assertThat(count(jdbcTemplate, "select count(*) from session_message where role = 'USER'")).isEqualTo(1);
         assertThat(count(jdbcTemplate, "select count(*) from message_job")).isEqualTo(1);
+    }
+
+    @Test
+    void logs_one_new_session_for_concurrent_same_event_and_overlapping_event_redelivery() throws Exception {
+        SlackEventAdapter adapter = new SlackEventAdapter("UBOT", intake());
+        Logger logger = (Logger) LoggerFactory.getLogger(SlackEventAdapter.class);
+        ConcurrentLogAppender appender = new ConcurrentLogAppender();
+        appender.start();
+        logger.addAppender(appender);
+        try {
+            SlackRootEvent sameEvent = rootEvent("event-same", "1.000001");
+            List<SlackEventOutcome> sameEventOutcomes = concurrently(() -> adapter.handle(sameEvent));
+            List<SlackEventOutcome> overlappingEventOutcomes = concurrently(() -> adapter.handle(rootEvent(
+                    "event-overlap-" + Thread.currentThread().threadId(), "2.000001")));
+
+            assertThat(sameEventOutcomes).containsOnly(SlackEventOutcome.ACCEPTED);
+            assertThat(overlappingEventOutcomes).containsOnly(SlackEventOutcome.ACCEPTED);
+        } finally {
+            logger.detachAppender(appender);
+            appender.stop();
+        }
+
+        List<Map<String, Object>> inboundLogs = appender.events().stream()
+                .map(SlackPostgresIntakePostgresIT::keyValues)
+                .filter(values -> "slack_inbound".equals(values.get("event")))
+                .toList();
+        assertThat(inboundLogs).hasSize(4);
+        assertThat(dispositionsFor(inboundLogs, "1.000001"))
+                .containsExactlyInAnyOrder("NEW_ACCEPTED", "DUPLICATE_ACCEPTED");
+        assertThat(dispositionsFor(inboundLogs, "2.000001"))
+                .containsExactlyInAnyOrder("NEW_ACCEPTED", "DUPLICATE_ACCEPTED");
+        assertThat(correlationsFor(inboundLogs, "1.000001", "sessionId")).doesNotContainNull().hasSize(1);
+        assertThat(correlationsFor(inboundLogs, "1.000001", "messageJobId")).doesNotContainNull().hasSize(1);
+        assertThat(correlationsFor(inboundLogs, "2.000001", "sessionId")).doesNotContainNull().hasSize(1);
+        assertThat(correlationsFor(inboundLogs, "2.000001", "messageJobId")).doesNotContainNull().hasSize(1);
+        assertThat(appender.events().stream().map(SlackPostgresIntakePostgresIT::keyValues)
+                .filter(values -> "session_created".equals(values.get("event")))).hasSize(2);
+        assertThat(appender.events().stream().map(SlackPostgresIntakePostgresIT::keyValues)
+                .filter(values -> "session_resolved".equals(values.get("event")))).hasSize(2);
+        JdbcTemplate jdbcTemplate = new JdbcTemplate(dataSource());
+        assertThat(count(jdbcTemplate, "select count(*) from conversation_session where source_type = 'slack'")).isEqualTo(2);
+        assertThat(count(jdbcTemplate, "select count(*) from message_job")).isEqualTo(2);
     }
 
     @Test
@@ -524,6 +572,25 @@ class SlackPostgresIntakePostgresIT {
         return replyIntake("event-" + messageTs, teamId, channelId, messageTs, messageTs, "U1", "hello");
     }
 
+    private static SlackRootEvent rootEvent(String eventId, String messageTs) {
+        return new SlackRootEvent(eventId, "T1", "C1", messageTs, "", "U1", "", "channel",
+                "<@UBOT> hello", "", false, false);
+    }
+
+    private static List<Object> dispositionsFor(List<Map<String, Object>> logs, String messageTs) {
+        return logs.stream().filter(values -> messageTs.equals(values.get("slackMessageTs")))
+                .map(values -> values.get("disposition")).toList();
+    }
+
+    private static List<Object> correlationsFor(List<Map<String, Object>> logs, String messageTs, String correlationName) {
+        return logs.stream().filter(values -> messageTs.equals(values.get("slackMessageTs")))
+                .map(values -> values.get(correlationName)).distinct().toList();
+    }
+
+    private static Map<String, Object> keyValues(ILoggingEvent event) {
+        return event.getKeyValuePairs().stream().collect(Collectors.toMap(pair -> pair.key, pair -> pair.value));
+    }
+
     private static SlackRootIntake replyIntake(
             String eventId,
             String teamId,
@@ -553,5 +620,19 @@ class SlackPostgresIntakePostgresIT {
 
     private Flyway flyway() {
         return Flyway.configure().dataSource(dataSource()).cleanDisabled(false).load();
+    }
+
+    private static final class ConcurrentLogAppender extends AppenderBase<ILoggingEvent> {
+
+        private final List<ILoggingEvent> events = new CopyOnWriteArrayList<>();
+
+        @Override
+        protected void append(ILoggingEvent event) {
+            events.add(event);
+        }
+
+        private List<ILoggingEvent> events() {
+            return List.copyOf(events);
+        }
     }
 }
