@@ -103,20 +103,23 @@ The shipped schema is a fresh V1 schema. Reset a disposable PostgreSQL database 
 
 Runtime emits one JSON object per line to both `docker compose logs` and a rolling host file. The active file is always `session-agent-runtime.log`; archives are named `session-agent-runtime.YYYY-MM-DD.N.log.gz`. Runtime rolls at 100 MB, keeps seven days, and caps retained archives at 500 MB. Docker's independent `json-file` driver remains at 100 MB with five files.
 
-Before `docker compose up`, create the bind directory and grant the non-root runtime UID/GID (10001) write access. The default is the repository `logs/` directory because `SESSION_AGENT_LOG_DIR` is resolved relative to `docker/compose.yaml`:
+Before `docker compose up`, prepare the bind directory for the non-root runtime UID/GID (10001). The default is the repository `logs/` directory because Compose resolves `../logs` relative to `docker/compose.yaml`:
 
 ```bash
-mkdir -p logs
-chown 10001:10001 logs
-# Or choose another prepared directory:
+sudo install -d -o 10001 -g 10001 -m 0755 logs
+# Or use an absolute host path for an override:
 export SESSION_AGENT_LOG_DIR=/srv/session-agent-runtime/logs
+sudo install -d -o 10001 -g 10001 -m 0755 "$SESSION_AGENT_LOG_DIR"
 ```
 
 Follow container output and the active host file independently:
 
 ```bash
 docker compose -f docker/compose.yaml logs -f session-agent-runtime
-tail -F "${SESSION_AGENT_LOG_DIR:-logs}/session-agent-runtime.log"
+# Default bind path, from the repository root:
+tail -F logs/session-agent-runtime.log
+# When SESSION_AGENT_LOG_DIR is set to the absolute override above:
+tail -F "$SESSION_AGENT_LOG_DIR/session-agent-runtime.log"
 ```
 
 The host directory is intentionally Git-ignored and keeps a stable active filename so a future Filebeat or Elastic Agent input can tail it. This POC does not deploy an ELK stack or a shipper. JSON lifecycle events contain only stable event names and safe correlation/outcome fields; Runtime never emits conversation text, Slack/model credentials, tool arguments/results, provider continuation data, or raw exception details in its lifecycle events.

@@ -36,7 +36,7 @@ public final class SlackPostgresRootIntake implements SlackRootIntakePort {
     }
 
     @Override
-    public SlackEventOutcome receive(SlackRootIntake intake) {
+    public SlackIntakeResult receive(SlackRootIntake intake) {
         SlackRootIntake requiredIntake = Objects.requireNonNull(intake, "Slack intake must not be null");
         try {
             return receiveInRequiredTransaction(requiredIntake);
@@ -45,12 +45,12 @@ public final class SlackPostgresRootIntake implements SlackRootIntakePort {
         }
     }
 
-    private SlackEventOutcome receiveInRequiredTransaction(SlackRootIntake intake) {
-        SlackEventOutcome outcome = transactionTemplate.execute(status -> receiveInTransaction(intake));
-        return Objects.requireNonNull(outcome, "Slack intake outcome must not be null");
+    private SlackIntakeResult receiveInRequiredTransaction(SlackRootIntake intake) {
+        SlackIntakeResult result = transactionTemplate.execute(status -> receiveInTransaction(intake));
+        return Objects.requireNonNull(result, "Slack intake result must not be null");
     }
 
-    private SlackEventOutcome receiveInTransaction(SlackRootIntake intake) {
+    private SlackIntakeResult receiveInTransaction(SlackRootIntake intake) {
         Optional<StoredEventReceipt> existingEvent = findEventReceipt(intake.eventId());
         if (existingEvent.isPresent()) {
             return verifyExistingEvent(intake, existingEvent.orElseThrow());
@@ -74,7 +74,7 @@ public final class SlackPostgresRootIntake implements SlackRootIntakePort {
         return acceptRoot(intake);
     }
 
-    private SlackEventOutcome acceptRoot(SlackRootIntake intake) {
+    private SlackIntakeResult acceptRoot(SlackRootIntake intake) {
         MessageReceipt receipt = receiveMessage(intake);
         UUID sessionId = UUID.fromString(receipt.sessionId().value());
         jdbcTemplate.update("""
@@ -84,47 +84,53 @@ public final class SlackPostgresRootIntake implements SlackRootIntakePort {
                 """, intake.teamId(), intake.channelId(), intake.rootThreadTs(), sessionId, createdAt());
         Optional<UUID> binding = findThreadBinding(intake);
         Assert.isTrue(binding.isPresent() && binding.orElseThrow().equals(sessionId), "Slack thread binding must be immutable");
-        return finishAccepted(intake, receipt);
+        return finishAccepted(intake, receipt, SlackSessionResolution.CREATED);
     }
 
-    private SlackEventOutcome accept(SlackRootIntake intake, UUID bindingSessionId) {
+    private SlackIntakeResult accept(SlackRootIntake intake, UUID bindingSessionId) {
         MessageReceipt receipt = receiveMessage(intake);
         Assert.isTrue(bindingSessionId.toString().equals(receipt.sessionId().value()),
                 "Slack reply must use its immutable thread session binding");
-        return finishAccepted(intake, receipt);
+        return finishAccepted(intake, receipt, SlackSessionResolution.RESOLVED);
     }
 
-    private SlackEventOutcome finishAccepted(SlackRootIntake intake, MessageReceipt receipt) {
+    private SlackIntakeResult finishAccepted(
+            SlackRootIntake intake,
+            MessageReceipt receipt,
+            SlackSessionResolution sessionResolution) {
         UUID sessionId = UUID.fromString(receipt.sessionId().value());
         UUID jobId = UUID.fromString(receipt.messageJobId().value());
         persistLogicalReceipt(intake, SlackIntakeClassification.ACCEPTED, sessionId, jobId);
         persistAndVerifyEventReceipt(intake, SlackIntakeClassification.ACCEPTED, jobId);
-        return SlackEventOutcome.ACCEPTED;
+        return sessionResolution == SlackSessionResolution.CREATED
+                ? SlackIntakeResult.newSessionAccepted(sessionId, jobId)
+                : SlackIntakeResult.resolvedSessionAccepted(sessionId, jobId);
     }
 
-    private SlackEventOutcome verifyExistingEvent(SlackRootIntake intake, StoredEventReceipt existing) {
+    private SlackIntakeResult verifyExistingEvent(SlackRootIntake intake, StoredEventReceipt existing) {
         Assert.isTrue(existing.matchesEnvelope(intake), "Slack event ID must retain one logical identity");
         if (!existing.isAccepted()) {
-            return SlackEventOutcome.IGNORED;
+            return SlackIntakeResult.duplicateIgnored();
         }
         if (intake.classification() != SlackIntakeClassification.ACCEPTED) {
-            return SlackEventOutcome.ACCEPTED;
+            return duplicateAccepted(intake);
         }
         MessageReceipt receipt = receiveMessage(intake);
+        UUID sessionId = UUID.fromString(receipt.sessionId().value());
         UUID jobId = UUID.fromString(receipt.messageJobId().value());
         Assert.isTrue(existing.matchesOutcome(SlackIntakeClassification.ACCEPTED, jobId),
                 "Slack event duplicate must retain its message job");
-        return SlackEventOutcome.ACCEPTED;
+        return SlackIntakeResult.duplicateAccepted(sessionId, jobId);
     }
 
-    private SlackEventOutcome replayLogicalMessage(SlackRootIntake intake, StoredMessageReceipt existing) {
+    private SlackIntakeResult replayLogicalMessage(SlackRootIntake intake, StoredMessageReceipt existing) {
         if (!existing.isAccepted()) {
             persistAndVerifyEventReceipt(intake, existing.classification(), null);
-            return SlackEventOutcome.IGNORED;
+            return SlackIntakeResult.duplicateIgnored();
         }
         if (intake.classification() != SlackIntakeClassification.ACCEPTED) {
             persistAndVerifyEventReceipt(intake, SlackIntakeClassification.ACCEPTED, existing.messageJobId());
-            return SlackEventOutcome.ACCEPTED;
+            return SlackIntakeResult.duplicateAccepted(existing.sessionId(), existing.messageJobId());
         }
         MessageReceipt receipt = receiveMessage(intake);
         UUID sessionId = UUID.fromString(receipt.sessionId().value());
@@ -132,7 +138,7 @@ public final class SlackPostgresRootIntake implements SlackRootIntakePort {
         Assert.isTrue(existing.matches(SlackIntakeClassification.ACCEPTED, sessionId, jobId),
                 "Slack logical message receipt must retain its committed outcome");
         persistAndVerifyEventReceipt(intake, SlackIntakeClassification.ACCEPTED, jobId);
-        return SlackEventOutcome.ACCEPTED;
+        return SlackIntakeResult.duplicateAccepted(sessionId, jobId);
     }
 
     private MessageReceipt receiveMessage(SlackRootIntake intake) {
@@ -140,10 +146,16 @@ public final class SlackPostgresRootIntake implements SlackRootIntakePort {
         return messageIntakePort.receive(message);
     }
 
-    private SlackEventOutcome ignore(SlackRootIntake intake) {
+    private SlackIntakeResult ignore(SlackRootIntake intake) {
         persistLogicalReceipt(intake, intake.classification(), null, null);
         persistAndVerifyEventReceipt(intake, intake.classification(), null);
-        return SlackEventOutcome.IGNORED;
+        return SlackIntakeResult.newIgnored();
+    }
+
+    private SlackIntakeResult duplicateAccepted(SlackRootIntake intake) {
+        StoredMessageReceipt receipt = findMessageReceipt(intake).orElseThrow();
+        Assert.isTrue(receipt.isAccepted(), "Accepted Slack event must retain its logical message receipt");
+        return SlackIntakeResult.duplicateAccepted(receipt.sessionId(), receipt.messageJobId());
     }
 
     private void persistLogicalReceipt(

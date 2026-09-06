@@ -1,7 +1,11 @@
 package com.java.system.sessionagent.conversation;
 
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import com.java.system.sessionagent.conversation.application.MessageJobRetryPolicy;
 import com.java.system.sessionagent.conversation.application.MessageJobService;
+import com.java.system.sessionagent.conversation.domain.JobStatus;
 import com.java.system.sessionagent.conversation.domain.MessageJobId;
 import com.java.system.sessionagent.conversation.domain.MessageRole;
 import com.java.system.sessionagent.conversation.domain.MessageWorkClaim;
@@ -34,6 +38,7 @@ import com.java.system.sessionagent.tool.port.ToolDefinition;
 import com.java.system.sessionagent.tool.port.ToolOutput;
 import com.java.system.sessionagent.tool.port.ToolSnapshot;
 import org.junit.jupiter.api.Test;
+import org.slf4j.LoggerFactory;
 
 import java.time.Clock;
 import java.time.Duration;
@@ -504,6 +509,33 @@ class MessageJobServiceTest {
     }
 
     @Test
+    void does_not_report_a_storage_retry_when_the_claim_guarded_transition_is_rejected() {
+        ConversationStore store = mock(ConversationStore.class);
+        MessageWorkClaim claim = claim();
+        when(store.loadHistory(claim.sessionId())).thenThrow(ConversationStoreFailure.transientFailure(
+                new IllegalStateException("storage unavailable")));
+        when(store.readJob(claim.messageJobId())).thenReturn(Optional.of(new ConversationStore.MessageJobProjection(
+                claim.messageJobId(), claim.sessionId(), JobStatus.WORKING, 0, 0)));
+        when(store.scheduleRetry(eq(claim), any(Duration.class))).thenReturn(false);
+        ConversationModel model = model(TEST_ROUTE_ID, (request, reservation, usage) -> {
+            throw new AssertionError("Provider must not be called after the storage failure");
+        });
+        Logger logger = (Logger) LoggerFactory.getLogger(MessageJobService.class);
+        ListAppender<ILoggingEvent> appender = new ListAppender<>();
+        appender.start();
+        logger.addAppender(appender);
+        try {
+            service(store, model, catalog()).process(claim, () -> true);
+        } finally {
+            logger.detachAppender(appender);
+            appender.stop();
+        }
+
+        verify(store).scheduleRetry(eq(claim), any(Duration.class));
+        assertThat(appender.list).noneMatch(event -> "message_job_retry".equals(keyValue(event, "event")));
+    }
+
+    @Test
     void completes_model_unavailable_without_provider_or_tool_calls_when_the_job_route_differs() {
         ConversationStore store = mock(ConversationStore.class);
         MessageWorkClaim claim = claim();
@@ -673,6 +705,11 @@ class MessageJobServiceTest {
         Instant claimedAt = Instant.parse("2026-09-01T00:00:00Z");
         return new MessageWorkClaim(new MessageJobId("job-1"), new SessionId("session-1"), "worker", 1, claimedAt,
                 claimedAt.plusSeconds(30));
+    }
+
+    private static Object keyValue(ILoggingEvent event, String key) {
+        return event.getKeyValuePairs().stream().filter(pair -> key.equals(pair.key))
+                .map(pair -> pair.value).findFirst().orElse(null); // cs-allow Optional test lookup uses null for a missing key
     }
 
     private static UserMessage user() {

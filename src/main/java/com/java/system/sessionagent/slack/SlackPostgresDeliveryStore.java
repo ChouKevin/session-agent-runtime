@@ -49,11 +49,14 @@ public final class SlackPostgresDeliveryStore implements SlackDeliveryStore {
                     locked_until = clock_timestamp() + (? * interval '1 millisecond'),
                     claim_number = delivery.claim_number + 1, attempt_count = delivery.attempt_count + 1
                 from candidate where delivery.delivery_id = candidate.delivery_id
-                returning delivery.delivery_id, delivery.claim_number, delivery.attempt_count, delivery.worker_id, delivery.locked_until,
-                    delivery.channel_id, delivery.root_thread_ts, delivery.terminal_text
+                returning delivery.delivery_id, delivery.terminal_session_id, delivery.message_job_id, delivery.claim_number,
+                    delivery.attempt_count, delivery.worker_id, delivery.locked_until, delivery.channel_id,
+                    delivery.root_thread_ts, delivery.terminal_text
                 """, (resultSet, rowNumber) -> new SlackDeliveryClaim(
-                resultSet.getObject("delivery_id", UUID.class), resultSet.getLong("claim_number"), resultSet.getInt("attempt_count"),
-                resultSet.getString("worker_id"), resultSet.getObject("locked_until", OffsetDateTime.class).toInstant(),
+                resultSet.getObject("delivery_id", UUID.class), resultSet.getObject("terminal_session_id", UUID.class),
+                resultSet.getObject("message_job_id", UUID.class), resultSet.getLong("claim_number"),
+                resultSet.getInt("attempt_count"), resultSet.getString("worker_id"),
+                resultSet.getObject("locked_until", OffsetDateTime.class).toInstant(),
                 new SlackPostRequest(resultSet.getString("channel_id"), resultSet.getString("root_thread_ts"),
                         resultSet.getString("terminal_text"))), maximumAttempts, workerId, positiveLeaseMilliseconds(requiredLeaseDuration))
                 .stream().findFirst().orElse(null); // cs-allow TransactionTemplate permits nullable no-claim result

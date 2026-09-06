@@ -1,10 +1,18 @@
 package com.java.system.sessionagent.slack;
 
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import org.junit.jupiter.api.Test;
+import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.stream.Collectors;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -16,8 +24,7 @@ class SlackEventAdapterTest {
         AtomicReference<SlackRootIntake> accepted = new AtomicReference<>();
         SlackRootIntakePort intakePort = intake -> {
             accepted.set(intake);
-            return intake.classification() == SlackIntakeClassification.ACCEPTED
-                    ? SlackEventOutcome.ACCEPTED : SlackEventOutcome.IGNORED;
+            return resultFor(intake);
         };
         SlackEventAdapter adapter = new SlackEventAdapter("UBOT", intakePort);
 
@@ -41,8 +48,7 @@ class SlackEventAdapterTest {
             } else {
                 ignored.add(intake);
             }
-            return intake.classification() == SlackIntakeClassification.ACCEPTED
-                    ? SlackEventOutcome.ACCEPTED : SlackEventOutcome.IGNORED;
+            return resultFor(intake);
         });
 
         SlackEventOutcome dmOutcome = adapter.handle(new SlackRootEvent(
@@ -82,7 +88,7 @@ class SlackEventAdapterTest {
         AtomicReference<SlackRootIntake> accepted = new AtomicReference<>();
         SlackEventAdapter adapter = new SlackEventAdapter("UBOT", intake -> {
             accepted.set(intake);
-            return SlackEventOutcome.ACCEPTED;
+            return SlackIntakeResult.resolvedSessionAccepted(UUID.randomUUID(), UUID.randomUUID());
         });
 
         SlackEventOutcome outcome = adapter.handle(new SlackRootEvent(
@@ -102,5 +108,67 @@ class SlackEventAdapterTest {
         assertThatThrownBy(() -> adapter.handle(new SlackRootEvent(
                 "E1", "T1", "C1", "1.000001", "", "U1", "", "channel", "<@UBOT> hello", "", false, false)))
                 .isInstanceOf(IllegalStateException.class);
+    }
+
+    @Test
+    void logs_committed_new_and_duplicate_intake_with_the_same_session_and_job_correlations() {
+        UUID sessionId = UUID.randomUUID();
+        UUID messageJobId = UUID.randomUUID();
+        AtomicInteger deliveries = new AtomicInteger();
+        SlackEventAdapter adapter = new SlackEventAdapter("UBOT", intake -> deliveries.getAndIncrement() == 0
+                ? SlackIntakeResult.newSessionAccepted(sessionId, messageJobId)
+                : SlackIntakeResult.duplicateAccepted(sessionId, messageJobId));
+        Logger logger = (Logger) LoggerFactory.getLogger(SlackEventAdapter.class);
+        ListAppender<ILoggingEvent> appender = new ListAppender<>();
+        appender.start();
+        logger.addAppender(appender);
+        SlackRootEvent event = new SlackRootEvent(
+                "E1", "T1", "C1", "1.000001", "", "U1", "", "channel",
+                "<@UBOT> hello", "", false, false);
+        try {
+            assertThat(adapter.handle(event)).isEqualTo(SlackEventOutcome.ACCEPTED);
+            assertThat(adapter.handle(event)).isEqualTo(SlackEventOutcome.ACCEPTED);
+        } finally {
+            logger.detachAppender(appender);
+            appender.stop();
+        }
+
+        List<Map<String, Object>> inboundLogs = appender.list.stream()
+                .map(SlackEventAdapterTest::keyValues)
+                .filter(values -> "slack_inbound".equals(values.get("event")))
+                .toList();
+        List<Map<String, Object>> sessionLogs = appender.list.stream()
+                .map(SlackEventAdapterTest::keyValues)
+                .filter(values -> String.valueOf(values.get("event")).startsWith("session_"))
+                .toList();
+        assertThat(inboundLogs).hasSize(2);
+        assertThat(sessionLogs).hasSize(2);
+        Map<String, Object> first = inboundLogs.get(0);
+        Map<String, Object> duplicate = inboundLogs.get(1);
+        assertThat(first).containsEntry("slackEventId", "E1")
+                .containsEntry("disposition", "NEW_ACCEPTED")
+                .containsEntry("sessionResolution", "CREATED")
+                .containsEntry("sessionId", sessionId.toString())
+                .containsEntry("messageJobId", messageJobId.toString());
+        assertThat(duplicate).containsEntry("slackEventId", "E1")
+                .containsEntry("disposition", "DUPLICATE_ACCEPTED")
+                .containsEntry("sessionResolution", "RESOLVED")
+                .containsEntry("sessionId", sessionId.toString())
+                .containsEntry("messageJobId", messageJobId.toString());
+        assertThat(sessionLogs).extracting(values -> values.get("event"))
+                .containsExactly("session_created", "session_resolved");
+        assertThat(sessionLogs).allSatisfy(values -> assertThat(values)
+                .containsEntry("sessionId", sessionId.toString())
+                .containsEntry("messageJobId", messageJobId.toString()));
+    }
+
+    private static SlackIntakeResult resultFor(SlackRootIntake intake) {
+        return intake.classification() == SlackIntakeClassification.ACCEPTED
+                ? SlackIntakeResult.newSessionAccepted(UUID.randomUUID(), UUID.randomUUID())
+                : SlackIntakeResult.newIgnored();
+    }
+
+    private static Map<String, Object> keyValues(ILoggingEvent event) {
+        return event.getKeyValuePairs().stream().collect(Collectors.toMap(pair -> pair.key, pair -> pair.value));
     }
 }

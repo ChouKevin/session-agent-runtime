@@ -41,8 +41,9 @@ public final class SlackDeliveryWorker {
         logDelivery("slack_delivery_attempt", currentClaim, "ATTEMPT", Optional.empty());
         try {
             String slackMessageTs = slackWebApi.post(currentClaim.postRequest());
-            deliveryStore.markSent(currentClaim, slackMessageTs);
-            logDelivery("slack_delivery_sent", currentClaim, "SENT", Optional.empty());
+            boolean sentCommitted = deliveryStore.markSent(currentClaim, slackMessageTs);
+            logDelivery(sentCommitted ? "slack_delivery_sent" : "slack_delivery_ambiguous", currentClaim,
+                    sentCommitted ? "SENT" : "POSTED_STATE_NOT_COMMITTED", Optional.empty());
         } catch (SlackPostFailure failure) {
             recordFailure(currentClaim, failure.category(), failure.retryAfter());
         } catch (RuntimeException exception) {
@@ -56,15 +57,17 @@ public final class SlackDeliveryWorker {
             SlackDeliveryFailureCategory category,
             Optional<Duration> retryAfter) {
         if (category == SlackDeliveryFailureCategory.PERMANENT || claim.attemptCount() >= properties.maximumAttempts()) {
-            deliveryStore.markFailed(claim, category);
-            logDelivery("slack_delivery_failed", claim, category.name(), Optional.empty());
+            boolean failedCommitted = deliveryStore.markFailed(claim, category);
+            logDelivery(failedCommitted ? "slack_delivery_failed" : "slack_delivery_ownership_lost", claim,
+                    failedCommitted ? category.name() : "FAILED_STATE_NOT_COMMITTED", Optional.empty());
             return;
         }
         Duration delay = category == SlackDeliveryFailureCategory.RATE_LIMIT
                 ? retryAfter.orElseThrow()
                 : exponentialBackoff(claim.attemptCount());
-        deliveryStore.scheduleRetry(claim, category, delay);
-        logDelivery("slack_delivery_retry", claim, category.name(), Optional.of(delay));
+        boolean retryCommitted = deliveryStore.scheduleRetry(claim, category, delay);
+        logDelivery(retryCommitted ? "slack_delivery_retry" : "slack_delivery_ownership_lost", claim,
+                retryCommitted ? category.name() : "RETRY_STATE_NOT_COMMITTED", Optional.of(delay));
     }
 
     private Duration exponentialBackoff(int attemptCount) {
@@ -85,6 +88,8 @@ public final class SlackDeliveryWorker {
             Optional<Duration> retryDelay) {
         LoggingEventBuilder builder = LOGGER.atInfo().addKeyValue("event", event)
                 .addKeyValue("deliveryId", claim.deliveryId().toString())
+                .addKeyValue("sessionId", claim.sessionId().toString())
+                .addKeyValue("messageJobId", claim.messageJobId().toString())
                 .addKeyValue("slackChannelId", claim.postRequest().channelId())
                 .addKeyValue("slackThreadTs", claim.postRequest().rootThreadTs())
                 .addKeyValue("attempt", claim.attemptCount())

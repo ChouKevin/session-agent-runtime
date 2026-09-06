@@ -1,15 +1,21 @@
 package com.java.system.sessionagent.slack;
 
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import org.junit.jupiter.api.Test;
+import org.slf4j.LoggerFactory;
 
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Queue;
 import java.util.UUID;
+import java.util.stream.Collectors;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -68,9 +74,78 @@ class SlackDeliveryWorkerTest {
         assertThat(store.failedCategories).containsExactly(SlackDeliveryFailureCategory.TRANSIENT);
     }
 
+    @Test
+    void reports_an_ambiguous_post_instead_of_sent_when_the_claim_guarded_transition_is_rejected() {
+        SlackDeliveryClaim claim = claim(1, 1, new SlackPostRequest("C1", "1.000001", "Committed terminal response"));
+        FakeDeliveryStore store = new FakeDeliveryStore(List.of(claim));
+        store.transitionsAccepted = false;
+        SlackDeliveryWorker worker = new SlackDeliveryWorker(store, request -> "2.000001",
+                new SlackDeliveryProperties(), "delivery-worker");
+        Logger logger = (Logger) LoggerFactory.getLogger(SlackDeliveryWorker.class);
+        ListAppender<ILoggingEvent> appender = new ListAppender<>();
+        appender.start();
+        logger.addAppender(appender);
+        try {
+            assertThat(worker.poll()).isTrue();
+        } finally {
+            logger.detachAppender(appender);
+            appender.stop();
+        }
+
+        assertThat(appender.list).extracting(event -> keyValues(event).get("event"))
+                .contains("slack_delivery_attempt", "slack_delivery_ambiguous")
+                .doesNotContain("slack_delivery_sent");
+        ILoggingEvent ambiguous = appender.list.stream()
+                .filter(event -> "slack_delivery_ambiguous".equals(keyValues(event).get("event")))
+                .findFirst().orElseThrow();
+        assertThat(keyValues(ambiguous)).containsEntry("sessionId", claim.sessionId().toString())
+                .containsEntry("messageJobId", claim.messageJobId().toString())
+                .containsEntry("outcome", "POSTED_STATE_NOT_COMMITTED");
+    }
+
+    @Test
+    void reports_ownership_loss_instead_of_retry_or_failure_when_failure_transitions_are_rejected() {
+        SlackDeliveryClaim permanentClaim = claim(1, 1,
+                new SlackPostRequest("C1", "1.000001", "Committed terminal response"));
+        SlackDeliveryClaim retryClaim = claim(2, 1,
+                new SlackPostRequest("C1", "1.000001", "Committed terminal response"));
+        FakeDeliveryStore store = new FakeDeliveryStore(List.of(permanentClaim, retryClaim));
+        store.transitionsAccepted = false;
+        FakeSlackWebApi slack = new FakeSlackWebApi();
+        slack.failOnce(new SlackPostFailure(SlackDeliveryFailureCategory.PERMANENT, Optional.empty()));
+        slack.failOnce(new SlackPostFailure(SlackDeliveryFailureCategory.TRANSIENT, Optional.empty()));
+        SlackDeliveryWorker worker = new SlackDeliveryWorker(store, slack, new SlackDeliveryProperties(), "delivery-worker");
+        Logger logger = (Logger) LoggerFactory.getLogger(SlackDeliveryWorker.class);
+        ListAppender<ILoggingEvent> appender = new ListAppender<>();
+        appender.start();
+        logger.addAppender(appender);
+        try {
+            assertThat(worker.poll()).isTrue();
+            assertThat(worker.poll()).isTrue();
+        } finally {
+            logger.detachAppender(appender);
+            appender.stop();
+        }
+
+        List<Map<String, Object>> ownershipLost = appender.list.stream()
+                .map(SlackDeliveryWorkerTest::keyValues)
+                .filter(values -> "slack_delivery_ownership_lost".equals(values.get("event")))
+                .toList();
+        assertThat(ownershipLost).extracting(values -> values.get("outcome"))
+                .containsExactly("FAILED_STATE_NOT_COMMITTED", "RETRY_STATE_NOT_COMMITTED");
+        assertThat(ownershipLost).extracting(values -> values.get("sessionId"))
+                .containsExactly(permanentClaim.sessionId().toString(), retryClaim.sessionId().toString());
+        assertThat(appender.list).extracting(event -> keyValues(event).get("event"))
+                .doesNotContain("slack_delivery_failed", "slack_delivery_retry");
+    }
+
     private static SlackDeliveryClaim claim(long claimNumber, int attempts, SlackPostRequest post) {
-        return new SlackDeliveryClaim(UUID.randomUUID(), claimNumber, attempts, "delivery-worker",
+        return new SlackDeliveryClaim(UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), claimNumber, attempts, "delivery-worker",
                 Instant.parse("2026-09-06T00:00:30Z"), post);
+    }
+
+    private static Map<String, Object> keyValues(ILoggingEvent event) {
+        return event.getKeyValuePairs().stream().collect(Collectors.toMap(pair -> pair.key, pair -> pair.value));
     }
 
     private static final class FakeDeliveryStore implements SlackDeliveryStore {
@@ -81,6 +156,7 @@ class SlackDeliveryWorkerTest {
         private final List<SlackDeliveryFailureCategory> failedCategories = new ArrayList<>();
         private final List<String> sentMessageTimestamps = new ArrayList<>();
         private boolean transactionActiveDuringPost;
+        private boolean transitionsAccepted = true;
 
         private FakeDeliveryStore(List<SlackDeliveryClaim> claims) {
             this.claims = new ArrayDeque<>(claims);
@@ -99,20 +175,20 @@ class SlackDeliveryWorkerTest {
         @Override
         public boolean markSent(SlackDeliveryClaim claim, String slackMessageTs) {
             sentMessageTimestamps.add(slackMessageTs);
-            return true;
+            return transitionsAccepted;
         }
 
         @Override
         public boolean markFailed(SlackDeliveryClaim claim, SlackDeliveryFailureCategory category) {
             failedCategories.add(category);
-            return true;
+            return transitionsAccepted;
         }
 
         @Override
         public boolean scheduleRetry(SlackDeliveryClaim claim, SlackDeliveryFailureCategory category, Duration delay) {
             retryCategories.add(category);
             retryDelays.add(delay);
-            return true;
+            return transitionsAccepted;
         }
 
         @Override

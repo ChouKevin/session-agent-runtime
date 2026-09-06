@@ -596,9 +596,11 @@ public final class MessageJobService implements MessageJobPort {
                     && job.orElseThrow().modelCallCount() < maxModelCalls
                     && job.orElseThrow().retryCount() < retryPolicy.transientRetries()) {
                 Duration delay = retryDelay(job.orElseThrow().retryCount());
-                conversationStore.scheduleRetry(claim, delay);
-                telemetry.retry("STORAGE", delay);
-                logRetry(claim, "STORAGE", delay);
+                boolean scheduled = conversationStore.scheduleRetry(claim, delay);
+                if (scheduled) {
+                    telemetry.retry("STORAGE", delay);
+                    logRetry(claim, "STORAGE", delay);
+                }
                 return;
             }
             appendRuntime(claim, guard, List.of(runtime(MODEL_UNAVAILABLE)), ConversationStore.JobUpdate.COMPLETE);

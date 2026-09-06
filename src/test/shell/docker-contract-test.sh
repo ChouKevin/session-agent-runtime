@@ -122,19 +122,24 @@ grep -Fq '${SESSION_AGENT_LOG_DIR:-../logs}:/app/logs' "${compose_file}" || {
     exit 1
 }
 
-grep -Fq '/app/logs/session-agent-runtime.log' "${runtime_root}/src/main/resources/logback-spring.xml" || {
+logback_configuration="${runtime_root}/src/main/resources/logback-spring.xml"
+grep -Fq 'value="${SESSION_AGENT_RUNTIME_LOG_DIR:-/app/logs}"' "${logback_configuration}" || {
+    printf 'runtime logback configuration must default to the fixed container log directory\n' >&2
+    exit 1
+}
+grep -Fq '<file>${RUNTIME_LOG_DIR}/session-agent-runtime.log</file>' "${logback_configuration}" || {
     printf 'runtime logback configuration must use the fixed active log filename\n' >&2
     exit 1
 }
-grep -Fq '<maxFileSize>100MB</maxFileSize>' "${runtime_root}/src/main/resources/logback-spring.xml" || {
+grep -Fq '<maxFileSize>100MB</maxFileSize>' "${logback_configuration}" || {
     printf 'runtime file rotation must roll at 100 MB\n' >&2
     exit 1
 }
-grep -Fq '<maxHistory>7</maxHistory>' "${runtime_root}/src/main/resources/logback-spring.xml" || {
+grep -Fq '<maxHistory>7</maxHistory>' "${logback_configuration}" || {
     printf 'runtime file rotation must retain seven days\n' >&2
     exit 1
 }
-grep -Fq '<totalSizeCap>500MB</totalSizeCap>' "${runtime_root}/src/main/resources/logback-spring.xml" || {
+grep -Fq '<totalSizeCap>500MB</totalSizeCap>' "${logback_configuration}" || {
     printf 'runtime file rotation must cap retained files at 500 MB\n' >&2
     exit 1
 }

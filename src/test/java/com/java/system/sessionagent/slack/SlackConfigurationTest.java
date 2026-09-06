@@ -43,7 +43,7 @@ class SlackConfigurationTest {
 
     @Test
     void disables_bolt_subtype_auto_ack_so_candidate_subtypes_reach_durable_intake() {
-        SlackEventAdapter adapter = new SlackEventAdapter("UBOT", ignored -> SlackEventOutcome.IGNORED);
+        SlackEventAdapter adapter = new SlackEventAdapter("UBOT", ignored -> SlackIntakeResult.newIgnored());
         SlackBoltSocketClient client = new SlackBoltSocketClient(new SlackProperties("xapp-complete", "xoxb-complete", "UBOT",
                 Duration.ofSeconds(1), Duration.ofSeconds(1)), adapter);
 

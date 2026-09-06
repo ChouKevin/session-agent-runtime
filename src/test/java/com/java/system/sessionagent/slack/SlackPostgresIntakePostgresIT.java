@@ -77,12 +77,20 @@ class SlackPostgresIntakePostgresIT {
     void atomically_persists_a_slack_binding_receipt_and_provider_neutral_message_job() {
         SlackPostgresRootIntake intake = intake();
 
-        SlackEventOutcome outcome = intake.receive(rootIntake("T1", "C1", "1.000001"));
-        SlackEventOutcome replayOutcome = intake.receive(rootIntake("T1", "C1", "1.000001"));
+        SlackIntakeResult result = intake.receive(rootIntake("T1", "C1", "1.000001"));
+        SlackIntakeResult replayResult = intake.receive(rootIntake("T1", "C1", "1.000001"));
 
         JdbcTemplate jdbcTemplate = new JdbcTemplate(dataSource());
-        assertThat(outcome).isEqualTo(SlackEventOutcome.ACCEPTED);
-        assertThat(replayOutcome).isEqualTo(SlackEventOutcome.ACCEPTED);
+        assertThat(result.outcome()).isEqualTo(SlackEventOutcome.ACCEPTED);
+        assertThat(result.disposition()).isEqualTo(SlackIntakeDisposition.NEW_ACCEPTED);
+        assertThat(result.sessionResolution()).contains(SlackSessionResolution.CREATED);
+        assertThat(result.sessionId()).isPresent();
+        assertThat(result.messageJobId()).isPresent();
+        assertThat(replayResult.outcome()).isEqualTo(SlackEventOutcome.ACCEPTED);
+        assertThat(replayResult.disposition()).isEqualTo(SlackIntakeDisposition.DUPLICATE_ACCEPTED);
+        assertThat(replayResult.sessionResolution()).contains(SlackSessionResolution.RESOLVED);
+        assertThat(replayResult.sessionId()).isEqualTo(result.sessionId());
+        assertThat(replayResult.messageJobId()).isEqualTo(result.messageJobId());
         assertThat(count(jdbcTemplate, "select count(*) from slack_thread_binding")).isEqualTo(1);
         assertThat(count(jdbcTemplate, "select count(*) from slack_event_receipt")).isEqualTo(1);
         assertThat(count(jdbcTemplate, "select count(*) from source_message where source_type = 'slack'")).isEqualTo(1);
@@ -128,11 +136,11 @@ class SlackPostgresIntakePostgresIT {
         JdbcTemplate jdbcTemplate = new JdbcTemplate(dataSource());
         SlackRootIntake unboundReply = replyIntake("event-unbound", "T1", "C1", "1.000001", "1.000002", "U2", "reply");
 
-        SlackEventOutcome initial = intake.receive(unboundReply);
+        SlackEventOutcome initial = intake.receive(unboundReply).outcome();
         intake.receive(rootIntake("T1", "C1", "1.000001"));
-        SlackEventOutcome sameEventReplay = intake.receive(unboundReply);
+        SlackEventOutcome sameEventReplay = intake.receive(unboundReply).outcome();
         List<SlackEventOutcome> distinctEventReplays = concurrently(() -> intake.receive(replyIntake(
-                "event-unbound-overlap-" + Thread.currentThread().threadId(), "T1", "C1", "1.000001", "1.000002", "U2", "reply")));
+                "event-unbound-overlap-" + Thread.currentThread().threadId(), "T1", "C1", "1.000001", "1.000002", "U2", "reply")).outcome());
 
         assertThat(initial).isEqualTo(SlackEventOutcome.IGNORED);
         assertThat(sameEventReplay).isEqualTo(SlackEventOutcome.IGNORED);
@@ -199,9 +207,9 @@ class SlackPostgresIntakePostgresIT {
 
         ExecutorService executor = Executors.newSingleThreadExecutor();
         try {
-            Future<SlackEventOutcome> acceptedOutcome = executor.submit(() -> intake.receive(accepted));
+            Future<SlackEventOutcome> acceptedOutcome = executor.submit(() -> intake.receive(accepted).outcome());
             assertThat(acceptedMessageStaged.await(5, TimeUnit.SECONDS)).isTrue();
-            SlackEventOutcome ignoredOutcome = intake.receive(ignored);
+            SlackEventOutcome ignoredOutcome = intake.receive(ignored).outcome();
             allowAcceptedReceipt.countDown();
 
             assertThat(acceptedOutcome.get()).isEqualTo(SlackEventOutcome.IGNORED);
@@ -284,9 +292,9 @@ class SlackPostgresIntakePostgresIT {
         JdbcTemplate jdbcTemplate = new JdbcTemplate(dataSource());
 
         intake.receive(rootIntake("T1", "C1", "1.000001"));
-        SlackEventOutcome firstReply = intake.receive(replyIntake("event-reply-1", "T1", "C1", "1.000001", "1.000002", "U2", "one"));
-        SlackEventOutcome replay = intake.receive(replyIntake("event-reply-1", "T1", "C1", "1.000001", "1.000002", "U2", "one"));
-        SlackEventOutcome overlappingSubscription = intake.receive(replyIntake("event-reply-2", "T1", "C1", "1.000001", "1.000002", "U2", "one"));
+        SlackEventOutcome firstReply = intake.receive(replyIntake("event-reply-1", "T1", "C1", "1.000001", "1.000002", "U2", "one")).outcome();
+        SlackEventOutcome replay = intake.receive(replyIntake("event-reply-1", "T1", "C1", "1.000001", "1.000002", "U2", "one")).outcome();
+        SlackEventOutcome overlappingSubscription = intake.receive(replyIntake("event-reply-2", "T1", "C1", "1.000001", "1.000002", "U2", "one")).outcome();
 
         assertThat(firstReply).isEqualTo(SlackEventOutcome.ACCEPTED);
         assertThat(replay).isEqualTo(SlackEventOutcome.ACCEPTED);
@@ -310,7 +318,7 @@ class SlackPostgresIntakePostgresIT {
         List<SlackEventOutcome> outcomes = concurrently(() -> {
             String suffix = Long.toString(Thread.currentThread().threadId());
             return intake.receive(replyIntake("event-" + suffix, "T1", "C1", "1.000001", "2.00000" + suffix,
-                    "U" + suffix, "reply " + suffix));
+                    "U" + suffix, "reply " + suffix)).outcome();
         });
 
         assertThat(outcomes).containsOnly(SlackEventOutcome.ACCEPTED);
@@ -335,7 +343,7 @@ class SlackPostgresIntakePostgresIT {
         JdbcTemplate jdbcTemplate = new JdbcTemplate(dataSource());
 
         SlackEventOutcome outcome = intake.receive(new SlackRootIntake("event-ignored", "T1", "C1", "1.000001", "1.000001",
-                SlackIntakeClassification.BLANK, java.util.Optional.empty()));
+                SlackIntakeClassification.BLANK, java.util.Optional.empty())).outcome();
 
         assertThat(outcome).isEqualTo(SlackEventOutcome.IGNORED);
         assertThat(count(jdbcTemplate, "select count(*) from slack_event_receipt where classification = 'BLANK'")).isEqualTo(1);
@@ -359,7 +367,7 @@ class SlackPostgresIntakePostgresIT {
         intake.receive(rootIntake("T1", "C1", "1.000001"));
 
         List<SlackEventOutcome> outcomes = concurrently(() -> intake.receive(replyIntake("event-race", "T1", "C1",
-                "1.000001", "1.000002", "U2", "one")));
+                "1.000001", "1.000002", "U2", "one")).outcome());
 
         assertThat(outcomes).containsOnly(SlackEventOutcome.ACCEPTED);
         assertThat(count(jdbcTemplate, "select count(*) from message_job")).isEqualTo(2);

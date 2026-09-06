@@ -1,18 +1,25 @@
 package com.java.system.sessionagent.worker;
 
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
+import com.java.system.sessionagent.conversation.domain.JobStatus;
 import com.java.system.sessionagent.conversation.domain.MessageJobId;
 import com.java.system.sessionagent.conversation.domain.MessageWorkClaim;
 import com.java.system.sessionagent.conversation.domain.SessionId;
 import com.java.system.sessionagent.conversation.port.in.MessageJobPort;
 import com.java.system.sessionagent.conversation.port.out.ConversationStore;
 import org.junit.jupiter.api.Test;
+import org.slf4j.LoggerFactory;
 
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.stream.Collectors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 
@@ -78,6 +85,47 @@ class MessageJobWorkerTest {
 
         verify(store).extendClaim(claim, Duration.ofSeconds(30));
         verify(renewal).cancel(false);
+    }
+
+    @Test
+    void reports_retry_scheduled_from_the_single_persisted_state_snapshot_without_a_false_completion() {
+        ConversationStore store = mock(ConversationStore.class);
+        MessageWorkClaim claim = new MessageWorkClaim(new MessageJobId("job"), new SessionId("session"), "worker", 1,
+                Instant.parse("2026-08-31T00:00:00Z"), Instant.parse("2026-08-31T00:01:00Z"));
+        when(store.claimNext(any(String.class), any(Duration.class))).thenReturn(Optional.of(claim));
+        when(store.readJob(claim.messageJobId())).thenReturn(Optional.of(new ConversationStore.MessageJobProjection(
+                claim.messageJobId(), claim.sessionId(), JobStatus.RETRY, 1, 1)));
+        ScheduledExecutorService scheduler = mock(ScheduledExecutorService.class);
+        ScheduledFuture<?> renewal = mock(ScheduledFuture.class);
+        org.mockito.Mockito.doReturn(renewal).when(scheduler).scheduleAtFixedRate(any(Runnable.class),
+                org.mockito.ArgumentMatchers.anyLong(), org.mockito.ArgumentMatchers.anyLong(), any());
+        MessageJobWorker worker = worker(store, mock(MessageJobPort.class), scheduler);
+        Logger logger = (Logger) LoggerFactory.getLogger(MessageJobWorker.class);
+        ListAppender<ILoggingEvent> appender = new ListAppender<>();
+        appender.start();
+        logger.addAppender(appender);
+        try {
+            assertThat(worker.poll()).isTrue();
+        } finally {
+            logger.detachAppender(appender);
+            appender.stop();
+        }
+
+        assertThat(appender.list).extracting(event -> keyValues(event).get("event"))
+                .contains("message_job_claimed", "message_job_processing_finished")
+                .doesNotContain("message_job_completed");
+        ILoggingEvent result = appender.list.stream()
+                .filter(event -> "message_job_processing_finished".equals(keyValues(event).get("event")))
+                .findFirst().orElseThrow();
+        assertThat(keyValues(result)).containsEntry("outcome", "RETRY_SCHEDULED")
+                .containsEntry("sessionId", "session")
+                .containsEntry("messageJobId", "job");
+        verify(store).readJob(claim.messageJobId());
+        verify(renewal).cancel(false);
+    }
+
+    private static Map<String, Object> keyValues(ILoggingEvent event) {
+        return event.getKeyValuePairs().stream().collect(Collectors.toMap(pair -> pair.key, pair -> pair.value));
     }
 
     private static MessageJobWorker worker(ConversationStore store, MessageJobPort jobs, ScheduledExecutorService scheduler) {

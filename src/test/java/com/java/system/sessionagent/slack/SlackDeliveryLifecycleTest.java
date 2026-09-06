@@ -65,7 +65,7 @@ class SlackDeliveryLifecycleTest {
     private static final class OneClaimStore implements SlackDeliveryStore {
 
         private final Queue<SlackDeliveryClaim> claims = new ArrayDeque<>(java.util.List.of(new SlackDeliveryClaim(
-                UUID.randomUUID(), 1, 1, "delivery-worker", Instant.now().plusSeconds(30),
+                UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), 1, 1, "delivery-worker", Instant.now().plusSeconds(30),
                 new SlackPostRequest("C1", "1.000001", "Committed terminal response"))));
 
         @Override

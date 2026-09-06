@@ -1,5 +1,6 @@
 package com.java.system.sessionagent.worker;
 
+import com.java.system.sessionagent.conversation.domain.JobStatus;
 import com.java.system.sessionagent.conversation.domain.MessageWorkClaim;
 import com.java.system.sessionagent.conversation.port.in.MessageJobPort;
 import com.java.system.sessionagent.conversation.port.in.WorkGuard;
@@ -81,10 +82,8 @@ public final class MessageJobWorker {
         try {
             WorkGuard guard = stillOwned::get;
             messageJobPort.process(currentClaim, guard);
-            telemetry.job(stillOwned.get() ? "COMPLETED" : "OWNERSHIP_LOST");
-            LOGGER.atInfo().addKeyValue("event", stillOwned.get() ? "message_job_completed" : "message_job_ownership_lost")
-                    .addKeyValue("messageJobId", currentClaim.messageJobId().value())
-                    .addKeyValue("sessionId", currentClaim.sessionId().value()).log("runtime_lifecycle");
+            boolean ownershipRetained = stillOwned.get();
+            logPersistedProcessingResult(currentClaim, ownershipRetained);
             return true;
         } catch (RuntimeException exception) {
             telemetry.job("FAILED");
@@ -96,6 +95,42 @@ public final class MessageJobWorker {
         } finally {
             renewal.cancel(false);
         }
+    }
+
+    private void logPersistedProcessingResult(MessageWorkClaim claim, boolean ownershipRetained) {
+        Optional<ConversationStore.MessageJobProjection> projection;
+        try {
+            projection = conversationStore.readJob(claim.messageJobId());
+        } catch (RuntimeException exception) {
+            telemetry.job("STATE_UNCONFIRMED");
+            logJobResult("message_job_state_unconfirmed", claim, "STORAGE_UNAVAILABLE");
+            return;
+        }
+        if (projection.isPresent() && projection.orElseThrow().status() == JobStatus.DONE) {
+            telemetry.job("COMPLETED");
+            logJobResult("message_job_completed", claim, "DONE");
+            return;
+        }
+        if (projection.isPresent() && projection.orElseThrow().status() == JobStatus.RETRY) {
+            telemetry.job("RETRY_SCHEDULED");
+            logJobResult("message_job_processing_finished", claim, "RETRY_SCHEDULED");
+            return;
+        }
+        if (!ownershipRetained) {
+            telemetry.job("OWNERSHIP_LOST");
+            logJobResult("message_job_ownership_lost", claim, "OWNERSHIP_LOST");
+            return;
+        }
+        telemetry.job("STATE_UNCONFIRMED");
+        String outcome = projection.map(job -> job.status().name()).orElse("NOT_FOUND");
+        logJobResult("message_job_state_unconfirmed", claim, outcome);
+    }
+
+    private static void logJobResult(String event, MessageWorkClaim claim, String outcome) {
+        LOGGER.atInfo().addKeyValue("event", event)
+                .addKeyValue("messageJobId", claim.messageJobId().value())
+                .addKeyValue("sessionId", claim.sessionId().value())
+                .addKeyValue("outcome", outcome).log("runtime_lifecycle");
     }
 
     private void renew(MessageWorkClaim claim, AtomicBoolean stillOwned) {
