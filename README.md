@@ -105,26 +105,36 @@ The shipped schema is a fresh V1 schema. Reset a disposable PostgreSQL database 
 
 Runtime emits one JSON object per line to both `docker compose logs` and a rolling host file. The active file is always `session-agent-runtime.log`; archives are named `session-agent-runtime.YYYY-MM-DD.N.log.gz`. Runtime rolls at 100 MB, keeps seven days, and caps retained archives at 500 MB. Docker's independent `json-file` driver remains at 100 MB with five files.
 
-Before `docker compose up`, prepare the bind directory for the non-root runtime UID/GID (10001). The default is the repository `logs/` directory because Compose resolves `../logs` relative to `docker/compose.yaml`:
+Initialize the local deployment configuration and prepare the bind directory for the non-root runtime UID/GID (10001). The default is the repository `logs/` directory:
 
 ```bash
-sudo install -d -o 10001 -g 10001 -m 0755 logs
-# Or use an absolute host path for an override:
-export SESSION_AGENT_LOG_DIR=/srv/session-agent-runtime/logs
-sudo install -d -o 10001 -g 10001 -m 0755 "$SESSION_AGENT_LOG_DIR"
+./docker/runtime.sh init
+# To persist a dedicated absolute host path into a newly created docker/.env:
+SESSION_AGENT_LOG_DIR=/srv/session-agent-runtime/logs ./docker/runtime.sh init
+```
+
+`init` never overwrites an existing `docker/.env`; edit that file to provide `SESSION_AGENT_POSTGRES_PASSWORD` and any optional model, Slack, MCP, port, or log settings. The helper may ask for `sudo` only while preparing the host log directory. It can be invoked from any working directory.
+
+Manage the complete Compose project through the same helper:
+
+```bash
+./docker/runtime.sh start    # validate, build, and run detached
+./docker/runtime.sh status
+./docker/runtime.sh restart  # down, rebuild, and start
+./docker/runtime.sh stop     # preserves the PostgreSQL named volume
 ```
 
 Follow container output and the active host file independently:
 
 ```bash
-docker compose -f docker/compose.yaml logs -f session-agent-runtime
+./docker/runtime.sh logs
 # Default bind path, from the repository root:
 tail -F logs/session-agent-runtime.log
-# When SESSION_AGENT_LOG_DIR is set to the absolute override above:
-tail -F "$SESSION_AGENT_LOG_DIR/session-agent-runtime.log"
+# When SESSION_AGENT_LOG_DIR is set in docker/.env:
+tail -F /srv/session-agent-runtime/logs/session-agent-runtime.log
 ```
 
-The host directory is intentionally Git-ignored and keeps a stable active filename so a future Filebeat or Elastic Agent input can tail it. This POC does not deploy an ELK stack or a shipper. JSON lifecycle events contain only stable event names and safe correlation/outcome fields; Runtime never emits conversation text, Slack/model credentials, tool arguments/results, provider continuation data, or raw exception details in its lifecycle events.
+The helper does not contain a data-reset command, and `stop` never passes `--volumes`; PostgreSQL data remains in the project-scoped named volume. The host directory is intentionally Git-ignored and keeps a stable active filename so a future Filebeat or Elastic Agent input can tail it. This POC does not deploy an ELK stack or a shipper. JSON lifecycle events contain only stable event names and safe correlation/outcome fields; Runtime never emits conversation text, Slack/model credentials, tool arguments/results, provider continuation data, or raw exception details in its lifecycle events.
 
 ## Slack Socket Mode (optional)
 

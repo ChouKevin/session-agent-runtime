@@ -2,3 +2,4 @@
 set -euo pipefail
 
 "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/src/test/shell/docker-contract-test.sh"
+"$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/src/test/shell/runtime-script-test.sh"
