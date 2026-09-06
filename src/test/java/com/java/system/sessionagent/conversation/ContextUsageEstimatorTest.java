@@ -50,6 +50,30 @@ class ContextUsageEstimatorTest {
     }
 
     @Test
+    void falls_back_to_full_estimate_when_matching_checkpoint_boundary_is_absent_from_current_history() {
+        ContextUsageEstimator estimator = new ContextUsageEstimator();
+        ContextUsageProjection checkpointProjection = projection(List.of(
+                definition("second", Map.of("properties", Map.of("z", Map.of("type", "string"), "a", Map.of("type", "integer")))),
+                definition("first", Map.of("required", List.of("name"), "type", "object"))));
+        String fingerprint = estimator.requestShapeFingerprint(checkpointProjection);
+        ContextUsageCheckpoint checkpoint = new ContextUsageCheckpoint(checkpointProjection.model(), 1,
+                new SessionSequence(2), 70, 30, 100, fingerprint,
+                checkpointProjection.compactGeneration(), Instant.EPOCH);
+        ContextUsageProjection currentProjection = new ContextUsageProjection(
+                checkpointProjection.model(),
+                checkpointProjection.systemPrompt(),
+                checkpointProjection.toolDefinitions(),
+                List.of(checkpointProjection.history().get(0), checkpointProjection.history().get(2)),
+                checkpointProjection.compactGeneration());
+
+        ContextEstimate withCheckpoint = estimator.estimate(currentProjection, Optional.of(checkpoint));
+        ContextEstimate withoutCheckpoint = estimator.estimate(currentProjection, Optional.empty());
+
+        assertThat(withCheckpoint.basis()).isEqualTo(ContextEstimate.Basis.FULL_ESTIMATE);
+        assertThat(withCheckpoint.tokens()).isEqualTo(withoutCheckpoint.tokens());
+    }
+
+    @Test
     void fingerprints_opaque_tool_schemas_that_contain_json_null_values() {
         Map<String, Object> schema = new LinkedHashMap<>();
         schema.put("default", null);

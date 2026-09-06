@@ -2,6 +2,7 @@ package com.java.system.sessionagent.storage.adapter.postgres;
 
 import com.java.system.sessionagent.conversation.domain.IncomingMessage;
 import com.java.system.sessionagent.conversation.domain.MessageReceipt;
+import com.java.system.sessionagent.conversation.domain.UserMessage;
 import com.java.system.sessionagent.conversation.port.in.MessageConflictException;
 import com.java.system.sessionagent.conversation.port.out.ConversationStore;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -11,6 +12,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.testcontainers.postgresql.PostgreSQLContainer;
 import java.time.Clock;
 import java.time.Instant;
@@ -35,6 +37,13 @@ class PostgresMessageIntakePostgresIT {
         MessageReceipt duplicate = store.receive(new IncomingMessage("thread", "alice", "source", "first"));
         assertThat(duplicate).isEqualTo(first);
         assertThatThrownBy(() -> store.receive(new IncomingMessage("thread", "alice", "source", "changed"))).isInstanceOf(MessageConflictException.class);
+        assertThat(store.loadHistory(first.sessionId())).singleElement().isInstanceOfSatisfying(UserMessage.class, message -> {
+            assertThat(message.message()).isEqualTo("first");
+            assertThat(message.participantId()).isEqualTo("alice");
+            assertThat(message.sequence().value()).isEqualTo(1L);
+            assertThat(message.messageJobId()).contains(first.messageJobId());
+        });
+        assertThat(new JdbcTemplate(dataSource()).queryForObject("select count(*) from message_job", Integer.class)).isEqualTo(1);
     }
     @Test void allocates_ordered_sequences_under_concurrent_intake_without_duplicate_source_jobs() throws Exception {
         ConversationStore store = new PostgresConversationStore(dataSource(), Clock.fixed(Instant.parse("2026-08-31T10:00:01Z"), ZoneOffset.UTC), new ObjectMapper());
@@ -43,9 +52,12 @@ class PostgresMessageIntakePostgresIT {
                 "source-" + Thread.currentThread().threadId(), "message")));
         assertThat(duplicates).containsOnly(duplicates.getFirst());
         assertThat(distinct).extracting(receipt -> receipt.messageJobId())
+                .hasSize(2).doesNotHaveDuplicates()
                 .doesNotContain(duplicates.getFirst().messageJobId());
+        assertThat(distinct).extracting(receipt -> receipt.sessionId()).containsOnly(duplicates.getFirst().sessionId());
         assertThat(store.loadHistory(duplicates.getFirst().sessionId())).extracting(message -> message.sequence().value())
                 .containsExactly(1L, 2L, 3L);
+        assertThat(new JdbcTemplate(dataSource()).queryForObject("select count(*) from message_job", Integer.class)).isEqualTo(3);
     }
     private <T> List<T> concurrently(Callable<T> action) throws Exception {
         CountDownLatch ready = new CountDownLatch(2);

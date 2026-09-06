@@ -21,8 +21,8 @@ class RuntimeObservabilityTest {
         telemetry.tool("private tool name", "provider-secret", Duration.ofMillis(5));
         telemetry.model("SUCCESS", Optional.of("STOP"), new ModelUsage(5, 3, 8, true), Duration.ofMillis(25));
 
-        assertThat(registry.find("session_agent.tool").tags("tool", "PORTABLE", "outcome", "SUCCESS").counter()).isNotNull();
-        assertThat(registry.find("session_agent.tool").tags("tool", "OTHER", "outcome", "OTHER").counter()).isNotNull();
+        assertThat(registry.get("session_agent.tool").tags("tool", "PORTABLE", "outcome", "SUCCESS").counter().count()).isEqualTo(1);
+        assertThat(registry.get("session_agent.tool").tags("tool", "OTHER", "outcome", "OTHER").counter().count()).isEqualTo(1);
         String tags = registry.getMeters().stream().flatMap(meter -> meter.getId().getTags().stream())
                 .map(tag -> tag.getKey() + "=" + tag.getValue()).reduce("", (left, right) -> left + "\n" + right);
         assertThat(tags).doesNotContain("semantic_search_code", "private tool name", "provider-secret");
@@ -35,7 +35,7 @@ class RuntimeObservabilityTest {
 
         for (RuntimeMessageCode code : RuntimeMessageCode.values()) {
             telemetry.feedback(code.name());
-            assertThat(registry.find("session_agent.feedback").tag("code", code.name()).counter()).isNotNull();
+            assertThat(registry.get("session_agent.feedback").tag("code", code.name()).counter().count()).isEqualTo(1);
         }
     }
 }

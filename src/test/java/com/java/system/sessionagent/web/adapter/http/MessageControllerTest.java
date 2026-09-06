@@ -24,6 +24,8 @@ import com.java.system.sessionagent.conversation.domain.ContextEstimate;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.springframework.http.MediaType;
 import org.springframework.http.converter.json.JacksonJsonHttpMessageConverter;
 import org.springframework.test.web.servlet.MockMvc;
@@ -34,8 +36,8 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
 import java.util.Map;
+import java.util.stream.Stream;
 
-import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -54,7 +56,6 @@ class MessageControllerTest {
     void serializes_each_final_history_message_with_only_its_type_specific_fields() throws Exception {
         MessageIntakePort intake = mock(MessageIntakePort.class);
         ConversationQueryPort queries = mock(ConversationQueryPort.class);
-        when(queries.findJob(JOB_ID)).thenReturn(Optional.of(new MessageJobView(JOB_ID, SESSION_ID, JobStatus.DONE, 1, 2)));
         when(queries.messages(SESSION_ID)).thenReturn(Optional.of(List.of(
                 new UserMessage(new SessionId(SESSION_ID), new SessionSequence(1), Optional.of(new MessageJobId(JOB_ID)), CREATED_AT,
                         MessageRole.USER, "alice", "hello"),
@@ -103,8 +104,6 @@ class MessageControllerTest {
                 .andExpect(jsonPath("$[3].message").value("answer"))
                 .andExpect(jsonPath("$[4].type").value("RUNTIME"))
                 .andExpect(jsonPath("$[4].code").value("MODEL_UNAVAILABLE"));
-        mvc.perform(get("/internal/message-jobs/{messageJobId}", JOB_ID))
-                .andExpect(status().isOk()).andExpect(jsonPath("$.replySequence").doesNotExist());
     }
 
     @Test
@@ -117,42 +116,43 @@ class MessageControllerTest {
                 .andExpect(status().isNotFound());
     }
 
-    @Test
-    void rejects_invalid_history_pagination_without_changing_the_complete_history_contract() throws Exception {
+    @ParameterizedTest(name = "rejects {0}")
+    @MethodSource("invalidPagination")
+    void rejects_invalid_history_pagination(String scenario, String parameter, String[] values) throws Exception {
         MessageIntakePort intake = mock(MessageIntakePort.class);
         ConversationQueryPort queries = mock(ConversationQueryPort.class);
-        when(queries.messages(SESSION_ID)).thenReturn(Optional.of(List.of(
-                new UserMessage(new SessionId(SESSION_ID), new SessionSequence(1), Optional.of(new MessageJobId(JOB_ID)), CREATED_AT,
-                        MessageRole.USER, "alice", "raw history"))));
 
         mvc(intake, queries).perform(get("/internal/sessions/{sessionId}/messages", SESSION_ID)
-                        .queryParam("afterSequence", "-1"))
+                        .queryParam(parameter, values))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.code").value("bad_request"));
-        mvc(intake, queries).perform(get("/internal/sessions/{sessionId}/messages", SESSION_ID)
-                        .queryParam("limit", "0"))
-                .andExpect(status().isBadRequest())
-                .andExpect(jsonPath("$.code").value("bad_request"));
-        mvc(intake, queries).perform(get("/internal/sessions/{sessionId}/messages", SESSION_ID)
-                        .queryParam("limit", "not-a-number"))
-                .andExpect(status().isBadRequest())
-                .andExpect(jsonPath("$.code").value("bad_request"));
-        mvc(intake, queries).perform(get("/internal/sessions/{sessionId}/messages", SESSION_ID)
-                        .queryParam("afterSequence", ""))
-                .andExpect(status().isBadRequest())
-                .andExpect(jsonPath("$.code").value("bad_request"));
-        mvc(intake, queries).perform(get("/internal/sessions/{sessionId}/messages", SESSION_ID)
-                        .queryParam("limit", ""))
-                .andExpect(status().isBadRequest())
-                .andExpect(jsonPath("$.code").value("bad_request"));
-        mvc(intake, queries).perform(get("/internal/sessions/{sessionId}/messages", SESSION_ID)
-                        .queryParam("afterSequence", "1", "2"))
-                .andExpect(status().isBadRequest())
-                .andExpect(jsonPath("$.code").value("bad_request"));
-        mvc(intake, queries).perform(get("/internal/sessions/{sessionId}/messages", SESSION_ID)
-                        .queryParam("limit", "1", "2"))
-                .andExpect(status().isBadRequest())
-                .andExpect(jsonPath("$.code").value("bad_request"));
+    }
+
+    private static Stream<Arguments> invalidPagination() {
+        return Stream.of(
+                Arguments.of("negative sequence", "afterSequence", new String[]{"-1"}),
+                Arguments.of("zero limit", "limit", new String[]{"0"}),
+                Arguments.of("non-numeric limit", "limit", new String[]{"not-a-number"}),
+                Arguments.of("empty sequence", "afterSequence", new String[]{""}),
+                Arguments.of("empty limit", "limit", new String[]{""}),
+                Arguments.of("repeated sequence", "afterSequence", new String[]{"1", "2"}),
+                Arguments.of("repeated limit", "limit", new String[]{"1", "2"}));
+    }
+
+    @Test
+    void polls_the_job_status_and_counts_without_a_reply_sequence() throws Exception {
+        MessageIntakePort intake = mock(MessageIntakePort.class);
+        ConversationQueryPort queries = mock(ConversationQueryPort.class);
+        when(queries.findJob(JOB_ID)).thenReturn(Optional.of(new MessageJobView(JOB_ID, SESSION_ID, JobStatus.DONE, 1, 2)));
+
+        mvc(intake, queries).perform(get("/internal/message-jobs/{messageJobId}", JOB_ID))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.messageJobId").value(JOB_ID))
+                .andExpect(jsonPath("$.sessionId").value(SESSION_ID))
+                .andExpect(jsonPath("$.status").value("DONE"))
+                .andExpect(jsonPath("$.retryCount").value(1))
+                .andExpect(jsonPath("$.modelCallCount").value(2))
+                .andExpect(jsonPath("$.replySequence").doesNotExist());
     }
 
     @Test
@@ -174,45 +174,49 @@ class MessageControllerTest {
     void accepts_valid_inbound_messages() throws Exception {
         MessageIntakePort intake = mock(MessageIntakePort.class);
         ConversationQueryPort queries = mock(ConversationQueryPort.class);
-        when(intake.receive(any(IncomingMessage.class))).thenReturn(new MessageReceipt(new SessionId(SESSION_ID), new MessageJobId(JOB_ID)));
+        when(intake.receive(new IncomingMessage("thread", "alice", "source", "hello"))).thenReturn(new MessageReceipt(new SessionId(SESSION_ID), new MessageJobId(JOB_ID)));
 
         mvc(intake, queries).perform(post("/internal/messages").contentType(MediaType.APPLICATION_JSON)
                         .content("{\"sessionKey\":\"thread\",\"participantId\":\"alice\",\"sourceMessageId\":\"source\",\"message\":\"hello\"}"))
-                .andExpect(status().isAccepted()).andExpect(jsonPath("$.messageJobId").value(JOB_ID));
+                .andExpect(status().isAccepted())
+                .andExpect(jsonPath("$.sessionId").value(SESSION_ID))
+                .andExpect(jsonPath("$.messageJobId").value(JOB_ID));
     }
 
-    @Test
-    void resolves_strict_root_and_reply_permalink_requests_to_the_bound_session() throws Exception {
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "https://acme.slack.com/archives/C01ABCDEF/p1712345678123456",
+            "https://acme.slack.com/archives/C01ABCDEF/p1712345687123456?thread_ts=1712345678.123456&cid=C01ABCDEF"
+    })
+    void resolves_root_and_reply_permalink_requests_to_the_bound_session(String permalink) throws Exception {
         MessageIntakePort intake = mock(MessageIntakePort.class);
         ConversationQueryPort queries = mock(ConversationQueryPort.class);
         ExternalSessionReferenceQueryPort referenceQueries = mock(ExternalSessionReferenceQueryPort.class);
-        when(referenceQueries.findSessionId(any(String.class)))
-                .thenReturn(Optional.of(new SessionId(SESSION_ID)));
-        MockMvc mvc = mvc(intake, queries, referenceQueries);
+        when(referenceQueries.findSessionId(permalink)).thenReturn(Optional.of(new SessionId(SESSION_ID)));
 
-        mvc.perform(post("/internal/session-lookups").contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"permalink\":\"https://acme.slack.com/archives/C01ABCDEF/p1712345678123456\"}"))
+        mvc(intake, queries, referenceQueries)
+                .perform(post("/internal/session-lookups").contentType(MediaType.APPLICATION_JSON)
+                        .content(JsonMapper.builder().build().writeValueAsString(Map.of("permalink", permalink))))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.sessionId").value(SESSION_ID))
                 .andExpect(jsonPath("$.sessionDetailPath").value("/internal/sessions/" + SESSION_ID));
-        mvc.perform(post("/internal/session-lookups").contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"permalink\":\"https://acme.slack.com/archives/C01ABCDEF/p1712345687123456?thread_ts=1712345678.123456&cid=C01ABCDEF\"}"))
-                .andExpect(status().isOk())
-                .andExpect(jsonPath("$.sessionId").value(SESSION_ID));
-        mvc.perform(post("/internal/session-lookups").contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"permalink\":\"https://acme.slack.com/archives/C01ABCDEF/p1712345678123456\",\"extra\":true}"))
-                .andExpect(status().isBadRequest());
-        mvc.perform(post("/internal/session-lookups").contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"permalink\":\"https://acme.slack.com/archives/C01ABCDEF/p1712345678123456\",\"permalink\":\"https://acme.slack.com/archives/C01ABCDEF/p1712345678123456\"}"))
-                .andExpect(status().isBadRequest());
-        mvc.perform(post("/internal/session-lookups").contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"permalink\":\"   \"}"))
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "{\"permalink\":\"https://acme.slack.com/archives/C01ABCDEF/p1712345678123456\",\"extra\":true}",
+            "{\"permalink\":\"https://acme.slack.com/archives/C01ABCDEF/p1712345678123456\",\"permalink\":\"https://acme.slack.com/archives/C01ABCDEF/p1712345678123456\"}",
+            "{\"permalink\":\"   \"}"
+    })
+    void rejects_non_strict_session_lookup_requests(String content) throws Exception {
+        mvc(mock(MessageIntakePort.class), mock(ConversationQueryPort.class))
+                .perform(post("/internal/session-lookups").contentType(MediaType.APPLICATION_JSON).content(content))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.code").value("bad_request"));
     }
 
     @Test
-    void returns_content_light_session_detail_and_not_found_for_unknown_slack_binding() throws Exception {
+    void returns_content_light_session_detail() throws Exception {
         MessageIntakePort intake = mock(MessageIntakePort.class);
         ConversationQueryPort queries = mock(ConversationQueryPort.class);
         ExternalSessionReferenceQueryPort referenceQueries = mock(ExternalSessionReferenceQueryPort.class);
@@ -223,7 +227,6 @@ class MessageControllerTest {
                         ContextEstimate.Basis.PROVIDER_PLUS_TRAILING_ESTIMATE))));
         when(referenceQueries.findBinding(new SessionId(SESSION_ID))).thenReturn(Optional.of(
                 new ExternalSessionReferenceQueryPort.ExternalSessionBindingView("SLACK", "T01", "C01ABCDEF", "1712345678.123456", CREATED_AT)));
-        when(referenceQueries.findSessionId(any(String.class))).thenReturn(Optional.empty());
         MockMvc mvc = mvc(intake, queries, referenceQueries);
 
         mvc.perform(get("/internal/sessions/{sessionId}", SESSION_ID))
@@ -239,6 +242,15 @@ class MessageControllerTest {
                 .andExpect(jsonPath("$..summary").doesNotExist())
                 .andExpect(jsonPath("$..continuation").doesNotExist())
                 .andExpect(jsonPath("$..promptTokens").doesNotExist());
+    }
+
+    @Test
+    void returns_not_found_for_an_unknown_slack_binding() throws Exception {
+        ExternalSessionReferenceQueryPort referenceQueries = mock(ExternalSessionReferenceQueryPort.class);
+        String permalink = "https://acme.slack.com/archives/C01MISSING/p1712345678123456";
+        when(referenceQueries.findSessionId(permalink)).thenReturn(Optional.empty());
+        MockMvc mvc = mvc(mock(MessageIntakePort.class), mock(ConversationQueryPort.class), referenceQueries);
+
         mvc.perform(post("/internal/session-lookups").contentType(MediaType.APPLICATION_JSON)
                         .content("{\"permalink\":\"https://acme.slack.com/archives/C01MISSING/p1712345678123456\"}"))
                 .andExpect(status().isNotFound());

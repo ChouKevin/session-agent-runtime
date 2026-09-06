@@ -41,14 +41,30 @@ class HistoryProjectorTest {
     }
 
     @Test
-    void replays_a_native_call_batch_as_one_assistant_and_one_ordered_tool_response_message() {
-        List<Message> messages = new HistoryProjector(new ObjectMapper()).project(batch());
+    void replays_a_native_call_batch_as_one_assistant_and_one_ordered_tool_response_message() throws Exception {
+        ObjectMapper objectMapper = new ObjectMapper();
+        List<Message> messages = new HistoryProjector(objectMapper).project(batch());
 
         assertThat(messages).hasSize(2);
         assertThat(messages.getFirst()).isInstanceOf(org.springframework.ai.chat.messages.AssistantMessage.class);
+        org.springframework.ai.chat.messages.AssistantMessage assistant =
+                (org.springframework.ai.chat.messages.AssistantMessage) messages.getFirst();
+        assertThat(assistant.getText()).isEqualTo("Checking.");
+        assertThat(assistant.getToolCalls()).extracting(call -> call.id()).containsExactly("call-1", "call-2");
+        assertThat(assistant.getToolCalls()).extracting(call -> call.name()).containsExactly("first", "second");
+        assertThat(objectMapper.readTree(assistant.getToolCalls().getFirst().arguments()))
+                .isEqualTo(objectMapper.valueToTree(Map.of("query", "fees")));
+        assertThat(objectMapper.readTree(assistant.getToolCalls().get(1).arguments()))
+                .isEqualTo(objectMapper.valueToTree(Map.of()));
         assertThat(messages.get(1)).isInstanceOfSatisfying(ToolResponseMessage.class,
                 value -> assertThat(value.getResponses()).extracting(response -> response.id())
                         .containsExactly("call-1", "call-2"));
+        ToolResponseMessage responses = (ToolResponseMessage) messages.get(1);
+        assertThat(responses.getResponses()).extracting(response -> response.name()).containsExactly("first", "second");
+        assertThat(objectMapper.readTree(responses.getResponses().getFirst().responseData()))
+                .isEqualTo(objectMapper.valueToTree(Map.of("isError", false, "result", Map.of("fee", 25))));
+        assertThat(objectMapper.readTree(responses.getResponses().get(1).responseData()))
+                .isEqualTo(objectMapper.valueToTree(Map.of("isError", true, "result", Map.of("code", "PROVIDER_ERROR"))));
     }
 
     @ParameterizedTest(name = "rejects {0} native history before provider invocation")
@@ -103,8 +119,8 @@ class HistoryProjectorTest {
                         new ToolRequest(new ToolCallId("call-1"), new ToolName("first"), Map.of("query", "fees")),
                         new ToolRequest(new ToolCallId("call-2"), new ToolName("second"), Map.of()))),
                 new ToolObservation(sessionId, new SessionSequence(2), Optional.of(jobId), now, MessageRole.TOOL,
-                        new ToolCallId("call-1"), "first", Map.of("isError", false, "result", Map.of())),
+                        new ToolCallId("call-1"), "first", Map.of("isError", false, "result", Map.of("fee", 25))),
                 new ToolObservation(sessionId, new SessionSequence(3), Optional.of(jobId), now, MessageRole.TOOL,
-                        new ToolCallId("call-2"), "second", Map.of("isError", false, "result", Map.of())));
+                        new ToolCallId("call-2"), "second", Map.of("isError", true, "result", Map.of("code", "PROVIDER_ERROR"))));
     }
 }

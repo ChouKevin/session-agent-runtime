@@ -10,6 +10,7 @@ import org.springframework.scheduling.TaskScheduler;
 import java.util.List;
 import java.util.Arrays;
 import java.util.Map;
+import java.net.URI;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -18,7 +19,9 @@ class McpConnectionsEndpointTest {
     @Test
     void exposes_only_safe_connection_diagnostics_without_configuration_secrets() {
         McpConnectionManager manager = new McpConnectionManager(
-                new McpConnectionProperties(Map.of(), null, null, null, null, null), connection -> {
+                new McpConnectionProperties(Map.of("semantic", new McpConnectionProperties.Connection(
+                        true, URI.create("https://mcp.example/custom/mcp"),
+                        Map.of("Authorization", "Bearer secret-token"))), null, null, null, null, null), connection -> {
                     throw new IllegalStateException("MCP lifecycle is not configured");
                 }, Mockito.mock(TaskScheduler.class), java.time.Clock.systemUTC(),
                 new com.fasterxml.jackson.databind.ObjectMapper(), command -> command.run());
