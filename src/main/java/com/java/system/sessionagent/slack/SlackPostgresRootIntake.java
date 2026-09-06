@@ -38,7 +38,15 @@ public final class SlackPostgresRootIntake implements SlackRootIntakePort {
     @Override
     public SlackEventOutcome receive(SlackRootIntake intake) {
         SlackRootIntake requiredIntake = Objects.requireNonNull(intake, "Slack intake must not be null");
-        SlackEventOutcome outcome = transactionTemplate.execute(status -> receiveInTransaction(requiredIntake));
+        try {
+            return receiveInRequiredTransaction(requiredIntake);
+        } catch (CommittedLogicalOutcomeRaceException exception) {
+            return receiveInRequiredTransaction(requiredIntake);
+        }
+    }
+
+    private SlackEventOutcome receiveInRequiredTransaction(SlackRootIntake intake) {
+        SlackEventOutcome outcome = transactionTemplate.execute(status -> receiveInTransaction(intake));
         return Objects.requireNonNull(outcome, "Slack intake outcome must not be null");
     }
 
@@ -149,8 +157,10 @@ public final class SlackPostgresRootIntake implements SlackRootIntakePort {
                 on conflict (team_id, channel_id, message_ts) do nothing
                 """, intake.teamId(), intake.channelId(), intake.messageTs(), classification.name(), sessionId, jobId, createdAt());
         Optional<StoredMessageReceipt> messageReceipt = findMessageReceipt(intake);
-        Assert.isTrue(messageReceipt.isPresent() && messageReceipt.orElseThrow().matches(classification, sessionId, jobId),
-                "Slack logical message receipt must match its committed outcome");
+        Assert.isTrue(messageReceipt.isPresent(), "Slack logical message receipt must be committed");
+        if (!messageReceipt.orElseThrow().matches(classification, sessionId, jobId)) {
+            throw new CommittedLogicalOutcomeRaceException();
+        }
     }
 
     private void persistAndVerifyEventReceipt(
@@ -236,5 +246,8 @@ public final class SlackPostgresRootIntake implements SlackRootIntakePort {
             return classification == expectedClassification && Objects.equals(sessionId, expectedSessionId)
                     && Objects.equals(messageJobId, expectedJobId);
         }
+    }
+
+    private static final class CommittedLogicalOutcomeRaceException extends RuntimeException {
     }
 }

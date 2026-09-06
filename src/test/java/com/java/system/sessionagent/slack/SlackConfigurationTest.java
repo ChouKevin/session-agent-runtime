@@ -41,12 +41,12 @@ class SlackConfigurationTest {
     }
 
     @Test
-    void enables_bolt_subtype_auto_ack_as_a_safe_fallback_after_registering_handlers() {
+    void disables_bolt_subtype_auto_ack_so_candidate_subtypes_reach_durable_intake() {
         SlackEventAdapter adapter = new SlackEventAdapter("UBOT", ignored -> SlackEventOutcome.IGNORED);
         SlackBoltSocketClient client = new SlackBoltSocketClient(new SlackProperties("xapp-complete", "xoxb-complete", "UBOT",
                 Duration.ofSeconds(1), Duration.ofSeconds(1)), adapter);
 
-        assertThat(client.buildApp().config().isSubtypedMessageEventsAutoAckEnabled()).isTrue();
+        assertThat(client.buildApp().config().isSubtypedMessageEventsAutoAckEnabled()).isFalse();
     }
 
     @Configuration(proxyBeanMethods = false)

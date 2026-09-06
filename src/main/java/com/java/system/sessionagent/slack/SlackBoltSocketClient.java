@@ -1,7 +1,14 @@
 package com.java.system.sessionagent.slack;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.slack.api.bolt.App;
 import com.slack.api.bolt.AppConfig;
+import com.slack.api.bolt.handler.builtin.DefaultUnmatchedRequestHandler;
+import com.slack.api.bolt.request.Request;
+import com.slack.api.bolt.request.builtin.EventRequest;
+import com.slack.api.bolt.response.Response;
 import com.slack.api.bolt.socket_mode.SocketModeApp;
 import com.slack.api.model.event.AppMentionEvent;
 import com.slack.api.model.event.MessageBotEvent;
@@ -16,10 +23,14 @@ import com.slack.api.model.event.MessageRepliedEvent;
 import com.slack.api.model.event.MessageThreadBroadcastEvent;
 import org.springframework.util.Assert;
 import org.springframework.util.CollectionUtils;
+import org.springframework.util.StringUtils;
 
 import java.util.Objects;
+import java.util.Optional;
 
 public final class SlackBoltSocketClient implements SlackSocketClient {
+
+    private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
     private final SlackProperties properties;
     private final SlackEventAdapter eventAdapter;
@@ -45,7 +56,7 @@ public final class SlackBoltSocketClient implements SlackSocketClient {
                 .singleTeamBotToken(properties.botToken())
                 .requestVerificationEnabled(false)
                 .ignoringSelfEventsEnabled(false)
-                .subtypedMessageEventsAutoAckEnabled(true)
+                .unmatchedRequestHandler(this::handleUnmatchedRequest)
                 .build());
         registerHandlers(app);
         return app;
@@ -85,9 +96,14 @@ public final class SlackBoltSocketClient implements SlackSocketClient {
         });
         app.event(MessageDeletedEvent.class, (request, context) -> {
             MessageDeletedEvent event = request.getEvent();
-            MessageDeletedEvent.Message message = Objects.requireNonNull(event.getPreviousMessage(), "Deleted Slack message must be present");
-            handle(request.getEventId(), context.getTeamId(), event.getChannel(), message.getTs(), message.getThreadTs(), message.getUser(),
-                    message.getBotId(), event.getChannelType(), "", event.getSubtype(), event.isHidden(), false);
+            Optional<MessageDeletedEvent.Message> previousMessage = Optional.ofNullable(event.getPreviousMessage());
+            String messageTs = firstText(previousMessage.map(MessageDeletedEvent.Message::getTs).orElse(""),
+                    firstText(event.getDeletedTs(), event.getTs()));
+            handle(request.getEventId(), context.getTeamId(), event.getChannel(), messageTs,
+                    previousMessage.map(MessageDeletedEvent.Message::getThreadTs).orElse(""),
+                    previousMessage.map(MessageDeletedEvent.Message::getUser).orElse(""),
+                    previousMessage.map(MessageDeletedEvent.Message::getBotId).orElse(""), event.getChannelType(), "", event.getSubtype(),
+                    event.isHidden(), false);
             return context.ack();
         });
         app.event(MessageThreadBroadcastEvent.class, (request, context) -> {
@@ -138,6 +154,51 @@ public final class SlackBoltSocketClient implements SlackSocketClient {
 
     private static boolean hasAttachments(java.util.List<?> attachments, java.util.List<?> files) {
         return !CollectionUtils.isEmpty(attachments) || !CollectionUtils.isEmpty(files);
+    }
+
+    private Response handleUnmatchedRequest(Request<?> request) {
+        if (request instanceof EventRequest eventRequest && isUnregisteredMessageSubtype(eventRequest)) {
+            normalizeUnregisteredMessageSubtype(eventRequest).ifPresent(eventAdapter::handle);
+            return Response.ok();
+        }
+        return new DefaultUnmatchedRequestHandler().handle(request);
+    }
+
+    private static boolean isUnregisteredMessageSubtype(EventRequest request) {
+        String eventTypeAndSubtype = request.getEventTypeAndSubtype();
+        return StringUtils.hasText(eventTypeAndSubtype) && eventTypeAndSubtype.startsWith("message:");
+    }
+
+    private static Optional<SlackRootEvent> normalizeUnregisteredMessageSubtype(EventRequest request) {
+        try {
+            JsonNode envelope = OBJECT_MAPPER.readTree(request.getRequestBodyAsString());
+            JsonNode event = envelope.path("event");
+            String eventId = text(envelope, "event_id");
+            String teamId = text(envelope, "team_id");
+            String channelId = text(event, "channel");
+            String messageTs = text(event, "ts");
+            if (!StringUtils.hasText(eventId) || !StringUtils.hasText(teamId) || !StringUtils.hasText(channelId)
+                    || !StringUtils.hasText(messageTs)) {
+                return Optional.empty();
+            }
+            return Optional.of(new SlackRootEvent(eventId, teamId, channelId, messageTs, text(event, "thread_ts"), text(event, "user"),
+                    text(event, "bot_id"), text(event, "channel_type"), text(event, "text"), text(event, "subtype"),
+                    event.path("hidden").asBoolean(false), hasAttachments(event.path("attachments"), event.path("files"))));
+        } catch (JsonProcessingException exception) {
+            return Optional.empty();
+        }
+    }
+
+    private static String text(JsonNode node, String fieldName) {
+        return node.path(fieldName).asText("");
+    }
+
+    private static boolean hasAttachments(JsonNode attachments, JsonNode files) {
+        return (attachments.isArray() && !attachments.isEmpty()) || (files.isArray() && !files.isEmpty());
+    }
+
+    private static String firstText(String preferred, String fallback) {
+        return StringUtils.hasText(preferred) ? preferred : fallback;
     }
 
     private void handle(

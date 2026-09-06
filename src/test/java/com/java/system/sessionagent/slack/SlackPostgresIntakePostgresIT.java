@@ -150,6 +150,86 @@ class SlackPostgresIntakePostgresIT {
     }
 
     @Test
+    void resolves_a_mixed_accepted_and_ignored_logical_race_to_one_committed_outcome() throws Exception {
+        SlackPostgresRootIntake intake = intake();
+        JdbcTemplate jdbcTemplate = new JdbcTemplate(dataSource());
+        SlackRootIntake accepted = rootIntake("T1", "C1", "1.000001");
+        SlackRootIntake ignored = new SlackRootIntake("event-ignored-race", "T1", "C1", "1.000001", "1.000001",
+                SlackIntakeClassification.UNSUPPORTED_CONTENT, java.util.Optional.empty());
+
+        List<SlackEventOutcome> outcomes = concurrently(accepted, ignored, intake::receive);
+
+        assertThat(outcomes).containsOnly(outcomes.getFirst());
+        assertThat(count(jdbcTemplate, "select count(*) from slack_message_receipt")).isEqualTo(1);
+        assertThat(count(jdbcTemplate, "select count(*) from slack_event_receipt")).isEqualTo(2);
+        if (outcomes.getFirst() == SlackEventOutcome.ACCEPTED) {
+            assertThat(count(jdbcTemplate, "select count(*) from source_message where source_type = 'slack'")).isEqualTo(1);
+            assertThat(count(jdbcTemplate, "select count(*) from message_job")).isEqualTo(1);
+            assertThat(count(jdbcTemplate, """
+                    select count(*) from slack_event_receipt
+                    where classification = 'ACCEPTED' and correlation_id is not null
+                    """)).isEqualTo(2);
+        } else {
+            assertThat(count(jdbcTemplate, "select count(*) from source_message where source_type = 'slack'")).isZero();
+            assertThat(count(jdbcTemplate, "select count(*) from message_job")).isZero();
+            assertThat(count(jdbcTemplate, """
+                    select count(*) from slack_event_receipt
+                    where classification = 'UNSUPPORTED_CONTENT' and correlation_id is null
+                    """)).isEqualTo(2);
+        }
+    }
+
+    @Test
+    void acknowledges_and_persists_an_unregistered_candidate_human_subtype_envelope_without_a_job() throws Exception {
+        JdbcTemplate jdbcTemplate = new JdbcTemplate(dataSource());
+        SlackBoltSocketClient socketClient = socketClient();
+        App app = appWithoutAuthorization(socketClient);
+        EventRequest request = new EventRequest("""
+                {
+                  "type":"event_callback",
+                  "event_id":"event-assistant-thread",
+                  "team_id":"T1",
+                  "event":{"type":"message","subtype":"assistant_app_thread","channel":"C1","channel_type":"channel",
+                  "user":"U1","text":"private assistant thread text","ts":"1.000001"}
+                }
+                """, new RequestHeaders(Map.of()));
+        request.setSocketMode(true);
+
+        Response response = app.run(request);
+
+        assertThat(response.getStatusCode()).isEqualTo(200);
+        assertThat(count(jdbcTemplate, "select count(*) from slack_event_receipt where classification = 'UNSUPPORTED_CONTENT'"))
+                .isEqualTo(1);
+        assertThat(count(jdbcTemplate, "select count(*) from slack_message_receipt where classification = 'UNSUPPORTED_CONTENT'"))
+                .isEqualTo(1);
+        assertThat(count(jdbcTemplate, "select count(*) from source_message where source_type = 'slack'")).isZero();
+        assertThat(count(jdbcTemplate, "select count(*) from message_job")).isZero();
+    }
+
+    @Test
+    void acknowledges_a_canonical_deleted_envelope_without_previous_message_or_a_job() throws Exception {
+        JdbcTemplate jdbcTemplate = new JdbcTemplate(dataSource());
+        App app = appWithoutAuthorization(socketClient());
+        EventRequest request = new EventRequest("""
+                {
+                  "type":"event_callback",
+                  "event_id":"event-deleted",
+                  "team_id":"T1",
+                  "event":{"type":"message","subtype":"message_deleted","channel":"C1","channel_type":"channel",
+                  "deleted_ts":"1.000001","event_ts":"1.000002","ts":"1.000002"}
+                }
+                """, new RequestHeaders(Map.of()));
+        request.setSocketMode(true);
+
+        Response response = app.run(request);
+
+        assertThat(response.getStatusCode()).isEqualTo(200);
+        assertThat(count(jdbcTemplate, "select count(*) from slack_event_receipt")).isZero();
+        assertThat(count(jdbcTemplate, "select count(*) from source_message where source_type = 'slack'")).isZero();
+        assertThat(count(jdbcTemplate, "select count(*) from message_job")).isZero();
+    }
+
+    @Test
     void shares_a_bound_thread_session_and_deduplicates_event_and_logical_message_identities() {
         SlackPostgresRootIntake intake = intake();
         JdbcTemplate jdbcTemplate = new JdbcTemplate(dataSource());
@@ -318,6 +398,18 @@ class SlackPostgresIntakePostgresIT {
         return new SlackPostgresRootIntake(dataSource, messageIntakePort, clock);
     }
 
+    private SlackBoltSocketClient socketClient() {
+        SlackEventAdapter adapter = new SlackEventAdapter("UBOT", intake());
+        return new SlackBoltSocketClient(new SlackProperties("xapp-test", "xoxb-test", "UBOT", Duration.ofSeconds(1),
+                Duration.ofSeconds(1)), adapter);
+    }
+
+    private App appWithoutAuthorization(SlackBoltSocketClient socketClient) {
+        App app = new App(socketClient.buildApp().config().toBuilder().singleTeamBotToken(null).build()); // cs-allow Bolt uses null to disable test-only authorization.
+        socketClient.registerHandlers(app);
+        return app;
+    }
+
     private ConversationStore store() {
         return new PostgresConversationStore(dataSource(), Clock.fixed(Instant.parse("2026-09-06T00:00:00Z"), ZoneOffset.UTC),
                 new ObjectMapper());
@@ -338,6 +430,34 @@ class SlackPostgresIntakePostgresIT {
             ready.await();
             start.countDown();
             return List.of(first.get(), second.get());
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
+    private List<SlackEventOutcome> concurrently(
+            SlackRootIntake firstIntake,
+            SlackRootIntake secondIntake,
+            java.util.function.Function<SlackRootIntake, SlackEventOutcome> receiver) throws Exception {
+        CountDownLatch ready = new CountDownLatch(2);
+        CountDownLatch start = new CountDownLatch(1);
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            Callable<SlackEventOutcome> first = () -> {
+                ready.countDown();
+                start.await();
+                return receiver.apply(firstIntake);
+            };
+            Callable<SlackEventOutcome> second = () -> {
+                ready.countDown();
+                start.await();
+                return receiver.apply(secondIntake);
+            };
+            Future<SlackEventOutcome> firstResult = executor.submit(first);
+            Future<SlackEventOutcome> secondResult = executor.submit(second);
+            ready.await();
+            start.countDown();
+            return List.of(firstResult.get(), secondResult.get());
         } finally {
             executor.shutdownNow();
         }
