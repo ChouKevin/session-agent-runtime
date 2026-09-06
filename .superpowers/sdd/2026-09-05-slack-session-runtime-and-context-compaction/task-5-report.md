@@ -199,3 +199,65 @@ provide durable correlation without claiming cross-system exactly-once delivery.
   can still yield a duplicate visible reply on retry. This fix does not claim
   cross-system exactly-once delivery.
 - No additional FOLLOW_UP items identified.
+
+## Fix round 2 — dedicated delivery SDK client statistics
+
+### Finding disposition
+
+- **BLOCKING resolved:** `SlackSdkWebApi.slackFor` now disables Slack SDK
+  statistics before constructing the dedicated synchronous delivery client.
+  This prevents the SDK's cold-client team-ID resolution (`auth.test`) and its
+  metrics lifecycle from extending a `chat.postMessage` delivery beyond the
+  single configured whole-call bound. The configured 25-second call timeout
+  remains below the 30-second delivery lease. No provider failures, tokens,
+  headers, URLs, or committed content are added to diagnostics.
+
+### BDD scenario and verification boundary
+
+- `DELIVERY-1` supporting delivery-lifecycle boundary: given a cold production
+  `SlackSdkWebApi` client and a loopback Slack HTTP endpoint, when the committed
+  delivery request is posted, then exactly one outbound request reaches
+  `/chat.postMessage` (never `/auth.test`), while statistics are disabled and
+  the whole-call timeout remains 25 seconds. This is a local HTTP adapter
+  boundary test using the real Slack SDK client; it makes no live Slack call.
+
+### RED / GREEN evidence
+
+- **RED:** before the configuration change,
+  `SlackSdkWebApiTest.cold_delivery_client_posts_once_without_auth_test_and_uses_the_bounded_timeout`
+  failed because the cold production configuration retained `statsEnabled=true`.
+  This is the SDK setting that activates team-ID resolution before
+  `chat.postMessage`.
+- **GREEN:** after disabling statistics before `Slack.getInstance(config)`, the
+  same local HTTP scenario passed with only `/chat.postMessage`, and retained
+  the 25,000 ms whole-call timeout.
+- **REFACTOR:** the scenario replaces the configuration-only assertion with the
+  smallest faithful HTTP-boundary test; no production abstraction or public
+  contract changed.
+
+### Commands and results
+
+```text
+JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64 mvn --batch-mode --no-transfer-progress \
+  -Dtest=SlackSdkWebApiTest,SlackDeliveryWorkerTest,SlackDeliveryLifecycleTest test
+```
+
+Passed: 7 tests, 0 failures/errors.
+
+```text
+JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64 mvn --batch-mode --no-transfer-progress -Ppostgres-it verify
+```
+
+Passed: 168 fake-backed tests (one authorized live-model test skipped) and 34
+PostgreSQL integration tests, 0 failures/errors. `git diff --check` passed.
+
+### Commit
+
+- `fc30834ffddf9b6d90e1b1d82a839fb3587e8b85` — `fix(slack): disable delivery SDK statistics`
+
+### Residual risk / FOLLOW_UP
+
+- The approved at-least-once delivery outcome remains unchanged: a lost client
+  acknowledgement after Slack accepts a post can still yield a duplicate on
+  retry.
+- No additional FOLLOW_UP items identified.
