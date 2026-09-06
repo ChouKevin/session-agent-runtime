@@ -137,6 +137,22 @@ class MessageControllerTest {
                         .queryParam("limit", "not-a-number"))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.code").value("bad_request"));
+        mvc(intake, queries).perform(get("/internal/sessions/{sessionId}/messages", SESSION_ID)
+                        .queryParam("afterSequence", ""))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("bad_request"));
+        mvc(intake, queries).perform(get("/internal/sessions/{sessionId}/messages", SESSION_ID)
+                        .queryParam("limit", ""))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("bad_request"));
+        mvc(intake, queries).perform(get("/internal/sessions/{sessionId}/messages", SESSION_ID)
+                        .queryParam("afterSequence", "1", "2"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("bad_request"));
+        mvc(intake, queries).perform(get("/internal/sessions/{sessionId}/messages", SESSION_ID)
+                        .queryParam("limit", "1", "2"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("bad_request"));
     }
 
     @Test

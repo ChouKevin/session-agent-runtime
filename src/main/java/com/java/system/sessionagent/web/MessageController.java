@@ -9,6 +9,8 @@ import jakarta.validation.Valid;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.util.Assert;
+import org.springframework.util.MultiValueMap;
+import org.springframework.util.StringUtils;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -18,6 +20,7 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.util.List;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -60,16 +63,15 @@ public final class MessageController {
     @GetMapping("/sessions/{sessionId}/messages")
     public List<MessageResponses.SessionMessageResponse> messages(
             @PathVariable String sessionId,
-            @RequestParam Optional<Long> afterSequence,
-            @RequestParam Optional<Integer> limit) {
+            @RequestParam MultiValueMap<String, String> queryParameters) {
         requireUuid(sessionId);
-        validateHistoryPagination(afterSequence, limit);
-        if (afterSequence.isEmpty() && limit.isEmpty()) {
+        HistoryPagination pagination = historyPagination(queryParameters);
+        if (pagination.afterSequence().isEmpty() && pagination.limit().isEmpty()) {
             return conversationQueryPort.messages(sessionId).orElseThrow(WebErrorHandler.NotFoundException::new).stream()
                     .map(MessageResponses.SessionMessageResponse::from).toList();
         }
-        long startingSequence = afterSequence.orElse(0L);
-        int maximumResults = limit.orElse(Integer.MAX_VALUE);
+        long startingSequence = pagination.afterSequence().orElse(0L);
+        int maximumResults = pagination.limit().orElse(Integer.MAX_VALUE);
         return conversationQueryPort.messages(sessionId, startingSequence, maximumResults)
                 .orElseThrow(WebErrorHandler.NotFoundException::new).stream()
                 .map(MessageResponses.SessionMessageResponse::from).toList();
@@ -96,8 +98,43 @@ public final class MessageController {
                                 binding.rootMessageId(), binding.createdAt())))).orElseThrow(WebErrorHandler.NotFoundException::new);
     }
 
-    private static void validateHistoryPagination(Optional<Long> afterSequence, Optional<Integer> limit) {
-        if (afterSequence.filter(value -> value < 0).isPresent() || limit.filter(value -> value <= 0).isPresent()) {
+    private static HistoryPagination historyPagination(MultiValueMap<String, String> queryParameters) {
+        Optional<String> rawAfterSequence = singleQueryValue(queryParameters, "afterSequence");
+        Optional<String> rawLimit = singleQueryValue(queryParameters, "limit");
+        return new HistoryPagination(rawAfterSequence.map(MessageController::parseAfterSequence), rawLimit.map(MessageController::parseLimit));
+    }
+
+    private static Optional<String> singleQueryValue(MultiValueMap<String, String> queryParameters, String name) {
+        if (!queryParameters.containsKey(name)) {
+            return Optional.empty();
+        }
+        List<String> values = Objects.requireNonNull(queryParameters.get(name), "Query parameter values must not be null");
+        if (values.size() != 1 || !StringUtils.hasText(values.getFirst())) {
+            throw new WebErrorHandler.BadRequestException();
+        }
+        return Optional.of(values.getFirst());
+    }
+
+    private static long parseAfterSequence(String value) {
+        try {
+            long afterSequence = Long.parseLong(value);
+            if (afterSequence < 0) {
+                throw new WebErrorHandler.BadRequestException();
+            }
+            return afterSequence;
+        } catch (NumberFormatException exception) {
+            throw new WebErrorHandler.BadRequestException();
+        }
+    }
+
+    private static int parseLimit(String value) {
+        try {
+            int limit = Integer.parseInt(value);
+            if (limit <= 0) {
+                throw new WebErrorHandler.BadRequestException();
+            }
+            return limit;
+        } catch (NumberFormatException exception) {
             throw new WebErrorHandler.BadRequestException();
         }
     }
@@ -108,5 +145,8 @@ public final class MessageController {
         } catch (IllegalArgumentException exception) {
             throw new WebErrorHandler.BadRequestException();
         }
+    }
+
+    private record HistoryPagination(Optional<Long> afterSequence, Optional<Integer> limit) {
     }
 }

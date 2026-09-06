@@ -30,6 +30,10 @@ class SlackPermalinkParserTest {
         assertThatIllegalArgumentException().isThrownBy(
                 () -> parser.parse("https://acme.slack.com@evil.test/archives/C01ABCDEF/p1712345678123456"));
         assertThatIllegalArgumentException().isThrownBy(
+                () -> parser.parse("https://@acme.slack.com/archives/C01ABCDEF/p1712345678123456"));
+        assertThatIllegalArgumentException().isThrownBy(
+                () -> parser.parse("https://acme.slack.com:/archives/C01ABCDEF/p1712345678123456"));
+        assertThatIllegalArgumentException().isThrownBy(
                 () -> parser.parse("https://acme.slack.com/archives/C01ABCDEF/p1712345678123456#fragment"));
         assertThatIllegalArgumentException().isThrownBy(
                 () -> parser.parse("https://acme.slack.com/archives/C01ABCDEF/p1712345678123456?"));

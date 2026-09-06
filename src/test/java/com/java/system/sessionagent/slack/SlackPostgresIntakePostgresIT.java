@@ -13,6 +13,7 @@ import com.java.system.sessionagent.conversation.domain.ModelRequest;
 import com.java.system.sessionagent.conversation.domain.ModelUsage;
 import com.java.system.sessionagent.conversation.domain.MessageWorkClaim;
 import com.java.system.sessionagent.conversation.domain.MessageReceipt;
+import com.java.system.sessionagent.conversation.domain.SessionId;
 import com.java.system.sessionagent.conversation.port.in.MessageConflictException;
 import com.java.system.sessionagent.conversation.port.in.MessageIntakePort;
 import com.java.system.sessionagent.conversation.port.out.ConversationModel;
@@ -50,6 +51,7 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
+import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -86,6 +88,26 @@ class SlackPostgresIntakePostgresIT {
         assertThat(count(jdbcTemplate, "select count(*) from source_message where source_type = 'slack'")).isEqualTo(1);
         assertThat(count(jdbcTemplate, "select count(*) from session_message where role = 'USER'")).isEqualTo(1);
         assertThat(count(jdbcTemplate, "select count(*) from message_job")).isEqualTo(1);
+    }
+
+    @Test
+    void resolves_a_migrated_slack_thread_binding_from_root_and_reply_permalinks() {
+        SlackPostgresRootIntake intake = intake();
+        intake.receive(rootIntake("T1", "C01ABCDEF", "1712345678.123456"));
+
+        JdbcTemplate jdbcTemplate = new JdbcTemplate(dataSource());
+        UUID persistedSessionId = Objects.requireNonNull(jdbcTemplate.queryForObject("""
+                select session_id from slack_thread_binding
+                where team_id = ? and channel_id = ? and root_thread_ts = ?
+                """, UUID.class, "T1", "C01ABCDEF", "1712345678.123456"));
+        SlackPostgresSessionLookup lookup = new SlackPostgresSessionLookup(dataSource(), new SlackPermalinkParser());
+        SessionId expectedSessionId = new SessionId(persistedSessionId.toString());
+
+        assertThat(lookup.findSessionId("https://acme.slack.com/archives/C01ABCDEF/p1712345678123456"))
+                .contains(expectedSessionId);
+        assertThat(lookup.findSessionId("https://acme.slack.com/archives/C01ABCDEF/p1712345687123456"
+                + "?thread_ts=1712345678.123456&cid=C01ABCDEF")).contains(expectedSessionId);
+        assertThat(lookup.findSessionId("https://acme.slack.com/archives/C01MISSING/p1712345678123456")).isEmpty();
     }
 
     @Test
