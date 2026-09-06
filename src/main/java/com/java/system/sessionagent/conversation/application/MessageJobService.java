@@ -354,11 +354,7 @@ public final class MessageJobService implements MessageJobPort {
     private Optional<CompactionBoundary> selectBoundary(MessageWorkClaim claim, ContextState context, ModelDescriptor descriptor) {
         List<SessionMessage> full = conversationStore.loadHistory(claim.sessionId());
         int start = context.compaction().map(compaction -> indexAfter(full, compaction.coveredThrough())).orElse(0);
-        int currentUser = currentUserIndex(full, claim);
-        if (currentUser <= start) {
-            return Optional.empty();
-        }
-        for (int index = currentUser - 1; index >= start; index--) {
+        for (int index = full.size() - 1; index >= start; index--) {
             int end = completeBoundaryEnd(full, index);
             if (end < index || !isResponseBoundary(full.get(index))) {
                 continue;
@@ -375,17 +371,6 @@ public final class MessageJobService implements MessageJobPort {
         return Optional.empty();
     }
 
-    private static int currentUserIndex(List<SessionMessage> history, MessageWorkClaim claim) {
-        for (int index = history.size() - 1; index >= 0; index--) {
-            SessionMessage message = history.get(index);
-            if (message instanceof com.java.system.sessionagent.conversation.domain.UserMessage
-                    && message.messageJobId().filter(claim.messageJobId()::equals).isPresent()) {
-                return index;
-            }
-        }
-        return history.size();
-    }
-
     private static long fourFifths(long value) {
         return (value / 5L) * 4L + (value % 5L) * 4L / 5L;
     }
@@ -400,7 +385,21 @@ public final class MessageJobService implements MessageJobPort {
             return -1;
         }
         for (int offset = 1; offset <= calls.requests().size(); offset++) {
-            if (!(history.get(index + offset) instanceof com.java.system.sessionagent.conversation.domain.ToolObservation)) {
+            if (!(history.get(index + offset) instanceof com.java.system.sessionagent.conversation.domain.ToolObservation observation)) {
+                return -1;
+            }
+            ToolRequest request = calls.requests().get(offset - 1);
+            long expectedSequence;
+            try {
+                expectedSequence = Math.addExact(calls.sequence().value(), offset);
+            } catch (ArithmeticException exception) {
+                return -1;
+            }
+            if (!request.toolCallId().equals(observation.toolCallId())
+                    || !request.toolName().value().equals(observation.toolName())
+                    || !calls.sessionId().equals(observation.sessionId())
+                    || !calls.messageJobId().equals(observation.messageJobId())
+                    || observation.sequence().value() != expectedSequence) {
                 return -1;
             }
         }
