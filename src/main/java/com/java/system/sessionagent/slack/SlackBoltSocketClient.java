@@ -3,6 +3,7 @@ package com.java.system.sessionagent.slack;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.slack.api.bolt.App;
 import com.slack.api.bolt.AppConfig;
 import com.slack.api.bolt.handler.builtin.DefaultUnmatchedRequestHandler;
@@ -10,6 +11,10 @@ import com.slack.api.bolt.request.Request;
 import com.slack.api.bolt.request.builtin.EventRequest;
 import com.slack.api.bolt.response.Response;
 import com.slack.api.bolt.socket_mode.SocketModeApp;
+import com.slack.api.socket_mode.SocketModeClient;
+import com.slack.api.bolt.socket_mode.request.SocketModeRequestParser;
+import com.slack.api.bolt.socket_mode.request.SocketModeRequest;
+import com.slack.api.socket_mode.response.AckResponse;
 import com.slack.api.model.event.AppMentionEvent;
 import com.slack.api.model.event.MessageBotEvent;
 import com.slack.api.model.event.MessageChangedEvent;
@@ -27,6 +32,7 @@ import org.springframework.util.StringUtils;
 
 import java.util.Objects;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 public final class SlackBoltSocketClient implements SlackSocketClient {
 
@@ -34,21 +40,50 @@ public final class SlackBoltSocketClient implements SlackSocketClient {
 
     private final SlackProperties properties;
     private final SlackEventAdapter eventAdapter;
-    private SocketModeApp socketModeApp;
+    private final SlackSocketRuntimeFactory runtimeFactory;
+    private Optional<OwnedRuntime> activeRuntime = Optional.empty();
 
     public SlackBoltSocketClient(SlackProperties properties, SlackEventAdapter eventAdapter) {
         Assert.notNull(properties, "Slack properties must not be null");
         Assert.notNull(eventAdapter, "Slack event adapter must not be null");
         this.properties = properties;
         this.eventAdapter = eventAdapter;
+        this.runtimeFactory = this::createRuntime;
+    }
+
+    SlackBoltSocketClient(
+            SlackProperties properties,
+            SlackEventAdapter eventAdapter,
+            SlackSocketRuntimeFactory runtimeFactory) {
+        Assert.notNull(properties, "Slack properties must not be null");
+        Assert.notNull(eventAdapter, "Slack event adapter must not be null");
+        Assert.notNull(runtimeFactory, "Slack socket runtime factory must not be null");
+        this.properties = properties;
+        this.eventAdapter = eventAdapter;
+        this.runtimeFactory = runtimeFactory;
     }
 
     @Override
-    public void start() throws Exception {
-        App app = buildApp();
-        SocketModeApp socket = new SocketModeApp(properties.appToken(), app);
-        socket.startAsync();
-        this.socketModeApp = socket;
+    public synchronized void start(SlackSocketConnectionListener listener) throws Exception {
+        Assert.notNull(listener, "Slack socket connection listener must not be null");
+        Assert.isTrue(activeRuntime.isEmpty(), "Slack socket client is already started");
+        GuardedConnectionListener guardedListener = new GuardedConnectionListener(listener);
+        SlackSocketRuntime runtime = runtimeFactory.create(guardedListener);
+        OwnedRuntime ownedRuntime = new OwnedRuntime(runtime, guardedListener);
+        activeRuntime = Optional.of(ownedRuntime);
+        guardedListener.activate();
+        try {
+            runtime.startAsync();
+        } catch (Exception exception) {
+            activeRuntime = Optional.empty();
+            guardedListener.retire();
+            try {
+                runtime.stop();
+            } catch (Exception closeException) {
+                exception.addSuppressed(closeException);
+            }
+            throw exception;
+        }
     }
 
     App buildApp() {
@@ -147,8 +182,172 @@ public final class SlackBoltSocketClient implements SlackSocketClient {
 
     @Override
     public void stop() throws Exception {
-        if (socketModeApp != null) { // cs-allow Socket client is absent before the first completed start.
-            socketModeApp.close();
+        Optional<OwnedRuntime> retiredRuntime;
+        synchronized (this) {
+            retiredRuntime = activeRuntime;
+            activeRuntime = Optional.empty();
+        }
+        retiredRuntime.ifPresent(OwnedRuntime::retire);
+        if (retiredRuntime.isPresent()) {
+            retiredRuntime.get().runtime().stop();
+        }
+    }
+
+    private SlackSocketRuntime createRuntime(SlackSocketConnectionListener listener) throws Exception {
+        App app = buildApp();
+        SocketModeClient client = com.slack.api.Slack.getInstance().socketMode(properties.appToken(), SocketModeClient.Backend.JavaWebSocket);
+        try {
+            return new SlackSdkSocketRuntime(client, new SocketModeApp(client, app), app, listener);
+        } catch (Exception exception) {
+            try {
+                client.close();
+            } catch (Exception closeException) {
+                exception.addSuppressed(closeException);
+            }
+            throw exception;
+        }
+    }
+
+    private record OwnedRuntime(SlackSocketRuntime runtime, GuardedConnectionListener listener) {
+
+        private void retire() {
+            listener.retire();
+        }
+    }
+
+    private static final class GuardedConnectionListener implements SlackSocketConnectionListener {
+
+        private final SlackSocketConnectionListener delegate;
+        private final AtomicBoolean active = new AtomicBoolean(false);
+
+        private GuardedConnectionListener(SlackSocketConnectionListener delegate) {
+            this.delegate = delegate;
+        }
+
+        @Override
+        public void connected() {
+            if (active.get()) {
+                delegate.connected();
+            }
+        }
+
+        @Override
+        public void disconnected() {
+            if (active.get()) {
+                delegate.disconnected();
+            }
+        }
+
+        private void activate() {
+            active.set(true);
+        }
+
+        private void retire() {
+            active.set(false);
+        }
+    }
+
+    static final class SlackSdkSocketRuntime implements SlackSocketRuntime {
+
+        private final SocketModeClient client;
+        private final SocketModeApp socketModeApp;
+
+        SlackSdkSocketRuntime(
+                SocketModeClient client,
+                SocketModeApp socketModeApp,
+                App app,
+                SlackSocketConnectionListener listener) {
+            this.client = client;
+            this.socketModeApp = socketModeApp;
+            registerConnectionListeners(client, app, listener);
+        }
+
+        @Override
+        public void startAsync() throws Exception {
+            socketModeApp.startAsync();
+        }
+
+        @Override
+        public void stop() throws Exception {
+            Exception firstFailure = null; // cs-allow An exception is absent until an owned close operation fails.
+            try {
+                client.setAutoReconnectEnabled(false);
+            } catch (Exception exception) {
+                firstFailure = exception;
+            }
+            try {
+                client.close();
+            } catch (Exception exception) {
+                firstFailure = retainFirstFailure(firstFailure, exception);
+            }
+            try {
+                socketModeApp.close();
+            } catch (Exception exception) {
+                firstFailure = retainFirstFailure(firstFailure, exception);
+            }
+            if (firstFailure != null) { // cs-allow An exception is thrown only when one of the independent close operations failed.
+                throw firstFailure;
+            }
+        }
+
+        private static Exception retainFirstFailure(Exception firstFailure, Exception laterFailure) {
+            if (firstFailure == null) { // cs-allow The first failure is absent until a close operation fails.
+                return laterFailure;
+            }
+            firstFailure.addSuppressed(laterFailure);
+            return firstFailure;
+        }
+
+        private static void registerConnectionListeners(SocketModeClient client, App app, SlackSocketConnectionListener listener) {
+            SocketModeRequestParser requestParser = new SocketModeRequestParser(app.config());
+            client.addWebSocketMessageListener(message -> {
+                notifyConnectedForHello(message, listener);
+                runBoltApp(message, app, client, requestParser);
+            });
+            client.addWebSocketCloseListener((code, reason) -> listener.disconnected());
+            client.addWebSocketErrorListener(reason -> listener.disconnected());
+        }
+
+        private static void notifyConnectedForHello(String message, SlackSocketConnectionListener listener) {
+            try {
+                JsonNode payload = OBJECT_MAPPER.readTree(message);
+                if ("hello".equals(payload.path("type").asText())) {
+                    listener.connected();
+                }
+            } catch (JsonProcessingException ignored) {
+                // The Slack SDK will continue processing non-JSON transport frames.
+            }
+        }
+
+        private static void runBoltApp(
+                String message,
+                App app,
+                SocketModeClient client,
+                SocketModeRequestParser requestParser) {
+            SocketModeRequest request = requestParser.parse(message);
+            if (request == null) { // cs-allow The parser contract represents unsupported frames with null.
+                return;
+            }
+            try {
+                Response response = app.run(request.getBoltRequest());
+                if (response.getStatusCode() != 200) {
+                    return;
+                }
+                if (response.getBody() == null) { // cs-allow The Bolt response body is optional by SDK contract.
+                    client.sendSocketModeResponse(new AckResponse(request.getEnvelope().getEnvelopeId()));
+                    return;
+                }
+                ObjectNode responsePayload = OBJECT_MAPPER.createObjectNode();
+                responsePayload.put("envelope_id", request.getEnvelope().getEnvelopeId());
+                if (response.getContentType().startsWith("application/json")) {
+                    responsePayload.set("payload", OBJECT_MAPPER.readTree(response.getBody()));
+                } else {
+                    responsePayload.putObject("payload").put("text", response.getBody());
+                }
+                client.sendSocketModeResponse(OBJECT_MAPPER.writeValueAsString(responsePayload));
+            } catch (Exception ignored) {
+                // Bolt's existing error handling remains content-free at the Runtime boundary.
+            }
         }
     }
 

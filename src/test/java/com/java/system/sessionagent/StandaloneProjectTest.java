@@ -93,6 +93,7 @@ class StandaloneProjectTest {
         Element dependencies = child(project, "dependencies");
         assertDeclaredDependency(dependencies, "com.slack.api", "bolt");
         assertDeclaredDependency(dependencies, "com.slack.api", "bolt-socket-mode");
+        assertDeclaredDependency(dependencies, "org.java-websocket", "Java-WebSocket");
     }
 
     private static void assertNoObsoleteLiveVerification(Path projectPom) {

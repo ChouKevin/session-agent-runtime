@@ -7,6 +7,7 @@ import com.java.system.sessionagent.conversation.port.out.ConversationStore;
 import com.java.system.sessionagent.mcp.McpConnectionManager;
 import com.java.system.sessionagent.slack.SlackLifecycleState;
 import com.java.system.sessionagent.slack.SlackSocketClient;
+import com.java.system.sessionagent.slack.SlackSocketConnectionListener;
 import com.java.system.sessionagent.slack.SlackSocketLifecycle;
 import com.java.system.sessionagent.model.SpringAiConversationModel;
 import com.java.system.sessionagent.tool.port.ToolCatalog;
@@ -123,7 +124,7 @@ class ApplicationStartupTest {
 
     static class UnreachableSocketClient implements SlackSocketClient {
         @Override
-        public void start() {
+        public void start(SlackSocketConnectionListener listener) {
             throw new IllegalStateException("unreachable");
         }
 
