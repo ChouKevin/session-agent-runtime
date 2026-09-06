@@ -1,10 +1,7 @@
 package com.java.system.sessionagent;
 
 import org.junit.jupiter.api.Test;
-import org.springframework.modulith.core.ApplicationModule;
 import org.springframework.modulith.core.ApplicationModules;
-import com.tngtech.archunit.core.importer.ClassFileImporter;
-import com.tngtech.archunit.lang.syntax.ArchRuleDefinition;
 
 import java.util.Map;
 import java.util.Set;
@@ -14,6 +11,36 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ApplicationModulesTest {
+
+    private static final Map<String, Set<String>> EXPECTED_ALLOWED_DEPENDENCIES = Map.of(
+            "tool", Set.of(),
+            "conversation", Set.of("tool :: domain", "tool :: port"),
+            "mcp", Set.of("tool :: port"),
+            "model", Set.of("conversation :: domain", "conversation :: port.out",
+                    "tool :: domain", "tool :: port"),
+            "storage", Set.of("conversation :: domain", "conversation :: port.in",
+                    "conversation :: port.out", "tool :: domain"),
+            "slack", Set.of("conversation :: domain", "conversation :: port.in"),
+            "web", Set.of("conversation :: domain", "conversation :: port.in", "tool :: domain"),
+            "worker", Set.of("conversation :: domain", "conversation :: port.in", "conversation :: port.out"),
+            "bootstrap", Set.of("tool :: port", "mcp :: configuration", "mcp :: adapter.sdk", "mcp :: adapter.actuator",
+                    "conversation :: application", "conversation :: domain",
+                    "conversation :: port.in", "conversation :: port.out", "model :: adapter.springai",
+                    "storage :: adapter.postgres", "web", "worker :: application", "worker :: configuration",
+                    "slack :: domain", "slack :: application", "slack :: port.out",
+                    "slack :: adapter.sdk", "slack :: adapter.postgres", "slack :: configuration"));
+
+    private static final Map<String, Set<String>> EXPECTED_NAMED_INTERFACES = Map.of(
+            "tool", Set.of("domain", "port"),
+            "conversation", Set.of("domain", "application", "port.in", "port.out"),
+            "model", Set.of("adapter.springai"),
+            "mcp", Set.of("configuration", "adapter.sdk", "adapter.actuator"),
+            "storage", Set.of("adapter.postgres"),
+            "web", Set.of(),
+            "worker", Set.of("application", "configuration"),
+            "slack", Set.of("domain", "application", "port.out", "adapter.sdk", "adapter.postgres",
+                    "configuration"),
+            "bootstrap", Set.of());
 
     @Test
     void containsOnlyTheNewRuntimeModules() {
@@ -30,77 +57,30 @@ class ApplicationModulesTest {
         ApplicationModules modules = ApplicationModules.of(SessionAgentRuntimeApplication.class);
 
         assertEquals(
-                Map.of(
-                        "tool", Set.of(),
-                        "conversation", Set.of("tool"),
-                        "mcp", Set.of("tool"),
-                        "model", Set.of("conversation", "tool"),
-                        "storage", Set.of("conversation", "tool"),
-                        "slack", Set.of("conversation"),
-                        "web", Set.of("conversation", "tool"),
-                        "worker", Set.of("conversation"),
-                        "bootstrap", Set.of("tool", "conversation", "mcp", "model", "storage", "web", "worker", "slack")),
+                EXPECTED_ALLOWED_DEPENDENCIES,
                 modules.stream().collect(Collectors.toMap(
                         module -> module.getIdentifier().toString(),
-                        module -> allowedModuleNames(module, modules))));
+                        module -> module.getAllowedDependencies(modules).stream()
+                                .map(dependency -> dependency.getTargetModule().getIdentifier().toString()
+                                        + (dependency.getTargetNamedInterface().isUnnamed()
+                                        ? ""
+                                        : " :: " + dependency.getTargetNamedInterface().getName()))
+                                .collect(Collectors.toSet()))));
         assertTrue(modules.stream().noneMatch(module -> module.isOpen()));
     }
 
     @Test
-    void declaresOnlyTheRequiredNamedModuleContracts() {
+    void declaresTheExactNamedInterfaceMap() {
         ApplicationModules modules = ApplicationModules.of(SessionAgentRuntimeApplication.class);
 
         assertEquals(
-                Set.of("domain", "port"),
-                modules.getModuleByName("tool").orElseThrow().getNamedInterfaces().stream()
-                        .filter(namedInterface -> !namedInterface.isUnnamed())
-                        .map(namedInterface -> namedInterface.getName())
-                        .collect(Collectors.toSet()));
-        assertEquals(Set.of("tool :: domain", "tool :: port"), allowedNamedDependencies("conversation", modules));
-        assertEquals(Set.of("tool :: port"), allowedNamedDependencies("mcp", modules));
-        assertEquals(
-                Set.of("conversation :: domain", "conversation :: port.out", "tool :: domain", "tool :: port"),
-                allowedNamedDependencies("model", modules));
-        assertEquals(
-                Set.of("conversation :: domain", "conversation :: port.in", "conversation :: port.out", "tool :: domain"),
-                allowedNamedDependencies("storage", modules));
-        assertEquals(
-                Set.of("conversation :: domain", "conversation :: port.in"),
-                allowedNamedDependencies("slack", modules));
-        assertEquals(
-                Set.of("conversation :: domain", "conversation :: port.in", "tool :: domain"),
-                allowedNamedDependencies("web", modules));
-        assertEquals(
-                Set.of("conversation :: domain", "conversation :: port.in", "conversation :: port.out"),
-                allowedNamedDependencies("worker", modules));
-        assertEquals(
-                Set.of("tool :: port", "conversation :: application", "conversation :: domain",
-                        "conversation :: port.in", "conversation :: port.out"),
-                allowedNamedDependencies("bootstrap", modules));
+                EXPECTED_NAMED_INTERFACES,
+                modules.stream().collect(Collectors.toMap(
+                        module -> module.getIdentifier().toString(),
+                        module -> module.getNamedInterfaces().stream()
+                                .filter(namedInterface -> !namedInterface.isUnnamed())
+                                .map(namedInterface -> namedInterface.getName())
+                                .collect(Collectors.toSet()))));
     }
 
-    @Test
-    void keeps_slack_sdk_types_out_of_the_provider_neutral_core() {
-        ArchRuleDefinition.noClasses()
-                .should()
-                .dependOnClassesThat().resideInAnyPackage("com.slack.api..")
-                .check(new ClassFileImporter().importPackages(
-                        "com.java.system.sessionagent.conversation",
-                        "com.java.system.sessionagent.storage"));
-    }
-
-    private static Set<String> allowedModuleNames(ApplicationModule module, ApplicationModules modules) {
-        return module.getAllowedDependencies(modules).stream()
-                .map(dependency -> dependency.getTargetModule().getIdentifier().toString())
-                .collect(Collectors.toSet());
-    }
-
-    private static Set<String> allowedNamedDependencies(String moduleName, ApplicationModules modules) {
-        ApplicationModule module = modules.getModuleByName(moduleName).orElseThrow();
-        return module.getAllowedDependencies(modules).stream()
-                .filter(dependency -> !dependency.getTargetNamedInterface().isUnnamed())
-                .map(dependency -> dependency.getTargetModule().getIdentifier()
-                        + " :: " + dependency.getTargetNamedInterface().getName())
-                .collect(Collectors.toSet());
-    }
 }

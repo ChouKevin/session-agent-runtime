@@ -1,0 +1,157 @@
+package com.java.system.sessionagent.slack.application;
+
+import com.java.system.sessionagent.conversation.domain.IncomingMessage;
+import com.java.system.sessionagent.conversation.domain.IncomingMessageSource;
+import com.java.system.sessionagent.slack.domain.IncomingEvent;
+import com.java.system.sessionagent.slack.domain.MessageSubmission;
+import com.java.system.sessionagent.slack.domain.SlackEventOutcome;
+import com.java.system.sessionagent.slack.domain.SlackIntakeClassification;
+import com.java.system.sessionagent.slack.domain.SlackIntakeResult;
+import com.java.system.sessionagent.slack.domain.SlackSessionResolution;
+import com.java.system.sessionagent.slack.port.out.MessageSubmissionPort;
+import org.springframework.util.Assert;
+import org.springframework.util.StringUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.slf4j.spi.LoggingEventBuilder;
+
+import java.util.Optional;
+
+public final class MessageHandler {
+
+    private static final Logger LOGGER = LoggerFactory.getLogger(MessageHandler.class);
+    private final String botUserId;
+    private final MessageSubmissionPort messageSubmissionPort;
+
+    public MessageHandler(String botUserId, MessageSubmissionPort messageSubmissionPort) {
+        Assert.notNull(botUserId, "Slack bot user ID must not be null");
+        Assert.notNull(messageSubmissionPort, "Slack root intake port must not be null");
+        this.botUserId = botUserId;
+        this.messageSubmissionPort = messageSubmissionPort;
+    }
+
+    public SlackEventOutcome handle(IncomingEvent event) {
+        Assert.notNull(event, "Slack root event must not be null");
+        if (isObviousNonHumanNoise(event)) {
+            logFilteredNoise(event);
+            return SlackEventOutcome.IGNORED;
+        }
+        String rootThreadTs = StringUtils.hasText(event.threadTs()) ? event.threadTs() : event.messageTs();
+        SlackIntakeClassification ignoredClassification = ignoredClassification(event);
+        if (ignoredClassification != SlackIntakeClassification.ACCEPTED) {
+            SlackIntakeResult result = messageSubmissionPort.receive(new MessageSubmission(event.eventId(), event.teamId(), event.channelId(), rootThreadTs,
+                    event.messageTs(), ignoredClassification, Optional.empty()));
+            logInbound(event, rootThreadTs, result);
+            return result.outcome();
+        }
+        String message = normalizedMessage(event);
+        if (!StringUtils.hasText(message)) {
+            SlackIntakeResult result = messageSubmissionPort.receive(new MessageSubmission(event.eventId(), event.teamId(), event.channelId(), rootThreadTs,
+                    event.messageTs(), SlackIntakeClassification.BLANK, Optional.empty()));
+            logInbound(event, rootThreadTs, result);
+            return result.outcome();
+        }
+        IncomingMessage incomingMessage = new IncomingMessage(
+                IncomingMessageSource.SLACK,
+                boundedKey("slack/", event.teamId(), event.channelId(), rootThreadTs),
+                event.participantId(),
+                boundedKey("slack/", event.teamId(), event.channelId(), event.messageTs()),
+                message);
+        SlackIntakeResult result = messageSubmissionPort.receive(new MessageSubmission(event.eventId(), event.teamId(), event.channelId(), rootThreadTs,
+                event.messageTs(), SlackIntakeClassification.ACCEPTED, Optional.of(incomingMessage)));
+        logInbound(event, rootThreadTs, result);
+        return result.outcome();
+    }
+
+    private static void logFilteredNoise(IncomingEvent event) {
+        LOGGER.atInfo().addKeyValue("event", "slack_inbound")
+                .addKeyValue("slackEventId", event.eventId())
+                .addKeyValue("slackTeamId", event.teamId())
+                .addKeyValue("slackChannelId", event.channelId())
+                .addKeyValue("slackThreadTs", event.messageTs())
+                .addKeyValue("slackMessageTs", event.messageTs())
+                .addKeyValue("disposition", "FILTERED_NOISE")
+                .addKeyValue("outcome", SlackEventOutcome.IGNORED.name()).log("runtime_lifecycle");
+    }
+
+    private static void logInbound(IncomingEvent event, String rootThreadTs, SlackIntakeResult result) {
+        LoggingEventBuilder builder = LOGGER.atInfo().addKeyValue("event", "slack_inbound")
+                .addKeyValue("slackEventId", event.eventId())
+                .addKeyValue("slackTeamId", event.teamId())
+                .addKeyValue("slackChannelId", event.channelId())
+                .addKeyValue("slackThreadTs", rootThreadTs)
+                .addKeyValue("slackMessageTs", event.messageTs())
+                .addKeyValue("disposition", result.disposition().name())
+                .addKeyValue("outcome", result.outcome().name());
+        result.sessionId().ifPresent(sessionId -> builder.addKeyValue("sessionId", sessionId.toString()));
+        result.messageJobId().ifPresent(messageJobId -> builder.addKeyValue("messageJobId", messageJobId.toString()));
+        result.sessionResolution().ifPresent(resolution -> builder.addKeyValue("sessionResolution", resolution.name()));
+        builder.log("runtime_lifecycle");
+        result.sessionResolution().ifPresent(resolution -> logSessionResolution(event, result, resolution));
+    }
+
+    private static void logSessionResolution(
+            IncomingEvent event,
+            SlackIntakeResult result,
+            SlackSessionResolution resolution) {
+        LoggingEventBuilder builder = LOGGER.atInfo()
+                .addKeyValue("event", resolution == SlackSessionResolution.CREATED ? "session_created" : "session_resolved")
+                .addKeyValue("slackEventId", event.eventId())
+                .addKeyValue("disposition", result.disposition().name())
+                .addKeyValue("outcome", result.outcome().name())
+                .addKeyValue("sessionResolution", resolution.name());
+        result.sessionId().ifPresent(sessionId -> builder.addKeyValue("sessionId", sessionId.toString()));
+        result.messageJobId().ifPresent(messageJobId -> builder.addKeyValue("messageJobId", messageJobId.toString()));
+        builder.log("runtime_lifecycle");
+    }
+
+    private boolean isObviousNonHumanNoise(IncomingEvent event) {
+        if (!StringUtils.hasText(event.participantId()) || StringUtils.hasText(event.botId())
+                || botUserId.equals(event.participantId())) {
+            return true;
+        }
+        return "bot_message".equals(event.subtype()) || "channel_join".equals(event.subtype())
+                || "channel_leave".equals(event.subtype());
+    }
+
+    private SlackIntakeClassification ignoredClassification(IncomingEvent event) {
+        if (event.hidden()) {
+            return SlackIntakeClassification.HIDDEN;
+        }
+        if ("message_changed".equals(event.subtype()) || "message_deleted".equals(event.subtype())) {
+            return SlackIntakeClassification.EDIT_OR_DELETE;
+        }
+        if (StringUtils.hasText(event.subtype())) {
+            return SlackIntakeClassification.UNSUPPORTED_CONTENT;
+        }
+        if (event.hasAttachments()) {
+            return SlackIntakeClassification.UNSUPPORTED_CONTENT;
+        }
+        return SlackIntakeClassification.ACCEPTED;
+    }
+
+    private String normalizedMessage(IncomingEvent event) {
+        if (!StringUtils.hasText(event.text())) {
+            return "";
+        }
+        if (StringUtils.hasText(event.threadTs()) && !event.messageTs().equals(event.threadTs())) {
+            return event.text().trim();
+        }
+        if ("im".equals(event.channelType())) {
+            return event.text().trim();
+        }
+        String addressingMention = "<@" + botUserId + ">";
+        int addressingIndex = event.text().indexOf(addressingMention);
+        if (addressingIndex < 0) {
+            return "";
+        }
+        return (event.text().substring(0, addressingIndex)
+                + event.text().substring(addressingIndex + addressingMention.length())).trim();
+    }
+
+    private static String boundedKey(String prefix, String... parts) {
+        String value = prefix + String.join("/", parts);
+        Assert.isTrue(value.length() <= 256, "Slack source identifiers must not exceed 256 characters");
+        return value;
+    }
+}

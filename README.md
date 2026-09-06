@@ -4,14 +4,23 @@ Session Agent Runtime is a standalone, provider-neutral conversation service. It
 
 ## Where changes belong
 
+For the current module boundaries, allowed dependencies, and test ownership, see
+the [package architecture guide](docs/package-architecture.md).
+
 | Change | Location |
 | --- | --- |
-| Session, message, job, or history rules | `src/main/java/com/java/system/sessionagent/conversation` |
-| Chat-model contract or provider integration | `src/main/java/com/java/system/sessionagent/model` |
-| MCP discovery, routing, connection lifecycle, or diagnostics | `src/main/java/com/java/system/sessionagent/mcp` |
-| Generic tool calls and observations | `src/main/java/com/java/system/sessionagent/tool` |
-| PostgreSQL persistence or migrations | `src/main/java/com/java/system/sessionagent/storage` and `src/main/resources/db/migration` |
-| Message, job, history, or actuator HTTP endpoints | `src/main/java/com/java/system/sessionagent/web` |
+| Session, message, job, or history rules | `src/main/java/com/java/system/sessionagent/conversation/domain`, `conversation/application`, `conversation/port/in`, and `conversation/port/out` |
+| Chat-model contract | `src/main/java/com/java/system/sessionagent/conversation/port/out` |
+| Chat-model provider integration | `src/main/java/com/java/system/sessionagent/model/adapter/springai` |
+| MCP discovery, routing, connection lifecycle, or diagnostics | `src/main/java/com/java/system/sessionagent/mcp/domain`, `src/main/java/com/java/system/sessionagent/mcp/configuration`, `src/main/java/com/java/system/sessionagent/mcp/adapter/sdk`, and `src/main/java/com/java/system/sessionagent/mcp/adapter/actuator` |
+| Generic tool calls and observations | `src/main/java/com/java/system/sessionagent/tool/domain` and `src/main/java/com/java/system/sessionagent/tool/port` |
+| PostgreSQL persistence or migrations | `src/main/java/com/java/system/sessionagent/storage/adapter/postgres` and `src/main/resources/db/migration` |
+| Message, job, or session-history HTTP endpoints | `src/main/java/com/java/system/sessionagent/web/adapter/http` |
+| MCP actuator diagnostics | `src/main/java/com/java/system/sessionagent/mcp/adapter/actuator` |
+| Queued message-job claim, renewal, processing, and recovery | `src/main/java/com/java/system/sessionagent/worker/application` and `src/main/java/com/java/system/sessionagent/worker/configuration` |
+| Slack intake, delivery, Socket Mode, and Slack persistence | `src/main/java/com/java/system/sessionagent/slack/domain`, `src/main/java/com/java/system/sessionagent/slack/application`, `src/main/java/com/java/system/sessionagent/slack/port/out`, `src/main/java/com/java/system/sessionagent/slack/adapter/sdk`, `src/main/java/com/java/system/sessionagent/slack/adapter/postgres`, and `src/main/java/com/java/system/sessionagent/slack/configuration` |
+| Spring composition and runtime configuration | `src/main/java/com/java/system/sessionagent/bootstrap/configuration` |
+| Runtime metrics adapter | `src/main/java/com/java/system/sessionagent/bootstrap/adapter/metrics` |
 
 Keep provider SDK details inside model adapters and keep MCP provider data opaque.
 Runtime must not acquire provider-specific tool DTOs or business rules. Coding-agent
@@ -87,7 +96,7 @@ Headers are optional. Omit the header entry when a provider does not require it;
 
 Docker Compose starts with zero MCP connections when `SESSION_AGENT_MCP_CONFIGURATION_JSON` is unset. To configure one through Compose, set that environment variable to the equivalent generic configuration, for example `{"session-agent":{"mcp":{"connections":{"catalog":{"enabled":true,"url":"https://host/custom/mcp"}}}}}`. Supply any optional header values through the deployment environment or secret manager; the exact URL and headers are passed to Runtime without provider-specific behavior.
 
-Startup is safe with no configured connections or when every configured server is unavailable. Each connection reconnects and refreshes independently, so a failed provider does not hide tools from an available provider. `GET /actuator/mcpConnections` reports safe per-connection diagnostics: state (`DISABLED`, `CONNECTING`, `AVAILABLE`, `DEGRADED`, `UNAVAILABLE`, or `STOPPED`), discovered tool count, and when applicable a safe failure code/message. It never exposes endpoint URLs, headers, tokens, raw provider responses, or exception details.
+Startup is safe with no configured connections or when every configured server is unavailable. Each connection reconnects and refreshes independently, so a failed provider does not hide tools from an available provider. The `mcp` module exposes `GET /actuator/mcpConnections` with safe per-connection diagnostics: state (`DISABLED`, `CONNECTING`, `AVAILABLE`, `DEGRADED`, `UNAVAILABLE`, or `STOPPED`), discovered tool count, and when applicable a safe failure code/message. It never exposes endpoint URLs, headers, tokens, raw provider responses, or exception details.
 
 ## Limits, retries, and recovery
 
