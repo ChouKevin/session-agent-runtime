@@ -3,6 +3,9 @@ package com.java.system.sessionagent.mcp;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.java.system.sessionagent.tool.port.ToolOutput;
 import io.modelcontextprotocol.spec.McpSchema;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.slf4j.spi.LoggingEventBuilder;
 import org.springframework.scheduling.TaskScheduler;
 import org.springframework.util.Assert;
 
@@ -28,6 +31,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 public final class McpConnectionManager {
 
+    private static final Logger LOGGER = LoggerFactory.getLogger(McpConnectionManager.class);
     private static final String WITHHELD_BINDING_MESSAGE = "One or more MCP tool bindings were withheld.";
     private static final String CONNECTION_FAILURE_MESSAGE = "The MCP connection is unavailable.";
     private static final Pattern PORTABLE_TOOL_NAME = Pattern.compile("[A-Za-z][A-Za-z0-9_-]{0,63}");
@@ -506,6 +510,7 @@ public final class McpConnectionManager {
         }
         LinkedHashMap<String, ConnectionView> nextConnections = new LinkedHashMap<>(view.connections());
         nextConnections.put(connectionName, replacement);
+        logComponentState(connectionName, replacement.diagnostic());
         return replaceView(new View(nextConnections));
     }
 
@@ -513,7 +518,19 @@ public final class McpConnectionManager {
         rawToolsByConnection.put(connectionName, Collections.unmodifiableList(new ArrayList<>(rawTools)));
         LinkedHashMap<String, ConnectionView> candidates = new LinkedHashMap<>(view.connections());
         candidates.put(connectionName, new ConnectionView(Optional.of(client), List.of(), Diagnostic.available()));
-        return replaceView(validatedView(candidates));
+        View replacement = validatedView(candidates);
+        logComponentState(connectionName, replacement.connections().get(connectionName).diagnostic());
+        return replaceView(replacement);
+    }
+
+    private static void logComponentState(String connectionName, Diagnostic diagnostic) {
+        LoggingEventBuilder builder = LOGGER.atInfo().addKeyValue("event", "mcp_component_state")
+                .addKeyValue("component", connectionName)
+                .addKeyValue("state", diagnostic.state().name());
+        if (org.springframework.util.StringUtils.hasText(diagnostic.code())) {
+            builder.addKeyValue("failureCategory", diagnostic.code());
+        }
+        builder.log("runtime_lifecycle");
     }
 
     private List<McpConnectionClient> replaceView(View replacement) {

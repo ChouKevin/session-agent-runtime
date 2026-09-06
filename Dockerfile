@@ -9,12 +9,15 @@ RUN mvn -q -DskipTests package
 
 FROM eclipse-temurin:21-jre
 
-RUN groupadd --system sessionagent \
-    && useradd --system --gid sessionagent --home-dir /nonexistent --shell /usr/sbin/nologin sessionagent
+RUN groupadd --gid 10001 --system sessionagent \
+    && useradd --uid 10001 --system --gid sessionagent --home-dir /nonexistent --shell /usr/sbin/nologin sessionagent
 
 WORKDIR /app
 
 COPY --from=build /workspace/target/session-agent-runtime-0.0.1-SNAPSHOT.jar app.jar
+
+RUN mkdir /app/logs \
+    && chown sessionagent:sessionagent /app/logs
 
 USER sessionagent:sessionagent
 

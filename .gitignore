@@ -3,4 +3,5 @@
 build/
 reports/
 target/
+logs/
 fixtures/*/target/

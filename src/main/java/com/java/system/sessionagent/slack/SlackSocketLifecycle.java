@@ -1,5 +1,7 @@
 package com.java.system.sessionagent.slack;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.context.SmartLifecycle;
 import org.springframework.util.Assert;
 
@@ -12,6 +14,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 public final class SlackSocketLifecycle implements SmartLifecycle {
 
+    private static final Logger LOGGER = LoggerFactory.getLogger(SlackSocketLifecycle.class);
     private final SlackSocketClient socketClient;
     private final boolean enabled;
     private final Duration reconnectDelay;
@@ -40,6 +43,7 @@ public final class SlackSocketLifecycle implements SmartLifecycle {
         if (!enabled || !running.compareAndSet(false, true)) {
             return;
         }
+        logState("slack_connection_started", SlackLifecycleState.CONNECTING);
         connect();
     }
 
@@ -55,6 +59,7 @@ public final class SlackSocketLifecycle implements SmartLifecycle {
                 // Socket shutdown is best effort and intentionally keeps provider failure details out of logs.
             } finally {
                 state.set(SlackLifecycleState.STOPPED);
+                logState("slack_connection_stopped", SlackLifecycleState.STOPPED);
             }
         });
         executor.shutdown();
@@ -92,15 +97,24 @@ public final class SlackSocketLifecycle implements SmartLifecycle {
                 return;
             }
             state.set(SlackLifecycleState.CONNECTING);
+            logState("slack_connection_attempt", SlackLifecycleState.CONNECTING);
             try {
                 socketClient.start();
                 state.set(SlackLifecycleState.AVAILABLE);
+                logState("slack_connection_available", SlackLifecycleState.AVAILABLE);
             } catch (Exception ignored) {
                 state.set(SlackLifecycleState.DEGRADED);
+                logState("slack_connection_retry", SlackLifecycleState.DEGRADED);
                 if (running.get()) {
                     executor.schedule(this::connect, reconnectDelay.toMillis(), TimeUnit.MILLISECONDS);
                 }
             }
         });
+    }
+
+    private static void logState(String event, SlackLifecycleState state) {
+        LOGGER.atInfo().addKeyValue("event", event)
+                .addKeyValue("component", "SLACK_SOCKET")
+                .addKeyValue("state", state.name()).log("runtime_lifecycle");
     }
 }

@@ -13,6 +13,7 @@ import com.java.system.sessionagent.conversation.domain.ModelDescriptor;
 import com.java.system.sessionagent.conversation.domain.ModelContinuation;
 import com.java.system.sessionagent.conversation.domain.ModelRouteId;
 import com.java.system.sessionagent.conversation.domain.ModelRequest;
+import com.java.system.sessionagent.conversation.domain.ModelUsage;
 import com.java.system.sessionagent.conversation.domain.SessionMessage;
 import com.java.system.sessionagent.conversation.domain.SessionSequence;
 import com.java.system.sessionagent.conversation.domain.ToolRequest;
@@ -31,6 +32,7 @@ import com.java.system.sessionagent.tool.port.ToolOutput;
 import com.java.system.sessionagent.tool.port.ToolSnapshot;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.slf4j.spi.LoggingEventBuilder;
 import org.springframework.util.Assert;
 
 import java.time.Clock;
@@ -150,7 +152,7 @@ public final class MessageJobService implements MessageJobPort {
                 long requestStartedAt = System.nanoTime();
                 try {
                     result = conversationModel.respond(request, () -> reserveAndLogModelRequest(claim, guard, reservation,
-                            history.size(), tools.definitions().size()), usage -> { });
+                            activeModelDescriptor, history.size(), tools.definitions().size()), usage -> { });
                     reply = result.reply();
                     continuation = result.continuation();
                 } catch (BudgetExhausted exception) {
@@ -158,6 +160,7 @@ public final class MessageJobService implements MessageJobPort {
                     return;
                 } catch (ModelCallFailure failure) {
                     if (failure.kind() == ModelCallFailure.Kind.INVALID_HISTORY) {
+                        logModelFailure(claim, reservation.ordinal(), failure.kind(), elapsedSince(requestStartedAt));
                         appendRuntime(claim, guard, List.of(runtime(INVALID_CONVERSATION_HISTORY)), ConversationStore.JobUpdate.COMPLETE);
                         return;
                     }
@@ -178,7 +181,7 @@ public final class MessageJobService implements MessageJobPort {
                     return;
                 }
                 int ordinal = reservation.ordinal();
-                logModelResponse(claim, ordinal, reply, elapsedSince(requestStartedAt));
+                logModelResponse(claim, activeModelDescriptor, ordinal, reply, result.usage(), elapsedSince(requestStartedAt));
                 if (reply instanceof ModelReply.Text text) {
                     appendResponse(claim, guard, List.of(new ConversationStore.AssistantData(text.message())),
                             ConversationStore.JobUpdate.COMPLETE, Optional.empty(), checkpoint(result, activeModelDescriptor, ordinal,
@@ -233,6 +236,9 @@ public final class MessageJobService implements MessageJobPort {
         long estimate = contextUsageEstimator.estimate(projection,
                 conversationStore.loadUsageCheckpoint(claim.sessionId(), descriptor, fingerprint, generation)).tokens();
         long threshold = fourFifths(descriptor.contextWindowTokens());
+        if (estimate >= threshold) {
+            logCompaction(claim, "compact_threshold_reached", "THRESHOLD_REACHED", estimate, descriptor.contextWindowTokens());
+        }
         return new ContextState(new ModelRequest(visibleHistory, visibleContinuations, tools, summary), fingerprint, compaction,
                 estimate, estimate >= threshold, Optional.of(projection));
     }
@@ -258,24 +264,30 @@ public final class MessageJobService implements MessageJobPort {
             ContextState context,
             ContextCompaction.Reason reason) {
         if (context.projection().isEmpty()) {
+            logCompaction(claim, "compact_failure", "NO_PROJECTION", context.estimateTokens(), 0L);
             appendRuntime(claim, guard, List.of(runtime(CONTEXT_TOO_LARGE)), ConversationStore.JobUpdate.COMPLETE);
             return false;
         }
         ContextUsageProjection projection = context.projection().orElseThrow();
         Optional<CompactionBoundary> boundary = selectBoundary(claim, context, projection.model());
         if (boundary.isEmpty()) {
+            logCompaction(claim, "compact_failure", "NO_BOUNDARY", context.estimateTokens(), projection.model().contextWindowTokens());
             appendRuntime(claim, guard, List.of(runtime(CONTEXT_TOO_LARGE)), ConversationStore.JobUpdate.COMPLETE);
             return false;
         }
         CompactionBoundary selected = boundary.orElseThrow();
+        logCompaction(claim, "compact_started", reason.name(), context.estimateTokens(), projection.model().contextWindowTokens());
         String summary;
         try {
             summary = conversationModel.summarize(new ContextCompactionRequest(context.compaction().map(ContextCompaction::summary),
-                    selected.history()), () -> reserveAndLogModelRequest(claim, guard, reservation, selected.history().size(), 0));
+                    selected.history()), () -> reserveAndLogModelRequest(claim, guard, reservation, projection.model(),
+                    selected.history().size(), 0));
         } catch (BudgetExhausted exception) {
+            logCompaction(claim, "compact_failure", "MODEL_LIMIT", context.estimateTokens(), projection.model().contextWindowTokens());
             appendRuntime(claim, guard, List.of(runtime(MODEL_CALL_LIMIT_REACHED)), ConversationStore.JobUpdate.COMPLETE);
             return false;
         } catch (ModelCallFailure failure) {
+            logCompaction(claim, "compact_failure", failureCategory(failure.kind()), context.estimateTokens(), projection.model().contextWindowTokens());
             return handleCompactionFailure(claim, guard, reservation, failure);
         }
         if (!guard.stillOwned()) {
@@ -285,6 +297,7 @@ public final class MessageJobService implements MessageJobPort {
         try {
             compactedSummary = new ContextSummary(summary);
         } catch (IllegalArgumentException exception) {
+            logCompaction(claim, "compact_failure", "SUMMARY_INVALID", context.estimateTokens(), projection.model().contextWindowTokens());
             appendRuntime(claim, guard, List.of(runtime(COMPACTION_FAILED)), ConversationStore.JobUpdate.COMPLETE);
             return false;
         }
@@ -296,8 +309,10 @@ public final class MessageJobService implements MessageJobPort {
             conversationStore.compact(claim, new ConversationStore.CompactionData(
                     context.compaction().map(ContextCompaction::generation).orElse(0L) + 1, reason, compactedSummary.text(),
                     selected.boundary(), projection.model(), context.requestShapeFingerprint(), context.estimateTokens(), afterEstimate), clock.instant());
+            logCompaction(claim, "compact_succeeded", reason.name(), afterEstimate, projection.model().contextWindowTokens());
             return guard.stillOwned();
         } catch (StaleWorkClaimException exception) {
+            logCompaction(claim, "compact_failure", "OWNERSHIP_LOST", context.estimateTokens(), projection.model().contextWindowTokens());
             return false;
         }
     }
@@ -423,10 +438,11 @@ public final class MessageJobService implements MessageJobPort {
             MessageWorkClaim claim,
             WorkGuard guard,
             ReservationState state,
+            ModelDescriptor descriptor,
             int historySize,
             int toolCount) {
         int ordinal = reserve(claim, guard, state);
-        logModelRequest(claim, ordinal, historySize, toolCount);
+        logModelRequest(claim, descriptor, ordinal, historySize, toolCount);
         return ordinal;
     }
 
@@ -467,7 +483,7 @@ public final class MessageJobService implements MessageJobPort {
         }
         Duration duration = elapsedSince(executionStartedAt);
         telemetry.tool(request.toolName().value(), outcome, duration);
-        logToolExecution(claim, ordinal, outcome, duration);
+        logToolExecution(claim, ordinal, request, outcome, duration);
         return new ConversationStore.ToolObservationData(request.toolCallId(), request.toolName().value(), output.asStructuredValue());
     }
 
@@ -508,6 +524,7 @@ public final class MessageJobService implements MessageJobPort {
         boolean scheduled = conversationStore.scheduleRetry(claim, delay);
         if (scheduled) {
             telemetry.retry("MODEL", delay);
+            logRetry(claim, "MODEL", delay);
         }
         return scheduled;
     }
@@ -581,6 +598,7 @@ public final class MessageJobService implements MessageJobPort {
                 Duration delay = retryDelay(job.orElseThrow().retryCount());
                 conversationStore.scheduleRetry(claim, delay);
                 telemetry.retry("STORAGE", delay);
+                logRetry(claim, "STORAGE", delay);
                 return;
             }
             appendRuntime(claim, guard, List.of(runtime(MODEL_UNAVAILABLE)), ConversationStore.JobUpdate.COMPLETE);
@@ -601,29 +619,92 @@ public final class MessageJobService implements MessageJobPort {
         };
     }
 
-    private static void logModelRequest(MessageWorkClaim claim, int ordinal, int historySize, int toolCount) {
-        LOGGER.info("model_request sessionId={} messageJobId={} ordinal={} historyCount={} visibleToolCount={}",
-                claim.sessionId().value(), claim.messageJobId().value(), ordinal, historySize, toolCount);
+    private static void logModelRequest(
+            MessageWorkClaim claim,
+            ModelDescriptor descriptor,
+            int ordinal,
+            int historySize,
+            int toolCount) {
+        LoggingEventBuilder event = LOGGER.atInfo().addKeyValue("event", "model_request")
+                .addKeyValue("sessionId", claim.sessionId().value())
+                .addKeyValue("messageJobId", claim.messageJobId().value())
+                .addKeyValue("callOrdinal", ordinal)
+                .addKeyValue("historyCount", historySize)
+                .addKeyValue("visibleToolCount", toolCount);
+        if (Objects.nonNull(descriptor)) {
+            event.addKeyValue("modelRouteId", descriptor.routeId().value())
+                    .addKeyValue("modelId", descriptor.modelId());
+        }
+        event.log("runtime_lifecycle");
     }
 
-    private static void logModelResponse(MessageWorkClaim claim, int ordinal, ModelReply reply, Duration duration) {
+    private static void logModelResponse(
+            MessageWorkClaim claim,
+            ModelDescriptor descriptor,
+            int ordinal,
+            ModelReply reply,
+            ModelUsage usage,
+            Duration duration) {
         String category = reply instanceof ModelReply.Text ? "ASSISTANT_TEXT" : "USE_TOOLS";
-        LOGGER.info("model_response sessionId={} messageJobId={} ordinal={} category={} durationMs={}",
-                claim.sessionId().value(), claim.messageJobId().value(), ordinal, category, duration.toMillis());
+        LoggingEventBuilder event = LOGGER.atInfo().addKeyValue("event", "model_response")
+                .addKeyValue("sessionId", claim.sessionId().value())
+                .addKeyValue("messageJobId", claim.messageJobId().value())
+                .addKeyValue("callOrdinal", ordinal)
+                .addKeyValue("outcome", category)
+                .addKeyValue("durationMs", duration.toMillis());
+        if (Objects.nonNull(descriptor)) {
+            event.addKeyValue("modelRouteId", descriptor.routeId().value())
+                    .addKeyValue("modelId", descriptor.modelId());
+        }
+        if (usage.available()) {
+            event.addKeyValue("promptTokens", usage.promptTokens())
+                    .addKeyValue("completionTokens", usage.completionTokens())
+                    .addKeyValue("totalTokens", usage.totalTokens());
+        }
+        event.log("runtime_lifecycle");
     }
 
     private static void logModelFailure(MessageWorkClaim claim, int ordinal, ModelCallFailure.Kind kind, Duration duration) {
-        LOGGER.info("model_failure sessionId={} messageJobId={} ordinal={} category={} durationMs={}",
-                claim.sessionId().value(), claim.messageJobId().value(), ordinal, failureCategory(kind), duration.toMillis());
+        LOGGER.atInfo().addKeyValue("event", "model_failure")
+                .addKeyValue("sessionId", claim.sessionId().value())
+                .addKeyValue("messageJobId", claim.messageJobId().value())
+                .addKeyValue("callOrdinal", ordinal)
+                .addKeyValue("failureCategory", failureCategory(kind))
+                .addKeyValue("durationMs", duration.toMillis()).log("runtime_lifecycle");
     }
 
     private static void logToolExecution(
             MessageWorkClaim claim,
             int ordinal,
+            ToolRequest request,
             String outcome,
             Duration duration) {
-        LOGGER.info("tool_execution sessionId={} messageJobId={} ordinal={} category={} durationMs={}",
-                claim.sessionId().value(), claim.messageJobId().value(), ordinal, outcome, duration.toMillis());
+        LOGGER.atInfo().addKeyValue("event", "tool_execution")
+                .addKeyValue("sessionId", claim.sessionId().value())
+                .addKeyValue("messageJobId", claim.messageJobId().value())
+                .addKeyValue("callOrdinal", ordinal)
+                .addKeyValue("toolName", request.toolName().value())
+                .addKeyValue("toolCallId", request.toolCallId().value())
+                .addKeyValue("outcome", outcome)
+                .addKeyValue("durationMs", duration.toMillis()).log("runtime_lifecycle");
+    }
+
+    private static void logRetry(MessageWorkClaim claim, String category, Duration delay) {
+        LOGGER.atInfo().addKeyValue("event", "message_job_retry")
+                .addKeyValue("sessionId", claim.sessionId().value())
+                .addKeyValue("messageJobId", claim.messageJobId().value())
+                .addKeyValue("failureCategory", category)
+                .addKeyValue("retryDelayMs", delay.toMillis()).log("runtime_lifecycle");
+    }
+
+    private static void logCompaction(MessageWorkClaim claim, String event, String outcome, long estimate, long capacity) {
+        LOGGER.atInfo().addKeyValue("event", event)
+                .addKeyValue("sessionId", claim.sessionId().value())
+                .addKeyValue("messageJobId", claim.messageJobId().value())
+                .addKeyValue("outcome", outcome)
+                .addKeyValue("totalTokens", estimate)
+                .addKeyValue("contextCapacityTokens", capacity)
+                .addKeyValue("contextUsageRatio", capacity == 0L ? 0.0D : (double) estimate / capacity).log("runtime_lifecycle");
     }
 
     private static Duration elapsedSince(long startedAt) {

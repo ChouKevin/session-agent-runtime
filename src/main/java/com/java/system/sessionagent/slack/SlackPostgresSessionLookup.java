@@ -2,6 +2,9 @@ package com.java.system.sessionagent.slack;
 
 import com.java.system.sessionagent.conversation.domain.SessionId;
 import com.java.system.sessionagent.conversation.port.in.ExternalSessionReferenceQueryPort;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.slf4j.spi.LoggingEventBuilder;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.util.Assert;
 
@@ -14,6 +17,7 @@ import java.util.UUID;
 
 public final class SlackPostgresSessionLookup implements ExternalSessionReferenceQueryPort {
 
+    private static final Logger LOGGER = LoggerFactory.getLogger(SlackPostgresSessionLookup.class);
     private final JdbcTemplate jdbcTemplate;
     private final SlackPermalinkParser permalinkParser;
 
@@ -33,7 +37,14 @@ public final class SlackPostgresSessionLookup implements ExternalSessionReferenc
                 """, (resultSet, rowNumber) -> new SessionId(resultSet.getObject("session_id", UUID.class).toString()),
                 permalink.channelId(), permalink.rootThreadTs());
         Assert.isTrue(sessions.size() <= 1, "Slack permalink identity must resolve within one workspace");
-        return sessions.stream().findFirst();
+        Optional<SessionId> sessionId = sessions.stream().findFirst();
+        LoggingEventBuilder builder = LOGGER.atInfo().addKeyValue("event", "slack_session_resolution")
+                .addKeyValue("slackChannelId", permalink.channelId())
+                .addKeyValue("slackThreadTs", permalink.rootThreadTs())
+                .addKeyValue("outcome", sessionId.isPresent() ? "RESOLVED" : "NOT_FOUND");
+        sessionId.ifPresent(value -> builder.addKeyValue("sessionId", value.value()));
+        builder.log("runtime_lifecycle");
+        return sessionId;
     }
 
     @Override

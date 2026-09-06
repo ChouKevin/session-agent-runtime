@@ -39,6 +39,8 @@ services:
         condition: service_healthy
     ports:
       - 127.0.0.1:${SESSION_AGENT_PORT:-8090}:8080
+    volumes:
+      - ${SESSION_AGENT_LOG_DIR:-../logs}:/app/logs
     logging:
       driver: json-file
       options:

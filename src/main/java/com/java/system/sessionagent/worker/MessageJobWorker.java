@@ -67,8 +67,10 @@ public final class MessageJobWorker {
 
         MessageWorkClaim currentClaim = claim.orElseThrow();
         telemetry.job("CLAIMED");
-        LOGGER.info("message_job_claimed workerId={} messageJobId={} sessionId={}", workerId,
-                currentClaim.messageJobId().value(), currentClaim.sessionId().value());
+        LOGGER.atInfo().addKeyValue("event", "message_job_claimed")
+                .addKeyValue("messageJobId", currentClaim.messageJobId().value())
+                .addKeyValue("sessionId", currentClaim.sessionId().value())
+                .addKeyValue("component", "MESSAGE_JOB_WORKER").log("runtime_lifecycle");
         AtomicBoolean stillOwned = new AtomicBoolean(true);
         long renewalNanos = properties.renewalInterval().toNanos();
         ScheduledFuture<?> renewal = scheduler.scheduleAtFixedRate(
@@ -80,9 +82,16 @@ public final class MessageJobWorker {
             WorkGuard guard = stillOwned::get;
             messageJobPort.process(currentClaim, guard);
             telemetry.job(stillOwned.get() ? "COMPLETED" : "OWNERSHIP_LOST");
+            LOGGER.atInfo().addKeyValue("event", stillOwned.get() ? "message_job_completed" : "message_job_ownership_lost")
+                    .addKeyValue("messageJobId", currentClaim.messageJobId().value())
+                    .addKeyValue("sessionId", currentClaim.sessionId().value()).log("runtime_lifecycle");
             return true;
         } catch (RuntimeException exception) {
             telemetry.job("FAILED");
+            LOGGER.atInfo().addKeyValue("event", "message_job_failed")
+                    .addKeyValue("messageJobId", currentClaim.messageJobId().value())
+                    .addKeyValue("sessionId", currentClaim.sessionId().value())
+                    .addKeyValue("failureCategory", "UNEXPECTED").log("runtime_lifecycle");
             throw exception;
         } finally {
             renewal.cancel(false);
@@ -96,9 +105,17 @@ public final class MessageJobWorker {
         try {
             if (!conversationStore.extendClaim(claim, properties.claimDuration())) {
                 stillOwned.set(false);
+                LOGGER.atInfo().addKeyValue("event", "message_job_recovery")
+                        .addKeyValue("messageJobId", claim.messageJobId().value())
+                        .addKeyValue("sessionId", claim.sessionId().value())
+                        .addKeyValue("outcome", "OWNERSHIP_LOST").log("runtime_lifecycle");
             }
         } catch (RuntimeException exception) {
             stillOwned.set(false);
+            LOGGER.atInfo().addKeyValue("event", "message_job_recovery")
+                    .addKeyValue("messageJobId", claim.messageJobId().value())
+                    .addKeyValue("sessionId", claim.sessionId().value())
+                    .addKeyValue("failureCategory", "STORAGE").log("runtime_lifecycle");
         }
     }
 }

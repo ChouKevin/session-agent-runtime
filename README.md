@@ -99,6 +99,28 @@ Tool execution has no runtime deduplication layer. A read-only tool can run agai
 
 The shipped schema is a fresh V1 schema. Reset a disposable PostgreSQL database before starting this version; do not reuse a database from an earlier schema. The Compose service binds the runtime HTTP port to loopback only. Required local credentials are intentionally not committed.
 
+## Docker JSON logs
+
+Runtime emits one JSON object per line to both `docker compose logs` and a rolling host file. The active file is always `session-agent-runtime.log`; archives are named `session-agent-runtime.YYYY-MM-DD.N.log.gz`. Runtime rolls at 100 MB, keeps seven days, and caps retained archives at 500 MB. Docker's independent `json-file` driver remains at 100 MB with five files.
+
+Before `docker compose up`, create the bind directory and grant the non-root runtime UID/GID (10001) write access. The default is the repository `logs/` directory because `SESSION_AGENT_LOG_DIR` is resolved relative to `docker/compose.yaml`:
+
+```bash
+mkdir -p logs
+chown 10001:10001 logs
+# Or choose another prepared directory:
+export SESSION_AGENT_LOG_DIR=/srv/session-agent-runtime/logs
+```
+
+Follow container output and the active host file independently:
+
+```bash
+docker compose -f docker/compose.yaml logs -f session-agent-runtime
+tail -F "${SESSION_AGENT_LOG_DIR:-logs}/session-agent-runtime.log"
+```
+
+The host directory is intentionally Git-ignored and keeps a stable active filename so a future Filebeat or Elastic Agent input can tail it. This POC does not deploy an ELK stack or a shipper. JSON lifecycle events contain only stable event names and safe correlation/outcome fields; Runtime never emits conversation text, Slack/model credentials, tool arguments/results, provider continuation data, or raw exception details in its lifecycle events.
+
 ## Slack Socket Mode (optional)
 
 Slack is disabled when `SLACK_APP_TOKEN`, `SLACK_BOT_TOKEN`, and

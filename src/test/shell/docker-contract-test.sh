@@ -43,7 +43,8 @@ jq -e '
     and .services["session-agent-runtime"].depends_on.postgres.condition == "service_healthy"
     and (.services.postgres.healthcheck.test | length > 0)
     and (.volumes | keys | length == 1)
-    and ([.services[] | .volumes[]? | .source] | all(test("(^|:)logs(/|:|$)"; "i") | not))
+    and ([.services["session-agent-runtime"].volumes[]? |
+         .type == "bind" and .target == "/app/logs" and (.source | endswith("/logs"))] | any)
 ' <<<"${compose_json}" >/dev/null || {
     printf 'compose isolation, logging, health, or volume contract failed\n' >&2
     exit 1
@@ -116,10 +117,35 @@ if rg -n 'replace-with-a-local-non-secret-password' "${env_example}" >/dev/null;
     exit 1
 fi
 
-if rg -n --fixed-strings 'logs/' "${compose_file}" "${dockerfile}" >/dev/null; then
-    printf 'host log reference is forbidden\n' >&2
+grep -Fq '${SESSION_AGENT_LOG_DIR:-../logs}:/app/logs' "${compose_file}" || {
+    printf 'runtime must bind the configured host log directory to /app/logs\n' >&2
     exit 1
-fi
+}
+
+grep -Fq '/app/logs/session-agent-runtime.log' "${runtime_root}/src/main/resources/logback-spring.xml" || {
+    printf 'runtime logback configuration must use the fixed active log filename\n' >&2
+    exit 1
+}
+grep -Fq '<maxFileSize>100MB</maxFileSize>' "${runtime_root}/src/main/resources/logback-spring.xml" || {
+    printf 'runtime file rotation must roll at 100 MB\n' >&2
+    exit 1
+}
+grep -Fq '<maxHistory>7</maxHistory>' "${runtime_root}/src/main/resources/logback-spring.xml" || {
+    printf 'runtime file rotation must retain seven days\n' >&2
+    exit 1
+}
+grep -Fq '<totalSizeCap>500MB</totalSizeCap>' "${runtime_root}/src/main/resources/logback-spring.xml" || {
+    printf 'runtime file rotation must cap retained files at 500 MB\n' >&2
+    exit 1
+}
+grep -Fq 'useradd --uid 10001' "${dockerfile}" || {
+    printf 'runtime container must use a stable non-root UID for writable log mounts\n' >&2
+    exit 1
+}
+grep -Fq 'chown sessionagent:sessionagent /app/logs' "${dockerfile}" || {
+    printf 'runtime image must own its log directory before a bind mount is applied\n' >&2
+    exit 1
+}
 
 grep -Fq 'FROM maven:' "${dockerfile}" || { printf 'Dockerfile lacks Maven build stage\n' >&2; exit 1; }
 grep -Fq 'eclipse-temurin:21' "${dockerfile}" || { printf 'Dockerfile lacks Temurin 21 runtime\n' >&2; exit 1; }

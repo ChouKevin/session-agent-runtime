@@ -4,11 +4,14 @@ import com.java.system.sessionagent.conversation.domain.IncomingMessage;
 import com.java.system.sessionagent.conversation.domain.IncomingMessageSource;
 import org.springframework.util.Assert;
 import org.springframework.util.StringUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.Optional;
 
 public final class SlackEventAdapter {
 
+    private static final Logger LOGGER = LoggerFactory.getLogger(SlackEventAdapter.class);
     private final String botUserId;
     private final SlackRootIntakePort rootIntakePort;
 
@@ -22,18 +25,23 @@ public final class SlackEventAdapter {
     public SlackEventOutcome handle(SlackRootEvent event) {
         Assert.notNull(event, "Slack root event must not be null");
         if (isObviousNonHumanNoise(event)) {
+            logInbound(event, event.messageTs(), SlackEventOutcome.IGNORED);
             return SlackEventOutcome.IGNORED;
         }
         String rootThreadTs = StringUtils.hasText(event.threadTs()) ? event.threadTs() : event.messageTs();
         SlackIntakeClassification ignoredClassification = ignoredClassification(event);
         if (ignoredClassification != SlackIntakeClassification.ACCEPTED) {
-            return rootIntakePort.receive(new SlackRootIntake(event.eventId(), event.teamId(), event.channelId(), rootThreadTs,
+            SlackEventOutcome outcome = rootIntakePort.receive(new SlackRootIntake(event.eventId(), event.teamId(), event.channelId(), rootThreadTs,
                     event.messageTs(), ignoredClassification, Optional.empty()));
+            logInbound(event, rootThreadTs, outcome);
+            return outcome;
         }
         String message = normalizedMessage(event);
         if (!StringUtils.hasText(message)) {
-            return rootIntakePort.receive(new SlackRootIntake(event.eventId(), event.teamId(), event.channelId(), rootThreadTs,
+            SlackEventOutcome outcome = rootIntakePort.receive(new SlackRootIntake(event.eventId(), event.teamId(), event.channelId(), rootThreadTs,
                     event.messageTs(), SlackIntakeClassification.BLANK, Optional.empty()));
+            logInbound(event, rootThreadTs, outcome);
+            return outcome;
         }
         IncomingMessage incomingMessage = new IncomingMessage(
                 IncomingMessageSource.SLACK,
@@ -41,8 +49,19 @@ public final class SlackEventAdapter {
                 event.participantId(),
                 boundedKey("slack/", event.teamId(), event.channelId(), event.messageTs()),
                 message);
-        return rootIntakePort.receive(new SlackRootIntake(event.eventId(), event.teamId(), event.channelId(), rootThreadTs,
+        SlackEventOutcome outcome = rootIntakePort.receive(new SlackRootIntake(event.eventId(), event.teamId(), event.channelId(), rootThreadTs,
                 event.messageTs(), SlackIntakeClassification.ACCEPTED, Optional.of(incomingMessage)));
+        logInbound(event, rootThreadTs, outcome);
+        return outcome;
+    }
+
+    private static void logInbound(SlackRootEvent event, String rootThreadTs, SlackEventOutcome outcome) {
+        LOGGER.atInfo().addKeyValue("event", "slack_inbound")
+                .addKeyValue("slackTeamId", event.teamId())
+                .addKeyValue("slackChannelId", event.channelId())
+                .addKeyValue("slackThreadTs", rootThreadTs)
+                .addKeyValue("slackMessageTs", event.messageTs())
+                .addKeyValue("outcome", outcome.name()).log("runtime_lifecycle");
     }
 
     private boolean isObviousNonHumanNoise(SlackRootEvent event) {
