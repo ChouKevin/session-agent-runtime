@@ -345,7 +345,7 @@ public final class SlackBoltSocketClient implements SlackSocketClient {
 
         @Override
         public void stop() throws Exception {
-            intakeAndAcknowledgementGate.retire();
+            intakeAndAcknowledgementGate.retireAndAwaitDrain();
             Exception firstFailure = null; // cs-allow An exception is absent until an owned close operation fails.
             try {
                 client.setAutoReconnectEnabled(false);
@@ -382,11 +382,15 @@ public final class SlackBoltSocketClient implements SlackSocketClient {
                 IntakeAndAcknowledgementGate intakeAndAcknowledgementGate) {
             SocketModeRequestParser requestParser = new SocketModeRequestParser(app.config());
             client.addWebSocketMessageListener(message -> {
-                if (!intakeAndAcknowledgementGate.accepting()) {
+                if (!intakeAndAcknowledgementGate.tryAcquire()) {
                     return;
                 }
-                notifyConnectedForHello(message, listener);
-                runBoltApp(message, app, client, requestParser, intakeAndAcknowledgementGate);
+                try {
+                    notifyConnectedForHello(message, listener);
+                    runBoltApp(message, app, client, requestParser);
+                } finally {
+                    intakeAndAcknowledgementGate.release();
+                }
             });
             client.addWebSocketCloseListener((code, reason) -> notifyDisconnectedIfCurrent(client, listener));
             client.addWebSocketErrorListener(reason -> notifyDisconnectedIfCurrent(client, listener));
@@ -417,21 +421,14 @@ public final class SlackBoltSocketClient implements SlackSocketClient {
                 String message,
                 App app,
                 SocketModeClient client,
-                SocketModeRequestParser requestParser,
-                IntakeAndAcknowledgementGate intakeAndAcknowledgementGate) {
-            if (!intakeAndAcknowledgementGate.accepting()) {
-                return;
-            }
+                SocketModeRequestParser requestParser) {
             SocketModeRequest request = requestParser.parse(message);
             if (request == null) { // cs-allow The parser contract represents unsupported frames with null.
                 return;
             }
             try {
-                if (!intakeAndAcknowledgementGate.accepting()) {
-                    return;
-                }
                 Response response = app.run(request.getBoltRequest());
-                if (response.getStatusCode() != 200 || !intakeAndAcknowledgementGate.accepting()) {
+                if (response.getStatusCode() != 200) {
                     return;
                 }
                 if (response.getBody() == null) { // cs-allow The Bolt response body is optional by SDK contract.
@@ -453,14 +450,44 @@ public final class SlackBoltSocketClient implements SlackSocketClient {
 
         private static final class IntakeAndAcknowledgementGate {
 
-            private final AtomicBoolean accepting = new AtomicBoolean(true);
+            private final Object monitor = new Object();
+            private boolean accepting = true;
+            private int admittedCallbacks;
 
-            private boolean accepting() {
-                return accepting.get();
+            private boolean tryAcquire() {
+                synchronized (monitor) {
+                    if (!accepting) {
+                        return false;
+                    }
+                    admittedCallbacks++;
+                    return true;
+                }
             }
 
-            private void retire() {
-                accepting.set(false);
+            private void release() {
+                synchronized (monitor) {
+                    admittedCallbacks--;
+                    if (admittedCallbacks == 0) {
+                        monitor.notifyAll();
+                    }
+                }
+            }
+
+            private void retireAndAwaitDrain() {
+                boolean interrupted = false;
+                synchronized (monitor) {
+                    accepting = false;
+                    while (admittedCallbacks > 0) {
+                        try {
+                            monitor.wait();
+                        } catch (InterruptedException exception) {
+                            interrupted = true;
+                        }
+                    }
+                }
+                if (interrupted) {
+                    Thread.currentThread().interrupt();
+                }
             }
         }
     }

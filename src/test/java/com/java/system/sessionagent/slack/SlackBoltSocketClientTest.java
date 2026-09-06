@@ -13,6 +13,8 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
 
 import java.time.Duration;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -191,12 +193,83 @@ class SlackBoltSocketClientTest {
         Mockito.verify(socketModeClient, Mockito.never()).sendSocketModeResponse(Mockito.any(SocketModeResponse.class));
     }
 
+    @Test
+    void drains_an_admitted_socket_event_before_retirement_closes_the_transport() throws Exception {
+        SocketModeClient socketModeClient = Mockito.mock(SocketModeClient.class);
+        SocketModeApp socketModeApp = Mockito.mock(SocketModeApp.class);
+        CountDownLatch intakeStarted = new CountDownLatch(1);
+        CountDownLatch allowIntakeCompletion = new CountDownLatch(1);
+        SlackEventAdapter eventAdapter = new SlackEventAdapter("UBOT", received -> {
+            intakeStarted.countDown();
+            await(allowIntakeCompletion);
+            return SlackIntakeResult.newIgnored();
+        });
+        SlackBoltSocketClient client = new SlackBoltSocketClient(properties(), eventAdapter);
+        SlackBoltSocketClient.SlackSdkSocketRuntime runtime = new SlackBoltSocketClient.SlackSdkSocketRuntime(
+                socketModeClient, socketModeApp, unauthenticatedApp(client), new RecordingListener());
+        ArgumentCaptor<WebSocketMessageListener> messageListener = ArgumentCaptor.forClass(WebSocketMessageListener.class);
+        Mockito.verify(socketModeClient).addWebSocketMessageListener(messageListener.capture());
+        CountDownLatch callbackFinished = new CountDownLatch(1);
+        Thread callback = new Thread(() -> {
+            messageListener.getValue().handle(socketModeEventEnvelope());
+            callbackFinished.countDown();
+        }, "slack-socket-callback");
+        callback.start();
+        await(intakeStarted);
+        CountDownLatch retirementStarted = new CountDownLatch(1);
+        CountDownLatch retirementFinished = new CountDownLatch(1);
+        AtomicReference<Exception> stopFailure = new AtomicReference<>();
+        Thread retirement = new Thread(() -> {
+            retirementStarted.countDown();
+            try {
+                runtime.stop();
+            } catch (Exception exception) {
+                stopFailure.set(exception);
+            } finally {
+                retirementFinished.countDown();
+            }
+        }, "slack-socket-retirement");
+        retirement.start();
+        await(retirementStarted);
+
+        assertThat(retirementFinished.await(200, TimeUnit.MILLISECONDS)).isFalse();
+        Mockito.verify(socketModeClient, Mockito.never()).setAutoReconnectEnabled(false);
+
+        allowIntakeCompletion.countDown();
+        await(callbackFinished);
+        await(retirementFinished);
+
+        assertThat(stopFailure.get()).isNull();
+        org.mockito.InOrder socketCalls = Mockito.inOrder(socketModeClient);
+        socketCalls.verify(socketModeClient).sendSocketModeResponse(Mockito.any(SocketModeResponse.class));
+        socketCalls.verify(socketModeClient).setAutoReconnectEnabled(false);
+        socketCalls.verify(socketModeClient).close();
+    }
+
     private static SlackProperties properties() {
         return new SlackProperties("xapp-test", "xoxb-test", "UBOT", Duration.ofSeconds(1), Duration.ofSeconds(1));
     }
 
     private static SlackEventAdapter adapter() {
         return new SlackEventAdapter("UBOT", ignored -> SlackIntakeResult.newIgnored());
+    }
+
+    private static String socketModeEventEnvelope() {
+        return """
+                {"envelope_id":"envelope-1","type":"events_api","accepts_response_payload":false,
+                "payload":{"token":"verification-token","team_id":"T1","api_app_id":"A1","type":"event_callback",
+                "event_id":"Ev1","event_time":1,"event":{"type":"app_mention","user":"U1","text":"<@UBOT> hello",
+                "channel":"C1","ts":"1.000001"}}}
+                """;
+    }
+
+    private static void await(CountDownLatch latch) {
+        try {
+            assertThat(latch.await(1, TimeUnit.SECONDS)).isTrue();
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+            throw new AssertionError("Interrupted while waiting for a Socket Mode test boundary", exception);
+        }
     }
 
     private static App unauthenticatedApp(SlackBoltSocketClient client) {
