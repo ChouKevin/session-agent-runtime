@@ -3,7 +3,6 @@ package com.java.system.sessionagent.model;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.google.genai.errors.ApiException;
 import com.java.system.sessionagent.conversation.domain.ModelReply;
 import com.java.system.sessionagent.conversation.domain.ModelCallResult;
 import com.java.system.sessionagent.conversation.domain.ModelDescriptor;
@@ -328,25 +327,19 @@ public final class SpringAiConversationModel implements ConversationModel {
 
     private static boolean hasContextTooLargeSignal(Throwable exception) {
         for (Throwable current = exception; current != null; current = current.getCause()) { // cs-allow traversal ends at null
-            if (current instanceof ApiException providerFailure && isGoogleInputTokenLimitFailure(providerFailure)) {
-                return true;
-            }
             String message = String.valueOf(current.getMessage()).toLowerCase(Locale.ROOT);
-            if (message.contains("context")
-                    && (message.contains("window") || message.contains("too large") || message.contains("exceeded"))) {
+            if (hasProviderInputTokenLimitSignal(message)
+                    || (message.contains("context")
+                    && (message.contains("window") || message.contains("too large") || message.contains("exceeded")))) {
                 return true;
             }
         }
         return false;
     }
 
-    private static boolean isGoogleInputTokenLimitFailure(ApiException providerFailure) {
-        String message = String.valueOf(providerFailure.message()).toLowerCase(Locale.ROOT);
-        boolean inputTokenLimit = message.contains("input token count")
-                && message.contains("maximum number of tokens allowed");
-        return providerFailure.code() == 400
-                && "INVALID_ARGUMENT".equals(providerFailure.status())
-                && (inputTokenLimit || message.contains("model only supports up to"));
+    private static boolean hasProviderInputTokenLimitSignal(String message) {
+        return (message.contains("input token count") && message.contains("maximum number of tokens allowed"))
+                || message.contains("model only supports up to");
     }
 
     private static boolean hasTransientSignal(Throwable exception) {
