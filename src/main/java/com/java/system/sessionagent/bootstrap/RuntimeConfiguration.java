@@ -21,6 +21,12 @@ import com.java.system.sessionagent.slack.SlackProperties;
 import com.java.system.sessionagent.slack.SlackRootIntakePort;
 import com.java.system.sessionagent.slack.SlackSocketClient;
 import com.java.system.sessionagent.slack.SlackSocketLifecycle;
+import com.java.system.sessionagent.slack.SlackDeliveryProperties;
+import com.java.system.sessionagent.slack.SlackDeliveryStore;
+import com.java.system.sessionagent.slack.SlackDeliveryWorker;
+import com.java.system.sessionagent.slack.SlackPostgresDeliveryStore;
+import com.java.system.sessionagent.slack.SlackSdkWebApi;
+import com.java.system.sessionagent.slack.SlackWebApi;
 import com.java.system.sessionagent.tool.port.ToolCatalog;
 import com.java.system.sessionagent.worker.MessageJobWorker;
 import com.java.system.sessionagent.worker.WorkerProperties;
@@ -157,6 +163,32 @@ public class RuntimeConfiguration {
     @Bean
     SlackSocketLifecycle slackSocketLifecycle(SlackSocketClient slackSocketClient, SlackProperties properties) {
         return new SlackSocketLifecycle(slackSocketClient, properties);
+    }
+
+    @Bean
+    SlackDeliveryProperties slackDeliveryProperties(SlackProperties properties) {
+        SlackProperties.Delivery delivery = properties.delivery();
+        return new SlackDeliveryProperties(delivery.leaseDuration(), delivery.initialBackoff(), delivery.maximumBackoff(),
+                delivery.maximumAttempts());
+    }
+
+    @Bean
+    SlackDeliveryStore slackDeliveryStore(DataSource dataSource) {
+        return new SlackPostgresDeliveryStore(dataSource);
+    }
+
+    @Bean
+    @ConditionalOnMissingBean(SlackWebApi.class)
+    SlackWebApi slackWebApi(SlackProperties properties) {
+        return new SlackSdkWebApi(properties);
+    }
+
+    @Bean
+    SlackDeliveryWorker slackDeliveryWorker(
+            SlackDeliveryStore slackDeliveryStore,
+            SlackWebApi slackWebApi,
+            SlackDeliveryProperties slackDeliveryProperties) {
+        return new SlackDeliveryWorker(slackDeliveryStore, slackWebApi, slackDeliveryProperties, "session-agent-slack-delivery");
     }
 
     @Bean

@@ -28,6 +28,12 @@ session-agent:
     bot-user-id: ${SLACK_BOT_USER_ID:}
     reconnect-delay: 5s
     shutdown-timeout: 5s
+    delivery:
+      poll-delay: 1s
+      lease-duration: 30s
+      initial-backoff: 1s
+      maximum-backoff: 60s
+      maximum-attempts: 5
 spring:
   jackson:
     deserialization:

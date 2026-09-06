@@ -296,3 +296,32 @@ create trigger slack_event_receipt_append_only before update or delete on slack_
     for each row execute function reject_committed_row_change();
 create trigger slack_message_receipt_append_only before update or delete on slack_message_receipt
     for each row execute function reject_committed_row_change();
+
+create table slack_delivery (
+    delivery_id uuid primary key,
+    terminal_session_id uuid not null,
+    terminal_sequence bigint not null,
+    message_job_id uuid not null,
+    channel_id varchar(128) not null check (channel_id ~ '[^[:space:]]'),
+    root_thread_ts varchar(64) not null check (root_thread_ts ~ '[^[:space:]]'),
+    terminal_text text not null check (length(terminal_text) > 0),
+    status varchar(16) not null check (status in ('PENDING', 'WORKING', 'RETRY', 'SENT', 'FAILED')),
+    attempt_count integer not null default 0 check (attempt_count >= 0),
+    next_attempt_at timestamptz not null,
+    claim_number bigint not null default 0 check (claim_number >= 0),
+    worker_id varchar(128),
+    locked_until timestamptz,
+    failure_category varchar(16) check (failure_category in ('RATE_LIMIT', 'TRANSIENT', 'PERMANENT')),
+    slack_message_ts varchar(64),
+    created_at timestamptz not null,
+    sent_at timestamptz,
+    unique (terminal_session_id, terminal_sequence),
+    foreign key (terminal_session_id, terminal_sequence) references session_message(session_id, sequence),
+    foreign key (message_job_id, terminal_session_id) references message_job(message_job_id, session_id),
+    check ((status = 'WORKING') = (worker_id is not null and locked_until is not null and claim_number > 0)),
+    check (status <> 'SENT' or (slack_message_ts is not null and sent_at is not null and worker_id is null and locked_until is null)),
+    check (status <> 'FAILED' or (failure_category is not null and worker_id is null and locked_until is null))
+);
+
+create index ix_claimable_slack_delivery on slack_delivery(next_attempt_at, created_at, delivery_id)
+    where status in ('PENDING', 'RETRY');
