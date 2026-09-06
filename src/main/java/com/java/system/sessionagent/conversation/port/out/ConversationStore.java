@@ -19,8 +19,10 @@ import org.springframework.util.Assert;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalInt;
 
@@ -33,6 +35,21 @@ public interface ConversationStore {
     boolean extendClaim(MessageWorkClaim claim, Duration leaseDuration);
 
     List<SessionMessage> loadHistory(SessionId sessionId);
+
+    default Optional<List<SessionMessage>> loadHistoryPage(SessionId sessionId, long afterSequence, int limit) {
+        SessionId requiredSessionId = Objects.requireNonNull(sessionId, "Session ID must not be null");
+        Assert.isTrue(afterSequence >= 0 && limit > 0,
+                "History pagination must be nonnegative with a positive limit");
+        List<SessionMessage> history = loadHistory(requiredSessionId);
+        if (history.isEmpty()) {
+            return Optional.empty();
+        }
+        return Optional.of(history.stream()
+                .filter(message -> message.sequence().value() > afterSequence)
+                .sorted(Comparator.comparingLong(message -> message.sequence().value()))
+                .limit(limit)
+                .toList());
+    }
 
     void bindModelRoute(MessageWorkClaim claim, ModelRouteId modelRouteId);
 

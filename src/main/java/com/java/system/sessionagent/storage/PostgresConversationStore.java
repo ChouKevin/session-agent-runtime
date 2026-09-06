@@ -271,6 +271,48 @@ public final class PostgresConversationStore implements ConversationStore {
     }
 
     @Override
+    public Optional<List<SessionMessage>> loadHistoryPage(SessionId sessionId, long afterSequence, int limit) {
+        SessionId requiredSessionId = Objects.requireNonNull(sessionId, "Session ID must not be null");
+        Assert.isTrue(afterSequence >= 0 && limit > 0,
+                "History pagination must be nonnegative with a positive limit");
+        try {
+            List<Optional<SessionMessage>> rows = jdbcTemplate.query("""
+                    select message.sequence, message.message_job_id as event_message_job_id, user_job.message_job_id as user_message_job_id,
+                        message.created_at, message.role, user_detail.participant_id, user_detail.message as user_message,
+                        assistant_detail.message as assistant_message, calls_detail.message as assistant_tool_calls_message,
+                        calls_detail.calls, observation_detail.tool_call_id, observation_detail.tool_name, observation_detail.output,
+                        runtime_detail.code, runtime_detail.message as runtime_message
+                    from conversation_session session
+                    left join session_message message on message.session_id = session.session_id and message.sequence > ?
+                    left join user_message user_detail on user_detail.session_id = message.session_id
+                        and user_detail.sequence = message.sequence
+                    left join message_job user_job on user_job.session_id = message.session_id
+                        and user_job.user_message_sequence = message.sequence
+                    left join assistant_message assistant_detail on assistant_detail.session_id = message.session_id
+                        and assistant_detail.sequence = message.sequence
+                    left join assistant_tool_calls calls_detail on calls_detail.session_id = message.session_id
+                        and calls_detail.sequence = message.sequence
+                    left join tool_observation observation_detail on observation_detail.session_id = message.session_id
+                        and observation_detail.sequence = message.sequence
+                    left join runtime_message runtime_detail on runtime_detail.session_id = message.session_id
+                        and runtime_detail.sequence = message.sequence
+                    where session.session_id = ?
+                    order by message.sequence asc
+                    limit ?
+                    """, (resultSet, rowNumber) -> storedPagedHistoryMessage(requiredSessionId, resultSet), afterSequence,
+                    UUID.fromString(requiredSessionId.value()), limit);
+            if (rows.isEmpty()) {
+                return Optional.empty();
+            }
+            return Optional.of(rows.stream().flatMap(Optional::stream).toList());
+        } catch (InvalidStoredNativeHistoryException exception) {
+            throw ConversationStoreFailure.invalidHistory(exception);
+        } catch (RuntimeException exception) {
+            throw translate(exception);
+        }
+    }
+
+    @Override
     public void bindModelRoute(MessageWorkClaim claim, ModelRouteId modelRouteId) {
         MessageWorkClaim requiredClaim = Objects.requireNonNull(claim, "Message work claim must not be null");
         ModelRouteId requiredRouteId = Objects.requireNonNull(modelRouteId, "Model route ID must not be null");
@@ -412,6 +454,40 @@ public final class PostgresConversationStore implements ConversationStore {
         messages.addAll(loadRuntimeMessages(parsedSessionId));
         messages.sort(Comparator.comparingLong(message -> message.sequence().value()));
         return List.copyOf(messages);
+    }
+
+    private Optional<SessionMessage> storedPagedHistoryMessage(SessionId sessionId, ResultSet resultSet) throws java.sql.SQLException {
+        Optional<Long> sequence = Optional.ofNullable(resultSet.getObject("sequence", Long.class));
+        if (sequence.isEmpty()) {
+            return Optional.empty();
+        }
+        try {
+            SessionSequence messageSequence = new SessionSequence(sequence.orElseThrow());
+            Instant createdAt = resultSet.getObject("created_at", OffsetDateTime.class).toInstant();
+            MessageRole role = MessageRole.valueOf(resultSet.getString("role"));
+            return Optional.of(switch (role) {
+                case USER -> new UserMessage(sessionId, messageSequence, Optional.of(new MessageJobId(
+                        resultSet.getObject("user_message_job_id", UUID.class).toString())), createdAt, MessageRole.USER,
+                        resultSet.getString("participant_id"), resultSet.getString("user_message"));
+                case ASSISTANT -> new AssistantMessage(sessionId, messageSequence, storedPageMessageJobId(resultSet), createdAt,
+                        MessageRole.ASSISTANT, resultSet.getString("assistant_message"));
+                case ASSISTANT_TOOL_CALLS -> new AssistantToolCallsMessage(sessionId, messageSequence, storedPageMessageJobId(resultSet),
+                        createdAt, MessageRole.ASSISTANT_TOOL_CALLS,
+                        Optional.ofNullable(resultSet.getString("assistant_tool_calls_message")),
+                        toolRequests(resultSet.getString("calls")));
+                case TOOL -> new ToolObservation(sessionId, messageSequence, storedPageMessageJobId(resultSet), createdAt,
+                        MessageRole.TOOL, new ToolCallId(resultSet.getString("tool_call_id")), resultSet.getString("tool_name"),
+                        structuredValue(resultSet.getString("output")));
+                case RUNTIME -> new RuntimeMessage(sessionId, messageSequence, storedPageMessageJobId(resultSet), createdAt,
+                        MessageRole.RUNTIME, resultSet.getString("code"), resultSet.getString("runtime_message"));
+            });
+        } catch (IllegalArgumentException | NullPointerException exception) {
+            throw new InvalidStoredNativeHistoryException(exception);
+        }
+    }
+
+    private static Optional<MessageJobId> storedPageMessageJobId(ResultSet resultSet) throws java.sql.SQLException {
+        return Optional.of(new MessageJobId(resultSet.getObject("event_message_job_id", UUID.class).toString()));
     }
 
     @Override

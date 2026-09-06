@@ -2,6 +2,7 @@ package com.java.system.sessionagent.storage;
 
 import com.java.system.sessionagent.conversation.domain.IncomingMessage;
 import com.java.system.sessionagent.conversation.domain.JobStatus;
+import com.java.system.sessionagent.conversation.domain.MessageRole;
 import com.java.system.sessionagent.conversation.domain.MessageReceipt;
 import com.java.system.sessionagent.conversation.domain.MessageWorkClaim;
 import com.java.system.sessionagent.conversation.domain.AssistantMessage;
@@ -19,6 +20,8 @@ import com.java.system.sessionagent.conversation.domain.ModelUsage;
 import com.java.system.sessionagent.conversation.domain.SessionMessage;
 import com.java.system.sessionagent.conversation.domain.SessionSequence;
 import com.java.system.sessionagent.conversation.domain.ToolObservation;
+import com.java.system.sessionagent.conversation.domain.UserMessage;
+import com.java.system.sessionagent.conversation.domain.RuntimeMessage;
 import com.java.system.sessionagent.conversation.application.MessageJobService;
 import com.java.system.sessionagent.conversation.port.out.ConversationModel;
 import com.java.system.sessionagent.conversation.port.out.ModelCallReservation;
@@ -155,6 +158,56 @@ class PostgresConversationCommitPostgresIT {
                 java.util.UUID.fromString(receipt.messageJobId().value()))).isEqualTo("DONE");
         assertThat(jdbcTemplate.queryForObject("select count(*) from tool_observation", Integer.class)).isEqualTo(2);
         assertThat(restartedStore.claimNext("recovery-worker", Duration.ofSeconds(30))).isEmpty();
+    }
+
+    @Test
+    void loads_only_the_next_database_history_page_in_sequence_order_and_preserves_raw_message_variants() {
+        ConversationStore store = store();
+        MessageReceipt receipt = store.receive(new IncomingMessage("thread", "alice", "paged-source", "original user message"));
+        MessageWorkClaim claim = store.claimNext("worker", Duration.ofSeconds(30)).orElseThrow();
+        store.append(claim, new ConversationStore.MessageBatch(List.of(
+                new ConversationStore.AssistantData("assistant text"),
+                new ConversationStore.AssistantToolCallsData(Optional.of("tool preface"), List.of(
+                        new ConversationStore.ToolCallData(new ToolCallId("call-page"), "mcp_lookup",
+                                Map.of("query", Map.of("term", "history"))))),
+                new ConversationStore.ToolObservationData(new ToolCallId("call-page"), "mcp_lookup",
+                        Map.of("result", List.of(Map.of("id", 7)))),
+                new ConversationStore.RuntimeData("MODEL_UNAVAILABLE", "Runtime model is unavailable.")),
+                ConversationStore.JobUpdate.COMPLETE), NOW);
+        insertMalformedAssistantCalls(receipt, claim, 6, "[1]");
+
+        Optional<List<SessionMessage>> page = store().loadHistoryPage(receipt.sessionId(), 0, 5);
+
+        assertThat(page).hasValueSatisfying(history -> {
+            assertThat(history).extracting(message -> message.sequence().value()).containsExactly(1L, 2L, 3L, 4L, 5L);
+            assertThat(history.get(0)).isInstanceOfSatisfying(UserMessage.class, user -> {
+                assertThat(user.role()).isEqualTo(MessageRole.USER);
+                assertThat(user.message()).isEqualTo("original user message");
+            });
+            assertThat(history.get(1)).isInstanceOfSatisfying(AssistantMessage.class, assistant -> {
+                assertThat(assistant.role()).isEqualTo(MessageRole.ASSISTANT);
+                assertThat(assistant.message()).isEqualTo("assistant text");
+            });
+            assertThat(history.get(2)).isInstanceOfSatisfying(AssistantToolCallsMessage.class, calls -> {
+                assertThat(calls.role()).isEqualTo(MessageRole.ASSISTANT_TOOL_CALLS);
+                assertThat(calls.message()).contains("tool preface");
+                assertThat(calls.requests()).extracting(request -> request.toolCallId().value()).containsExactly("call-page");
+                assertThat(calls.requests().getFirst().arguments()).isEqualTo(Map.of("query", Map.of("term", "history")));
+            });
+            assertThat(history.get(3)).isInstanceOfSatisfying(ToolObservation.class, observation -> {
+                assertThat(observation.role()).isEqualTo(MessageRole.TOOL);
+                assertThat(observation.toolName()).isEqualTo("mcp_lookup");
+                assertThat(observation.output()).isEqualTo(Map.of("result", List.of(Map.of("id", 7))));
+            });
+            assertThat(history.get(4)).isInstanceOfSatisfying(RuntimeMessage.class, runtime -> {
+                assertThat(runtime.role()).isEqualTo(MessageRole.RUNTIME);
+                assertThat(runtime.code()).isEqualTo("MODEL_UNAVAILABLE");
+                assertThat(runtime.message()).isEqualTo("Runtime model is unavailable.");
+            });
+        });
+        assertThat(store().loadHistoryPage(receipt.sessionId(), 6, 1)).contains(List.of());
+        assertThat(store().loadHistoryPage(new com.java.system.sessionagent.conversation.domain.SessionId(
+                "a1d4cefe-d5b5-4f40-b9f6-beb41a6831a0"), 0, 1)).isEmpty();
     }
 
     @Test
@@ -457,15 +510,19 @@ class PostgresConversationCommitPostgresIT {
     }
 
     private void insertMalformedAssistantCalls(MessageReceipt receipt, MessageWorkClaim claim, String calls) {
+        insertMalformedAssistantCalls(receipt, claim, 2, calls);
+    }
+
+    private void insertMalformedAssistantCalls(MessageReceipt receipt, MessageWorkClaim claim, long sequence, String calls) {
         DataSource dataSource = Objects.requireNonNull(jdbcTemplate.getDataSource(), "JDBC data source must not be null");
         TransactionTemplate transaction = new TransactionTemplate(new DataSourceTransactionManager(dataSource));
         UUID sessionId = UUID.fromString(receipt.sessionId().value());
         UUID jobId = UUID.fromString(claim.messageJobId().value());
         transaction.executeWithoutResult(status -> {
-            jdbcTemplate.update("insert into session_message(session_id, sequence, message_job_id, role, created_at) values (?, 2, ?, 'ASSISTANT_TOOL_CALLS', ?)",
-                    sessionId, jobId, Timestamp.from(NOW));
-            jdbcTemplate.update("insert into assistant_tool_calls(session_id, sequence, message, calls) values (?, 2, null, ?::jsonb)",
-                    sessionId, calls);
+            jdbcTemplate.update("insert into session_message(session_id, sequence, message_job_id, role, created_at) values (?, ?, ?, 'ASSISTANT_TOOL_CALLS', ?)",
+                    sessionId, sequence, jobId, Timestamp.from(NOW));
+            jdbcTemplate.update("insert into assistant_tool_calls(session_id, sequence, message, calls) values (?, ?, null, ?::jsonb)",
+                    sessionId, sequence, calls);
         });
     }
 

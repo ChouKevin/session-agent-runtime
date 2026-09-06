@@ -53,6 +53,14 @@ public final class ConversationQueryService implements ConversationQueryPort {
     }
 
     @Override
+    public Optional<List<SessionMessage>> messages(String sessionId, long afterSequence, int limit) {
+        if (afterSequence < 0 || limit <= 0) {
+            throw new IllegalArgumentException("History pagination must be nonnegative with a positive limit");
+        }
+        return conversationStore.loadHistoryPage(new SessionId(sessionId), afterSequence, limit);
+    }
+
+    @Override
     public Optional<SessionDetailView> session(String sessionId) {
         SessionId requiredSessionId = new SessionId(sessionId);
         return conversationStore.readSession(requiredSessionId).map(projection -> {

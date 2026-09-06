@@ -54,6 +54,8 @@ GET  /internal/sessions/{sessionId}/messages
 
 `POST /internal/messages` accepts `sessionKey`, `participantId`, `sourceMessageId`, and `message`. Reusing a nonblank `sessionKey` continues the same session. The accepted response contains `sessionId` and `messageJobId`. The job response contains its IDs, `status`, `retryCount`, and `modelCallCount`.
 
+`GET /internal/sessions/{sessionId}/messages` accepts optional `afterSequence` and `limit` query parameters. Omitting both returns the complete committed history. When either is present, results are the ascending raw-history page after `afterSequence` (default `0`), limited by `limit` when supplied; an exhausted cursor for an existing session returns an empty list, while an unknown session returns `404`.
+
 History records share `sequence`, `createdAt`, and `messageJobId` fields. The public event shapes are:
 
 | Type | Type-specific fields |

@@ -21,13 +21,40 @@ import java.util.List;
 import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class SessionQueryServiceTest {
 
     private static final String SESSION_ID = "a1d4cefe-d5b5-4f40-b9f6-beb41a6831af";
     private static final Instant CREATED_AT = Instant.parse("2026-08-31T10:00:01Z");
+
+    @Test
+    void loads_a_paged_history_window_without_loading_complete_history_and_keeps_exhausted_and_missing_distinct() {
+        ConversationStore store = mock(ConversationStore.class);
+        SessionId sessionId = new SessionId(SESSION_ID);
+        UserMessage pageMessage = new UserMessage(sessionId, new SessionSequence(4), Optional.empty(), CREATED_AT,
+                MessageRole.USER, "U01", "page content");
+        when(store.loadHistoryPage(sessionId, 3, 2)).thenReturn(Optional.of(List.of(pageMessage)));
+        when(store.loadHistoryPage(sessionId, 4, 2)).thenReturn(Optional.of(List.of()));
+        when(store.loadHistoryPage(new SessionId("a1d4cefe-d5b5-4f40-b9f6-beb41a6831a0"), 0, 2)).thenReturn(Optional.empty());
+        when(store.loadHistory(any())).thenThrow(new AssertionError("Paged history must not load complete history"));
+        ConversationQueryService service = new ConversationQueryService(store,
+                model(new ModelDescriptor(new ModelRouteId("test"), "test-model", 1_000)),
+                () -> new ToolSnapshot(List.of()), new ContextUsageEstimator());
+
+        assertThat(service.messages(SESSION_ID, 3, 2)).contains(List.of(pageMessage));
+        assertThat(service.messages(SESSION_ID, 4, 2)).contains(List.of());
+        assertThat(service.messages("a1d4cefe-d5b5-4f40-b9f6-beb41a6831a0", 0, 2)).isEmpty();
+
+        verify(store).loadHistoryPage(sessionId, 3, 2);
+        verify(store).loadHistoryPage(sessionId, 4, 2);
+        verify(store).loadHistoryPage(new SessionId("a1d4cefe-d5b5-4f40-b9f6-beb41a6831a0"), 0, 2);
+        verify(store, never()).loadHistory(any());
+    }
 
     @Test
     void projects_active_context_usage_without_promoting_session_content_or_provider_metadata() {
