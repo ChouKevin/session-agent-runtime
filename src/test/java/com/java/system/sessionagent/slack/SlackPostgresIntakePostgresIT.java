@@ -230,7 +230,7 @@ class SlackPostgresIntakePostgresIT {
     }
 
     @Test
-    void rolls_back_a_staged_accepted_message_and_adopts_a_committed_ignored_logical_outcome() throws Exception {
+    void commits_a_staged_accepted_root_before_an_overlapping_ignored_representation() throws Exception {
         DriverManagerDataSource raceDataSource = dataSource();
         Clock clock = Clock.fixed(Instant.parse("2026-09-06T00:00:00Z"), ZoneOffset.UTC);
         MessageIntakePort delegate = new ConversationMessageService(new PostgresConversationStore(raceDataSource, clock, new ObjectMapper()));
@@ -253,27 +253,28 @@ class SlackPostgresIntakePostgresIT {
         SlackRootIntake ignored = new SlackRootIntake("event-ignored-race", "T1", "C1", "1.000001", "1.000001",
                 SlackIntakeClassification.UNSUPPORTED_CONTENT, java.util.Optional.empty());
 
-        ExecutorService executor = Executors.newSingleThreadExecutor();
+        ExecutorService executor = Executors.newFixedThreadPool(2);
         try {
             Future<SlackEventOutcome> acceptedOutcome = executor.submit(() -> intake.receive(accepted).outcome());
             assertThat(acceptedMessageStaged.await(5, TimeUnit.SECONDS)).isTrue();
-            SlackEventOutcome ignoredOutcome = intake.receive(ignored).outcome();
+            Future<SlackEventOutcome> ignoredOutcome = executor.submit(() -> intake.receive(ignored).outcome());
             allowAcceptedReceipt.countDown();
 
-            assertThat(acceptedOutcome.get()).isEqualTo(SlackEventOutcome.IGNORED);
-            assertThat(ignoredOutcome).isEqualTo(SlackEventOutcome.IGNORED);
+            assertThat(acceptedOutcome.get()).isEqualTo(SlackEventOutcome.ACCEPTED);
+            assertThat(ignoredOutcome.get()).isEqualTo(SlackEventOutcome.ACCEPTED);
         } finally {
             allowAcceptedReceipt.countDown();
             executor.shutdownNow();
         }
+        assertThat(intake.receive(ignored).outcome()).isEqualTo(SlackEventOutcome.ACCEPTED);
         assertThat(count(jdbcTemplate, "select count(*) from slack_message_receipt")).isEqualTo(1);
         assertThat(count(jdbcTemplate, "select count(*) from slack_event_receipt")).isEqualTo(2);
-        assertThat(count(jdbcTemplate, "select count(*) from source_message where source_type = 'slack'")).isZero();
-        assertThat(count(jdbcTemplate, "select count(*) from conversation_session where source_type = 'slack'")).isZero();
-        assertThat(count(jdbcTemplate, "select count(*) from message_job")).isZero();
+        assertThat(count(jdbcTemplate, "select count(*) from source_message where source_type = 'slack'")).isEqualTo(1);
+        assertThat(count(jdbcTemplate, "select count(*) from conversation_session where source_type = 'slack'")).isEqualTo(1);
+        assertThat(count(jdbcTemplate, "select count(*) from message_job")).isEqualTo(1);
         assertThat(count(jdbcTemplate, """
                 select count(*) from slack_event_receipt
-                where classification = 'UNSUPPORTED_CONTENT' and correlation_id is null
+                where classification = 'ACCEPTED' and correlation_id is not null
                 """)).isEqualTo(2);
     }
 

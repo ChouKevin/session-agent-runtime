@@ -55,6 +55,7 @@ public final class SlackPostgresRootIntake implements SlackRootIntakePort {
         if (existingEvent.isPresent()) {
             return verifyExistingEvent(intake, existingEvent.orElseThrow());
         }
+        acquireLogicalMessageLock(intake);
         Optional<StoredMessageReceipt> existingLogicalMessage = findMessageReceipt(intake);
         if (existingLogicalMessage.isPresent()) {
             return replayLogicalMessage(intake, existingLogicalMessage.orElseThrow());
@@ -222,6 +223,12 @@ public final class SlackPostgresRootIntake implements SlackRootIntakePort {
                 SlackIntakeClassification.valueOf(resultSet.getString("classification")), resultSet.getObject("session_id", UUID.class),
                 resultSet.getObject("message_job_id", UUID.class)), intake.teamId(), intake.channelId(), intake.messageTs())
                 .stream().findFirst();
+    }
+
+    private void acquireLogicalMessageLock(SlackRootIntake intake) {
+        jdbcTemplate.query("""
+                select pg_advisory_xact_lock(hashtextextended(json_build_array(?, ?, ?)::text, 0))
+                """, resultSet -> { }, intake.teamId(), intake.channelId(), intake.messageTs());
     }
 
     private OffsetDateTime createdAt() {

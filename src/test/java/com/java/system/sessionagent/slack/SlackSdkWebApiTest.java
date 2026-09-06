@@ -42,7 +42,7 @@ class SlackSdkWebApiTest {
 
     @Test
     void classifies_documented_deterministic_post_message_sdk_errors_as_permanent() throws Exception {
-        for (String error : List.of("missing_scope", "no_permission", "msg_too_long", "invalid_arguments")) {
+        for (String error : List.of("missing_scope", "no_permission", "msg_too_long", "invalid_arguments", "channel_not_found")) {
             SlackPostFailure failure = postFailure(slackApiException(400, error, Map.of()));
 
             assertThat(failure.category()).as(error).isEqualTo(SlackDeliveryFailureCategory.PERMANENT);

@@ -1,6 +1,7 @@
 package com.java.system.sessionagent.model;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.genai.errors.ClientException;
 import com.java.system.sessionagent.conversation.domain.AssistantToolCallsMessage;
 import com.java.system.sessionagent.conversation.domain.ContextCompactionRequest;
 import com.java.system.sessionagent.conversation.domain.MessageJobId;
@@ -97,6 +98,28 @@ class SpringAiConversationModelTest {
 
         assertThat(result.reply()).isEqualTo(new ModelReply.Text("done"));
         assertThat(result.usage()).isEqualTo(new ModelUsage(0, 0, 0, false));
+    }
+
+    @Test
+    void classifies_a_wrapped_google_input_token_limit_error_as_context_too_large() {
+        ClientException providerFailure = new ClientException(400, "INVALID_ARGUMENT",
+                "The input token count (100) exceeds the maximum number of tokens allowed (10).");
+        ChatModel chatModel = new ChatModel() {
+            @Override public ChatResponse call(Prompt prompt) {
+                throw new RuntimeException("Failed to generate content", providerFailure);
+            }
+
+            @Override public ToolCallingChatOptions getOptions() {
+                return ToolCallingChatOptions.builder().build();
+            }
+        };
+        ObjectMapper mapper = new ObjectMapper();
+        SpringAiConversationModel model = new SpringAiConversationModel(chatModel, new PromptResource(), new NoOpConversationTelemetry(), mapper,
+                new GoogleGenAiThoughtSignatureHandler(GOOGLE_ROUTE_ID, mapper));
+
+        assertThatThrownBy(() -> model.respond(new ModelRequest(List.of(), new ToolSnapshot(List.of())), () -> 1, usage -> { }))
+                .isInstanceOfSatisfying(ModelCallFailure.class,
+                        failure -> assertThat(failure.kind()).isEqualTo(ModelCallFailure.Kind.CONTEXT_TOO_LARGE));
     }
 
     @Test

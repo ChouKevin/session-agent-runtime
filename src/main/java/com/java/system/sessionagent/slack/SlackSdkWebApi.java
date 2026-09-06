@@ -21,7 +21,7 @@ public final class SlackSdkWebApi implements SlackWebApi, AutoCloseable {
     private static final Set<String> PERMANENT_ERRORS = Set.of(
             "account_inactive", "invalid_arg_name", "invalid_arguments", "invalid_array_arg", "invalid_auth",
             "invalid_blocks", "invalid_blocks_format", "invalid_charset", "invalid_form_data", "invalid_post_type",
-            "is_archived", "missing_scope", "msg_blocks_too_long", "msg_too_long", "no_permission", "no_text",
+            "channel_not_found", "is_archived", "missing_scope", "msg_blocks_too_long", "msg_too_long", "no_permission", "no_text",
             "token_revoked");
 
     private final SlackProperties properties;
