@@ -6,6 +6,7 @@ import org.springframework.util.StringUtils;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.util.HashMap;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.regex.Matcher;
@@ -55,8 +56,8 @@ public final class SlackPermalinkParser {
         String host = uri.getHost();
         String rawAuthority = uri.getRawAuthority();
         if (!"https".equalsIgnoreCase(uri.getScheme()) || !StringUtils.hasText(host)
-                || !StringUtils.hasText(rawAuthority) || !HOST.matcher(rawAuthority).matches()
-                || !rawAuthority.equals(host) || Objects.nonNull(uri.getRawFragment())) {
+                || !StringUtils.hasText(rawAuthority) || !HOST.matcher(host.toLowerCase(Locale.ROOT)).matches()
+                || !rawAuthority.equalsIgnoreCase(host) || Objects.nonNull(uri.getRawFragment())) {
             throw invalidPermalink();
         }
     }
