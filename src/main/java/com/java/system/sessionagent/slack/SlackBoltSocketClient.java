@@ -169,12 +169,12 @@ public final class SlackBoltSocketClient implements SlackSocketClient {
         return StringUtils.hasText(eventTypeAndSubtype) && eventTypeAndSubtype.startsWith("message:");
     }
 
-    private static Optional<SlackRootEvent> normalizeUnregisteredMessageSubtype(EventRequest request) {
+    private Optional<SlackRootEvent> normalizeUnregisteredMessageSubtype(EventRequest request) {
         try {
             JsonNode envelope = OBJECT_MAPPER.readTree(request.getRequestBodyAsString());
             JsonNode event = envelope.path("event");
             String eventId = text(envelope, "event_id");
-            String teamId = text(envelope, "team_id");
+            String teamId = request.getContext().getTeamId();
             String channelId = text(event, "channel");
             String messageTs = text(event, "ts");
             if (!StringUtils.hasText(eventId) || !StringUtils.hasText(teamId) || !StringUtils.hasText(channelId)

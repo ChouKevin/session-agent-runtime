@@ -12,6 +12,7 @@ import com.java.system.sessionagent.conversation.domain.ModelRouteId;
 import com.java.system.sessionagent.conversation.domain.ModelRequest;
 import com.java.system.sessionagent.conversation.domain.ModelUsage;
 import com.java.system.sessionagent.conversation.domain.MessageWorkClaim;
+import com.java.system.sessionagent.conversation.domain.MessageReceipt;
 import com.java.system.sessionagent.conversation.port.in.MessageConflictException;
 import com.java.system.sessionagent.conversation.port.in.MessageIntakePort;
 import com.java.system.sessionagent.conversation.port.out.ConversationModel;
@@ -46,6 +47,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 
@@ -150,37 +152,55 @@ class SlackPostgresIntakePostgresIT {
     }
 
     @Test
-    void resolves_a_mixed_accepted_and_ignored_logical_race_to_one_committed_outcome() throws Exception {
-        SlackPostgresRootIntake intake = intake();
+    void rolls_back_a_staged_accepted_message_and_adopts_a_committed_ignored_logical_outcome() throws Exception {
+        DriverManagerDataSource raceDataSource = dataSource();
+        Clock clock = Clock.fixed(Instant.parse("2026-09-06T00:00:00Z"), ZoneOffset.UTC);
+        MessageIntakePort delegate = new ConversationMessageService(new PostgresConversationStore(raceDataSource, clock, new ObjectMapper()));
+        CountDownLatch acceptedMessageStaged = new CountDownLatch(1);
+        CountDownLatch allowAcceptedReceipt = new CountDownLatch(1);
+        MessageIntakePort stagedAcceptedIntake = message -> {
+            MessageReceipt receipt = delegate.receive(message);
+            acceptedMessageStaged.countDown();
+            try {
+                allowAcceptedReceipt.await();
+            } catch (InterruptedException exception) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException("Interrupted while staging the accepted Slack intake", exception);
+            }
+            return receipt;
+        };
+        SlackPostgresRootIntake intake = new SlackPostgresRootIntake(raceDataSource, stagedAcceptedIntake, clock);
         JdbcTemplate jdbcTemplate = new JdbcTemplate(dataSource());
         SlackRootIntake accepted = rootIntake("T1", "C1", "1.000001");
         SlackRootIntake ignored = new SlackRootIntake("event-ignored-race", "T1", "C1", "1.000001", "1.000001",
                 SlackIntakeClassification.UNSUPPORTED_CONTENT, java.util.Optional.empty());
 
-        List<SlackEventOutcome> outcomes = concurrently(accepted, ignored, intake::receive);
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        try {
+            Future<SlackEventOutcome> acceptedOutcome = executor.submit(() -> intake.receive(accepted));
+            assertThat(acceptedMessageStaged.await(5, TimeUnit.SECONDS)).isTrue();
+            SlackEventOutcome ignoredOutcome = intake.receive(ignored);
+            allowAcceptedReceipt.countDown();
 
-        assertThat(outcomes).containsOnly(outcomes.getFirst());
+            assertThat(acceptedOutcome.get()).isEqualTo(SlackEventOutcome.IGNORED);
+            assertThat(ignoredOutcome).isEqualTo(SlackEventOutcome.IGNORED);
+        } finally {
+            allowAcceptedReceipt.countDown();
+            executor.shutdownNow();
+        }
         assertThat(count(jdbcTemplate, "select count(*) from slack_message_receipt")).isEqualTo(1);
         assertThat(count(jdbcTemplate, "select count(*) from slack_event_receipt")).isEqualTo(2);
-        if (outcomes.getFirst() == SlackEventOutcome.ACCEPTED) {
-            assertThat(count(jdbcTemplate, "select count(*) from source_message where source_type = 'slack'")).isEqualTo(1);
-            assertThat(count(jdbcTemplate, "select count(*) from message_job")).isEqualTo(1);
-            assertThat(count(jdbcTemplate, """
-                    select count(*) from slack_event_receipt
-                    where classification = 'ACCEPTED' and correlation_id is not null
-                    """)).isEqualTo(2);
-        } else {
-            assertThat(count(jdbcTemplate, "select count(*) from source_message where source_type = 'slack'")).isZero();
-            assertThat(count(jdbcTemplate, "select count(*) from message_job")).isZero();
-            assertThat(count(jdbcTemplate, """
-                    select count(*) from slack_event_receipt
-                    where classification = 'UNSUPPORTED_CONTENT' and correlation_id is null
-                    """)).isEqualTo(2);
-        }
+        assertThat(count(jdbcTemplate, "select count(*) from source_message where source_type = 'slack'")).isZero();
+        assertThat(count(jdbcTemplate, "select count(*) from conversation_session where source_type = 'slack'")).isZero();
+        assertThat(count(jdbcTemplate, "select count(*) from message_job")).isZero();
+        assertThat(count(jdbcTemplate, """
+                select count(*) from slack_event_receipt
+                where classification = 'UNSUPPORTED_CONTENT' and correlation_id is null
+                """)).isEqualTo(2);
     }
 
     @Test
-    void acknowledges_and_persists_an_unregistered_candidate_human_subtype_envelope_without_a_job() throws Exception {
+    void acknowledges_an_unregistered_candidate_human_subtype_with_the_installed_workspace_identity() throws Exception {
         JdbcTemplate jdbcTemplate = new JdbcTemplate(dataSource());
         SlackBoltSocketClient socketClient = socketClient();
         App app = appWithoutAuthorization(socketClient);
@@ -188,7 +208,8 @@ class SlackPostgresIntakePostgresIT {
                 {
                   "type":"event_callback",
                   "event_id":"event-assistant-thread",
-                  "team_id":"T1",
+                  "team_id":"T-origin",
+                  "authorizations":[{"team_id":"T-installed"}],
                   "event":{"type":"message","subtype":"assistant_app_thread","channel":"C1","channel_type":"channel",
                   "user":"U1","text":"private assistant thread text","ts":"1.000001"}
                 }
@@ -198,9 +219,15 @@ class SlackPostgresIntakePostgresIT {
         Response response = app.run(request);
 
         assertThat(response.getStatusCode()).isEqualTo(200);
-        assertThat(count(jdbcTemplate, "select count(*) from slack_event_receipt where classification = 'UNSUPPORTED_CONTENT'"))
+        assertThat(count(jdbcTemplate, """
+                select count(*) from slack_event_receipt
+                where classification = 'UNSUPPORTED_CONTENT' and team_id = 'T-installed'
+                """))
                 .isEqualTo(1);
-        assertThat(count(jdbcTemplate, "select count(*) from slack_message_receipt where classification = 'UNSUPPORTED_CONTENT'"))
+        assertThat(count(jdbcTemplate, """
+                select count(*) from slack_message_receipt
+                where classification = 'UNSUPPORTED_CONTENT' and team_id = 'T-installed'
+                """))
                 .isEqualTo(1);
         assertThat(count(jdbcTemplate, "select count(*) from source_message where source_type = 'slack'")).isZero();
         assertThat(count(jdbcTemplate, "select count(*) from message_job")).isZero();
