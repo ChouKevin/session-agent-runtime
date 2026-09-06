@@ -338,8 +338,7 @@ public final class SpringAiConversationModel implements ConversationModel {
     }
 
     private static boolean hasProviderInputTokenLimitSignal(String message) {
-        return (message.contains("input token count") && message.contains("maximum number of tokens allowed"))
-                || message.contains("model only supports up to");
+        return message.contains("input token count") && message.contains("maximum number of tokens allowed");
     }
 
     private static boolean hasTransientSignal(Throwable exception) {

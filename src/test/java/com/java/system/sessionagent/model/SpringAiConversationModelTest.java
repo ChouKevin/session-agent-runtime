@@ -101,7 +101,7 @@ class SpringAiConversationModelTest {
     }
 
     @Test
-    void classifies_a_wrapped_google_input_token_limit_error_as_context_too_large() {
+    void distinguishes_provider_input_token_limits_from_non_token_support_limits() {
         ClientException providerFailure = new ClientException(400, "INVALID_ARGUMENT",
                 "The input token count (100) exceeds the maximum number of tokens allowed (10).");
         ChatModel chatModel = new ChatModel() {
@@ -120,6 +120,22 @@ class SpringAiConversationModelTest {
         assertThatThrownBy(() -> model.respond(new ModelRequest(List.of(), new ToolSnapshot(List.of())), () -> 1, usage -> { }))
                 .isInstanceOfSatisfying(ModelCallFailure.class,
                         failure -> assertThat(failure.kind()).isEqualTo(ModelCallFailure.Kind.CONTEXT_TOO_LARGE));
+
+        ChatModel terminalChatModel = new ChatModel() {
+            @Override public ChatResponse call(Prompt prompt) {
+                throw new RuntimeException("Model only supports up to one response candidate");
+            }
+
+            @Override public ToolCallingChatOptions getOptions() {
+                return ToolCallingChatOptions.builder().build();
+            }
+        };
+        SpringAiConversationModel terminalModel = new SpringAiConversationModel(terminalChatModel, new PromptResource(),
+                new NoOpConversationTelemetry(), mapper, new GoogleGenAiThoughtSignatureHandler(GOOGLE_ROUTE_ID, mapper));
+
+        assertThatThrownBy(() -> terminalModel.respond(new ModelRequest(List.of(), new ToolSnapshot(List.of())), () -> 1, usage -> { }))
+                .isInstanceOfSatisfying(ModelCallFailure.class,
+                        failure -> assertThat(failure.kind()).isEqualTo(ModelCallFailure.Kind.TERMINAL));
     }
 
     @Test
