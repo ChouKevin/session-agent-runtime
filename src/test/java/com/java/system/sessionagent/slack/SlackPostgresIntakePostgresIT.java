@@ -230,6 +230,32 @@ class SlackPostgresIntakePostgresIT {
     }
 
     @Test
+    void accepts_an_eligible_top_level_root_after_a_committed_ignored_top_level_representation() {
+        SlackPostgresRootIntake intake = intake();
+        JdbcTemplate jdbcTemplate = new JdbcTemplate(dataSource());
+        SlackRootIntake ignored = new SlackRootIntake("event-ignored-first", "T1", "C1", "1.000001", "1.000001",
+                SlackIntakeClassification.UNSUPPORTED_CONTENT, java.util.Optional.empty());
+        SlackRootIntake accepted = rootIntake("T1", "C1", "1.000001");
+
+        SlackEventOutcome ignoredOutcome = intake.receive(ignored).outcome();
+        SlackEventOutcome acceptedOutcome = intake.receive(accepted).outcome();
+        SlackEventOutcome acceptedReplayOutcome = intake.receive(accepted).outcome();
+
+        assertThat(ignoredOutcome).isEqualTo(SlackEventOutcome.IGNORED);
+        assertThat(acceptedOutcome).isEqualTo(SlackEventOutcome.ACCEPTED);
+        assertThat(acceptedReplayOutcome).isEqualTo(SlackEventOutcome.ACCEPTED);
+        assertThat(count(jdbcTemplate, "select count(*) from slack_message_receipt where classification = 'ACCEPTED'"))
+                .isEqualTo(1);
+        assertThat(count(jdbcTemplate, "select count(*) from slack_event_receipt where classification = 'UNSUPPORTED_CONTENT'"))
+                .isEqualTo(1);
+        assertThat(count(jdbcTemplate, "select count(*) from slack_event_receipt where classification = 'ACCEPTED'"))
+                .isEqualTo(1);
+        assertThat(count(jdbcTemplate, "select count(*) from source_message where source_type = 'slack'")).isEqualTo(1);
+        assertThat(count(jdbcTemplate, "select count(*) from conversation_session where source_type = 'slack'")).isEqualTo(1);
+        assertThat(count(jdbcTemplate, "select count(*) from message_job")).isEqualTo(1);
+    }
+
+    @Test
     void commits_a_staged_accepted_root_before_an_overlapping_ignored_representation() throws Exception {
         DriverManagerDataSource raceDataSource = dataSource();
         Clock clock = Clock.fixed(Instant.parse("2026-09-06T00:00:00Z"), ZoneOffset.UTC);

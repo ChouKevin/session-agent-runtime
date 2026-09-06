@@ -57,7 +57,7 @@ public final class SlackPostgresRootIntake implements SlackRootIntakePort {
         }
         acquireLogicalMessageLock(intake);
         Optional<StoredMessageReceipt> existingLogicalMessage = findMessageReceipt(intake);
-        if (existingLogicalMessage.isPresent()) {
+        if (existingLogicalMessage.isPresent() && !canAcceptTopLevelRootAfterIgnored(intake, existingLogicalMessage.orElseThrow())) {
             return replayLogicalMessage(intake, existingLogicalMessage.orElseThrow());
         }
         if (intake.classification() != SlackIntakeClassification.ACCEPTED) {
@@ -169,10 +169,18 @@ public final class SlackPostgresRootIntake implements SlackRootIntakePort {
             UUID sessionId,
             UUID jobId) {
         int insertedRows = jdbcTemplate.update("""
-                insert into slack_message_receipt(team_id, channel_id, message_ts, classification, session_id, message_job_id, created_at)
-                values (?, ?, ?, ?, ?, ?, ?)
-                on conflict (team_id, channel_id, message_ts) do nothing
-                """, intake.teamId(), intake.channelId(), intake.messageTs(), classification.name(), sessionId, jobId, createdAt());
+                insert into slack_message_receipt(team_id, channel_id, message_ts, top_level, classification, session_id, message_job_id, created_at)
+                values (?, ?, ?, ?, ?, ?, ?, ?)
+                on conflict (team_id, channel_id, message_ts) do update
+                set classification = excluded.classification,
+                    session_id = excluded.session_id,
+                    message_job_id = excluded.message_job_id
+                where slack_message_receipt.top_level
+                    and slack_message_receipt.classification <> 'ACCEPTED'
+                    and excluded.top_level
+                    and excluded.classification = 'ACCEPTED'
+                """, intake.teamId(), intake.channelId(), intake.messageTs(), !isThreadReply(intake), classification.name(), sessionId, jobId,
+                createdAt());
         Optional<StoredMessageReceipt> messageReceipt = findMessageReceipt(intake);
         Assert.isTrue(messageReceipt.isPresent(), "Slack logical message receipt must be committed");
         if (!messageReceipt.orElseThrow().matches(classification, sessionId, jobId)) {
@@ -217,12 +225,19 @@ public final class SlackPostgresRootIntake implements SlackRootIntakePort {
 
     private Optional<StoredMessageReceipt> findMessageReceipt(SlackRootIntake intake) {
         return jdbcTemplate.query("""
-                select classification, session_id, message_job_id from slack_message_receipt
+                select top_level, classification, session_id, message_job_id from slack_message_receipt
                 where team_id = ? and channel_id = ? and message_ts = ?
                 """, (resultSet, rowNumber) -> new StoredMessageReceipt(
-                SlackIntakeClassification.valueOf(resultSet.getString("classification")), resultSet.getObject("session_id", UUID.class),
+                resultSet.getBoolean("top_level"), SlackIntakeClassification.valueOf(resultSet.getString("classification")),
+                resultSet.getObject("session_id", UUID.class),
                 resultSet.getObject("message_job_id", UUID.class)), intake.teamId(), intake.channelId(), intake.messageTs())
                 .stream().findFirst();
+    }
+
+    private static boolean canAcceptTopLevelRootAfterIgnored(SlackRootIntake intake, StoredMessageReceipt existing) {
+        return intake.classification() == SlackIntakeClassification.ACCEPTED
+                && !isThreadReply(intake)
+                && existing.isIgnoredTopLevel();
     }
 
     private void acquireLogicalMessageLock(SlackRootIntake intake) {
@@ -260,10 +275,14 @@ public final class SlackPostgresRootIntake implements SlackRootIntakePort {
         }
     }
 
-    private record StoredMessageReceipt(SlackIntakeClassification classification, UUID sessionId, UUID messageJobId) {
+    private record StoredMessageReceipt(boolean topLevel, SlackIntakeClassification classification, UUID sessionId, UUID messageJobId) {
 
         private boolean isAccepted() {
             return classification == SlackIntakeClassification.ACCEPTED;
+        }
+
+        private boolean isIgnoredTopLevel() {
+            return topLevel && !isAccepted();
         }
 
         private boolean matches(SlackIntakeClassification expectedClassification, UUID expectedSessionId, UUID expectedJobId) {

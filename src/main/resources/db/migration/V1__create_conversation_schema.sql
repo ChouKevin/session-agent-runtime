@@ -279,6 +279,7 @@ create table slack_message_receipt (
     team_id varchar(128) not null check (team_id ~ '[^[:space:]]'),
     channel_id varchar(128) not null check (channel_id ~ '[^[:space:]]'),
     message_ts varchar(64) not null check (message_ts ~ '[^[:space:]]'),
+    top_level boolean not null,
     classification varchar(32) not null check (classification in (
         'ACCEPTED', 'UNBOUND_THREAD', 'BLANK', 'UNSUPPORTED_CONTENT', 'EDIT_OR_DELETE', 'HIDDEN')),
     session_id uuid references conversation_session(session_id),
@@ -294,8 +295,29 @@ create trigger slack_thread_binding_append_only before update or delete on slack
     for each row execute function reject_committed_row_change();
 create trigger slack_event_receipt_append_only before update or delete on slack_event_receipt
     for each row execute function reject_committed_row_change();
+create function preserve_slack_message_receipt() returns trigger language plpgsql as $$
+begin
+    if tg_op = 'UPDATE' then
+        if old.team_id = new.team_id
+            and old.channel_id = new.channel_id
+            and old.message_ts = new.message_ts
+            and old.created_at = new.created_at
+            and old.top_level
+            and new.top_level
+            and old.classification <> 'ACCEPTED'
+            and new.classification = 'ACCEPTED'
+            and old.session_id is null
+            and old.message_job_id is null
+            and new.session_id is not null
+            and new.message_job_id is not null then
+            return new;
+        end if;
+    end if;
+    raise exception 'committed conversation rows are append-only';
+end;
+$$;
 create trigger slack_message_receipt_append_only before update or delete on slack_message_receipt
-    for each row execute function reject_committed_row_change();
+    for each row execute function preserve_slack_message_receipt();
 
 create table slack_delivery (
     delivery_id uuid primary key,
