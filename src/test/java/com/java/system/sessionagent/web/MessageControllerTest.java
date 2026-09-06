@@ -218,7 +218,7 @@ class MessageControllerTest {
         ExternalSessionReferenceQueryPort referenceQueries = mock(ExternalSessionReferenceQueryPort.class);
         when(queries.session(SESSION_ID)).thenReturn(Optional.of(new SessionDetailView(SESSION_ID, CREATED_AT,
                 Optional.of(new MessageJobView(JOB_ID, SESSION_ID, JobStatus.DONE, 1, 2)),
-                Optional.of(new SessionDetailView.CompactionBoundaryView(2, 4, "PROACTIVE", CREATED_AT)),
+                Optional.of(new SessionDetailView.CompactionBoundaryView(2, 4, "THRESHOLD", CREATED_AT)),
                 new SessionDetailView.ContextUsageView("gemini-3.1-flash-lite", 1_048_576, 512, 0.00048828125,
                         ContextEstimate.Basis.PROVIDER_PLUS_TRAILING_ESTIMATE))));
         when(referenceQueries.findBinding(new SessionId(SESSION_ID))).thenReturn(Optional.of(

@@ -146,6 +146,54 @@ class MessageJobServiceTest {
     }
 
     @Test
+    void completes_context_too_large_without_persisting_a_threshold_compaction_when_its_summary_remains_oversized() {
+        ConversationStore store = mock(ConversationStore.class);
+        MessageWorkClaim claim = claim();
+        List<com.java.system.sessionagent.conversation.domain.SessionMessage> history = List.of(
+                new UserMessage(claim.sessionId(), new SessionSequence(1), Optional.of(new MessageJobId("job-old")), Instant.EPOCH,
+                        MessageRole.USER, "alice", "x".repeat(40_000)),
+                new com.java.system.sessionagent.conversation.domain.AssistantMessage(claim.sessionId(), new SessionSequence(2),
+                        Optional.of(new MessageJobId("job-old")), Instant.EPOCH, MessageRole.ASSISTANT, "previous answer"),
+                new UserMessage(claim.sessionId(), new SessionSequence(3), Optional.of(claim.messageJobId()), Instant.EPOCH,
+                        MessageRole.USER, "alice", "continue"));
+        AtomicReference<ContextCompaction> compacted = new AtomicReference<>();
+        when(store.loadHistory(claim.sessionId())).thenReturn(history);
+        when(store.loadCompaction(claim.sessionId())).thenAnswer(invocation -> Optional.ofNullable(compacted.get()));
+        when(store.reserveModelCall(eq(claim), eq(2), any(Instant.class))).thenReturn(OptionalInt.of(1));
+        org.mockito.Mockito.doAnswer(invocation -> {
+            ConversationStore.CompactionData data = invocation.getArgument(1);
+            compacted.set(new ContextCompaction(data.generation(), claim.messageJobId(), data.reason(), new ContextSummary(data.summary()),
+                    data.coveredThrough(), data.model(), data.requestShapeFingerprint(), data.estimateBeforeTokens(),
+                    data.estimateAfterTokens(), Instant.EPOCH));
+            return null;
+        }).when(store).compact(eq(claim), any(ConversationStore.CompactionData.class), any(Instant.class));
+        ModelDescriptor descriptor = new ModelDescriptor(TEST_ROUTE_ID, "test-capacity", 12_000);
+        ConversationModel model = new ConversationModel() {
+            @Override public ModelRouteId routeId() { return TEST_ROUTE_ID; }
+            @Override public ModelDescriptor descriptor() { return descriptor; }
+            @Override public String systemPrompt() { return "system"; }
+            @Override public String summarize(com.java.system.sessionagent.conversation.domain.ContextCompactionRequest request,
+                    ModelCallReservation reservation) {
+                reservation.reserve();
+                return "summary ".repeat(5_000);
+            }
+            @Override public ModelCallResult respond(ModelRequest request, ModelCallReservation reservation, Consumer<ModelUsage> usage) {
+                throw new AssertionError("An oversized compacted context must not make an ordinary model request");
+            }
+        };
+
+        MessageJobProcessingResult result = service(store, model, catalog()).process(claim, () -> true);
+
+        assertThat(result).isEqualTo(MessageJobProcessingResult.COMPLETED);
+        verify(store, org.mockito.Mockito.never()).compact(any(), any(), any());
+        org.mockito.ArgumentCaptor<ConversationStore.MessageBatch> batch = org.mockito.ArgumentCaptor.forClass(ConversationStore.MessageBatch.class);
+        verify(store).append(eq(claim), batch.capture(), any(Instant.class));
+        assertThat(batch.getValue()).isEqualTo(new ConversationStore.MessageBatch(List.of(
+                new ConversationStore.RuntimeData("CONTEXT_TOO_LARGE", "Runtime model context is too large.")),
+                ConversationStore.JobUpdate.COMPLETE));
+    }
+
+    @Test
     void compacts_the_current_jobs_complete_tool_batch_before_continuing() {
         ConversationStore store = mock(ConversationStore.class);
         MessageWorkClaim claim = claim();

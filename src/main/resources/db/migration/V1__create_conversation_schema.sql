@@ -121,7 +121,7 @@ create table session_compaction (
     session_id uuid not null references conversation_session(session_id),
     generation bigint not null check (generation > 0),
     message_job_id uuid not null,
-    reason varchar(16) not null check (reason in ('PROACTIVE', 'OVERFLOW')),
+    reason varchar(16) not null check (reason in ('THRESHOLD', 'OVERFLOW')),
     summary text not null check (length(summary) > 0),
     covered_through bigint not null,
     model_route_id varchar(64) not null,

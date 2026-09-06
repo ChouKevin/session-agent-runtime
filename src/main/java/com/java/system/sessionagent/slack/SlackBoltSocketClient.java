@@ -326,6 +326,7 @@ public final class SlackBoltSocketClient implements SlackSocketClient {
 
         private final SocketModeClient client;
         private final SocketModeApp socketModeApp;
+        private final IntakeAndAcknowledgementGate intakeAndAcknowledgementGate = new IntakeAndAcknowledgementGate();
 
         SlackSdkSocketRuntime(
                 SocketModeClient client,
@@ -334,7 +335,7 @@ public final class SlackBoltSocketClient implements SlackSocketClient {
                 SlackSocketConnectionListener listener) {
             this.client = client;
             this.socketModeApp = socketModeApp;
-            registerConnectionListeners(client, app, listener);
+            registerConnectionListeners(client, app, listener, intakeAndAcknowledgementGate);
         }
 
         @Override
@@ -344,6 +345,7 @@ public final class SlackBoltSocketClient implements SlackSocketClient {
 
         @Override
         public void stop() throws Exception {
+            intakeAndAcknowledgementGate.retire();
             Exception firstFailure = null; // cs-allow An exception is absent until an owned close operation fails.
             try {
                 client.setAutoReconnectEnabled(false);
@@ -373,11 +375,18 @@ public final class SlackBoltSocketClient implements SlackSocketClient {
             return firstFailure;
         }
 
-        private static void registerConnectionListeners(SocketModeClient client, App app, SlackSocketConnectionListener listener) {
+        private static void registerConnectionListeners(
+                SocketModeClient client,
+                App app,
+                SlackSocketConnectionListener listener,
+                IntakeAndAcknowledgementGate intakeAndAcknowledgementGate) {
             SocketModeRequestParser requestParser = new SocketModeRequestParser(app.config());
             client.addWebSocketMessageListener(message -> {
+                if (!intakeAndAcknowledgementGate.accepting()) {
+                    return;
+                }
                 notifyConnectedForHello(message, listener);
-                runBoltApp(message, app, client, requestParser);
+                runBoltApp(message, app, client, requestParser, intakeAndAcknowledgementGate);
             });
             client.addWebSocketCloseListener((code, reason) -> notifyDisconnectedIfCurrent(client, listener));
             client.addWebSocketErrorListener(reason -> notifyDisconnectedIfCurrent(client, listener));
@@ -408,14 +417,21 @@ public final class SlackBoltSocketClient implements SlackSocketClient {
                 String message,
                 App app,
                 SocketModeClient client,
-                SocketModeRequestParser requestParser) {
+                SocketModeRequestParser requestParser,
+                IntakeAndAcknowledgementGate intakeAndAcknowledgementGate) {
+            if (!intakeAndAcknowledgementGate.accepting()) {
+                return;
+            }
             SocketModeRequest request = requestParser.parse(message);
             if (request == null) { // cs-allow The parser contract represents unsupported frames with null.
                 return;
             }
             try {
+                if (!intakeAndAcknowledgementGate.accepting()) {
+                    return;
+                }
                 Response response = app.run(request.getBoltRequest());
-                if (response.getStatusCode() != 200) {
+                if (response.getStatusCode() != 200 || !intakeAndAcknowledgementGate.accepting()) {
                     return;
                 }
                 if (response.getBody() == null) { // cs-allow The Bolt response body is optional by SDK contract.
@@ -432,6 +448,19 @@ public final class SlackBoltSocketClient implements SlackSocketClient {
                 client.sendSocketModeResponse(OBJECT_MAPPER.writeValueAsString(responsePayload));
             } catch (Exception ignored) {
                 // Bolt's existing error handling remains content-free at the Runtime boundary.
+            }
+        }
+
+        private static final class IntakeAndAcknowledgementGate {
+
+            private final AtomicBoolean accepting = new AtomicBoolean(true);
+
+            private boolean accepting() {
+                return accepting.get();
+            }
+
+            private void retire() {
+                accepting.set(false);
             }
         }
     }

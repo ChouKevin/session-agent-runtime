@@ -31,7 +31,7 @@ public record ContextCompaction(
     }
 
     public enum Reason {
-        PROACTIVE,
+        THRESHOLD,
         OVERFLOW
     }
 }

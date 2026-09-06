@@ -144,7 +144,7 @@ public final class MessageJobService implements MessageJobPort {
                 ReservationState reservation = new ReservationState();
                 ContextState context = contextState(claim, history, continuations, tools, activeModelDescriptor);
                 if (context.requiresCompaction()) {
-                    if (!compact(claim, guard, reservation, context, ContextCompaction.Reason.PROACTIVE, resultTracker)) {
+                    if (!compact(claim, guard, reservation, context, ContextCompaction.Reason.THRESHOLD, resultTracker)) {
                         return;
                     }
                     continue;
@@ -322,6 +322,12 @@ public final class MessageJobService implements MessageJobPort {
                 projection.toolDefinitions(), selected.suffix(), context.compaction().map(ContextCompaction::generation).orElse(0L) + 1,
                 Optional.of(compactedSummary));
         long afterEstimate = contextUsageEstimator.estimate(afterProjection, Optional.empty()).tokens();
+        if (afterEstimate >= fourFifths(projection.model().contextWindowTokens())) {
+            logCompaction(claim, "compact_failure", "SUMMARY_TOO_LARGE", afterEstimate, projection.model().contextWindowTokens());
+            appendRuntime(claim, guard, List.of(runtime(CONTEXT_TOO_LARGE)),
+                    ConversationStore.JobUpdate.COMPLETE, resultTracker);
+            return false;
+        }
         try {
             conversationStore.compact(claim, new ConversationStore.CompactionData(
                     context.compaction().map(ContextCompaction::generation).orElse(0L) + 1, reason, compactedSummary.text(),

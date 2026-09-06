@@ -164,6 +164,33 @@ class SlackBoltSocketClientTest {
         assertThat(((AckResponse) acknowledgement.getValue()).getEnvelopeId()).isEqualTo("envelope-1");
     }
 
+    @Test
+    void rejects_socket_event_intake_and_acknowledgement_after_runtime_retirement() throws Exception {
+        SocketModeClient socketModeClient = Mockito.mock(SocketModeClient.class);
+        SocketModeApp socketModeApp = Mockito.mock(SocketModeApp.class);
+        AtomicReference<SlackRootIntake> intake = new AtomicReference<>();
+        SlackEventAdapter eventAdapter = new SlackEventAdapter("UBOT", received -> {
+            intake.set(received);
+            return SlackIntakeResult.newIgnored();
+        });
+        SlackBoltSocketClient client = new SlackBoltSocketClient(properties(), eventAdapter);
+        SlackBoltSocketClient.SlackSdkSocketRuntime runtime = new SlackBoltSocketClient.SlackSdkSocketRuntime(
+                socketModeClient, socketModeApp, unauthenticatedApp(client), new RecordingListener());
+        ArgumentCaptor<WebSocketMessageListener> messageListener = ArgumentCaptor.forClass(WebSocketMessageListener.class);
+        Mockito.verify(socketModeClient).addWebSocketMessageListener(messageListener.capture());
+
+        runtime.stop();
+        messageListener.getValue().handle("""
+                {"envelope_id":"envelope-1","type":"events_api","accepts_response_payload":false,
+                "payload":{"token":"verification-token","team_id":"T1","api_app_id":"A1","type":"event_callback",
+                "event_id":"Ev1","event_time":1,"event":{"type":"app_mention","user":"U1","text":"<@UBOT> hello",
+                "channel":"C1","ts":"1.000001"}}}
+                """);
+
+        assertThat(intake.get()).isNull();
+        Mockito.verify(socketModeClient, Mockito.never()).sendSocketModeResponse(Mockito.any(SocketModeResponse.class));
+    }
+
     private static SlackProperties properties() {
         return new SlackProperties("xapp-test", "xoxb-test", "UBOT", Duration.ofSeconds(1), Duration.ofSeconds(1));
     }

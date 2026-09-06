@@ -112,6 +112,11 @@ class PostgresConversationCommitPostgresIT {
                 from pg_constraint constraint_record join pg_class relation on relation.oid = constraint_record.conrelid
                 where relation.relname = 'message_job' and constraint_record.contype = 'c'
                 """, String.class);
+        String compactionChecks = jdbcTemplate.queryForObject("""
+                select string_agg(pg_get_constraintdef(constraint_record.oid), ' ')
+                from pg_constraint constraint_record join pg_class relation on relation.oid = constraint_record.conrelid
+                where relation.relname = 'session_compaction' and constraint_record.contype = 'c'
+                """, String.class);
 
         assertThat(tables).containsExactlyInAnyOrder("conversation_session", "source_message", "session_message", "user_message",
                 "message_job", "assistant_message", "assistant_tool_calls", "model_continuation", "tool_observation", "runtime_message",
@@ -121,6 +126,7 @@ class PostgresConversationCommitPostgresIT {
         assertThat(jobColumns).contains("model_route_id").doesNotContain("reply_sequence");
         assertThat(roleChecks).contains("USER", "TOOL", "ASSISTANT", "ASSISTANT_TOOL_CALLS", "RUNTIME").doesNotContain("FEEDBACK");
         assertThat(jobChecks).contains("model_calls >= 0").doesNotContain("between 0 and 12");
+        assertThat(compactionChecks).contains("THRESHOLD", "OVERFLOW").doesNotContain("PROACTIVE");
     }
 
     @Test
@@ -241,7 +247,7 @@ class PostgresConversationCommitPostgresIT {
         MessageReceipt first = store.receive(new IncomingMessage("thread", "alice", "source-1", "first"));
         MessageWorkClaim firstClaim = store.claimNext("worker", Duration.ofSeconds(30)).orElseThrow();
         store.compact(firstClaim, new ConversationStore.CompactionData(1,
-                com.java.system.sessionagent.conversation.domain.ContextCompaction.Reason.PROACTIVE, "first summary", new SessionSequence(1),
+                com.java.system.sessionagent.conversation.domain.ContextCompaction.Reason.THRESHOLD, "first summary", new SessionSequence(1),
                 descriptor, "a".repeat(64), 100, 10), NOW);
         store.append(firstClaim, new ConversationStore.MessageBatch(List.of(new ConversationStore.AssistantData("first answer")),
                 ConversationStore.JobUpdate.COMPLETE), NOW);
@@ -249,7 +255,7 @@ class PostgresConversationCommitPostgresIT {
         MessageReceipt second = store.receive(new IncomingMessage("thread", "alice", "source-2", "second"));
         MessageWorkClaim secondClaim = store.claimNext("worker", Duration.ofSeconds(30)).orElseThrow();
         store.compact(secondClaim, new ConversationStore.CompactionData(2,
-                com.java.system.sessionagent.conversation.domain.ContextCompaction.Reason.PROACTIVE, "second summary", new SessionSequence(2),
+                com.java.system.sessionagent.conversation.domain.ContextCompaction.Reason.THRESHOLD, "second summary", new SessionSequence(2),
                 descriptor, "b".repeat(64), 100, 10), NOW.plusSeconds(1));
         store.append(secondClaim, new ConversationStore.MessageBatch(List.of(new ConversationStore.AssistantData("second answer")),
                 ConversationStore.JobUpdate.COMPLETE), NOW.plusSeconds(1));
