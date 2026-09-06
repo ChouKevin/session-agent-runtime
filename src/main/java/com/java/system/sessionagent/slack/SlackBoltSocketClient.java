@@ -41,7 +41,10 @@ public final class SlackBoltSocketClient implements SlackSocketClient {
     private final SlackProperties properties;
     private final SlackEventAdapter eventAdapter;
     private final SlackSocketRuntimeFactory runtimeFactory;
+    private final Object runtimeMonitor = new Object();
     private Optional<OwnedRuntime> activeRuntime = Optional.empty();
+    private boolean starting;
+    private boolean retired;
 
     public SlackBoltSocketClient(SlackProperties properties, SlackEventAdapter eventAdapter) {
         Assert.notNull(properties, "Slack properties must not be null");
@@ -64,21 +67,31 @@ public final class SlackBoltSocketClient implements SlackSocketClient {
     }
 
     @Override
-    public synchronized void start(SlackSocketConnectionListener listener) throws Exception {
+    public void start(SlackSocketConnectionListener listener) throws Exception {
         Assert.notNull(listener, "Slack socket connection listener must not be null");
-        Assert.isTrue(activeRuntime.isEmpty(), "Slack socket client is already started");
         GuardedConnectionListener guardedListener = new GuardedConnectionListener(listener);
-        SlackSocketRuntime runtime = runtimeFactory.create(guardedListener);
-        OwnedRuntime ownedRuntime = new OwnedRuntime(runtime, guardedListener);
-        activeRuntime = Optional.of(ownedRuntime);
-        guardedListener.activate();
+        synchronized (runtimeMonitor) {
+            Assert.isTrue(activeRuntime.isEmpty() && !starting && !retired, "Slack socket client is already started");
+            starting = true;
+        }
+        SlackSocketRuntime runtime;
         try {
-            runtime.startAsync();
+            runtime = runtimeFactory.create(guardedListener);
         } catch (Exception exception) {
-            activeRuntime = Optional.empty();
-            guardedListener.retire();
+            completeStartAttempt();
+            throw exception;
+        }
+        OwnedRuntime ownedRuntime = new OwnedRuntime(runtime, guardedListener);
+        if (retireCreatedRuntimeIfStopped(ownedRuntime)) {
+            ownedRuntime.stop();
+            return;
+        }
+        try {
+            ownedRuntime.startAsync();
+        } catch (Exception exception) {
             try {
-                runtime.stop();
+                detachAndRetire(ownedRuntime);
+                ownedRuntime.stop();
             } catch (Exception closeException) {
                 exception.addSuppressed(closeException);
             }
@@ -183,14 +196,42 @@ public final class SlackBoltSocketClient implements SlackSocketClient {
     @Override
     public void stop() throws Exception {
         Optional<OwnedRuntime> retiredRuntime;
-        synchronized (this) {
+        synchronized (runtimeMonitor) {
+            retired = true;
             retiredRuntime = activeRuntime;
             activeRuntime = Optional.empty();
         }
-        retiredRuntime.ifPresent(OwnedRuntime::retire);
         if (retiredRuntime.isPresent()) {
-            retiredRuntime.get().runtime().stop();
+            retiredRuntime.get().stop();
         }
+    }
+
+    private void completeStartAttempt() {
+        synchronized (runtimeMonitor) {
+            starting = false;
+        }
+    }
+
+    private boolean retireCreatedRuntimeIfStopped(OwnedRuntime ownedRuntime) {
+        synchronized (runtimeMonitor) {
+            starting = false;
+            if (retired) {
+                ownedRuntime.retire();
+                return true;
+            }
+            activeRuntime = Optional.of(ownedRuntime);
+            ownedRuntime.activate();
+            return false;
+        }
+    }
+
+    private void detachAndRetire(OwnedRuntime ownedRuntime) {
+        synchronized (runtimeMonitor) {
+            if (activeRuntime.filter(runtime -> runtime == ownedRuntime).isPresent()) { // cs-allow Runtime identity protects this start attempt from a concurrent retirement.
+                activeRuntime = Optional.empty();
+            }
+        }
+        ownedRuntime.retire();
     }
 
     private SlackSocketRuntime createRuntime(SlackSocketConnectionListener listener) throws Exception {
@@ -208,10 +249,44 @@ public final class SlackBoltSocketClient implements SlackSocketClient {
         }
     }
 
-    private record OwnedRuntime(SlackSocketRuntime runtime, GuardedConnectionListener listener) {
+    private static final class OwnedRuntime {
+
+        private final SlackSocketRuntime runtime;
+        private final GuardedConnectionListener listener;
+        private final Object operationMonitor = new Object();
+        private final AtomicBoolean retired = new AtomicBoolean(false);
+        private final AtomicBoolean stopped = new AtomicBoolean(false);
+
+        private OwnedRuntime(SlackSocketRuntime runtime, GuardedConnectionListener listener) {
+            this.runtime = runtime;
+            this.listener = listener;
+        }
+
+        private void activate() {
+            listener.activate();
+        }
+
+        private void startAsync() throws Exception {
+            synchronized (operationMonitor) {
+                if (retired.get()) {
+                    return;
+                }
+                runtime.startAsync();
+            }
+        }
 
         private void retire() {
+            retired.set(true);
             listener.retire();
+        }
+
+        private void stop() throws Exception {
+            retire();
+            synchronized (operationMonitor) {
+                if (stopped.compareAndSet(false, true)) {
+                    runtime.stop();
+                }
+            }
         }
     }
 
@@ -304,8 +379,8 @@ public final class SlackBoltSocketClient implements SlackSocketClient {
                 notifyConnectedForHello(message, listener);
                 runBoltApp(message, app, client, requestParser);
             });
-            client.addWebSocketCloseListener((code, reason) -> listener.disconnected());
-            client.addWebSocketErrorListener(reason -> listener.disconnected());
+            client.addWebSocketCloseListener((code, reason) -> notifyDisconnectedIfCurrent(client, listener));
+            client.addWebSocketErrorListener(reason -> notifyDisconnectedIfCurrent(client, listener));
         }
 
         private static void notifyConnectedForHello(String message, SlackSocketConnectionListener listener) {
@@ -316,6 +391,16 @@ public final class SlackBoltSocketClient implements SlackSocketClient {
                 }
             } catch (JsonProcessingException ignored) {
                 // The Slack SDK will continue processing non-JSON transport frames.
+            }
+        }
+
+        private static void notifyDisconnectedIfCurrent(SocketModeClient client, SlackSocketConnectionListener listener) {
+            try {
+                if (!client.verifyConnection()) {
+                    listener.disconnected();
+                }
+            } catch (RuntimeException ignored) {
+                listener.disconnected();
             }
         }
 

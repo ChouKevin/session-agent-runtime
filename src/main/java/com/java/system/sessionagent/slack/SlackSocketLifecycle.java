@@ -6,6 +6,7 @@ import org.springframework.context.SmartLifecycle;
 import org.springframework.util.Assert;
 
 import java.time.Duration;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
@@ -20,26 +21,12 @@ public final class SlackSocketLifecycle implements SmartLifecycle {
     private final boolean enabled;
     private final Duration reconnectDelay;
     private final Duration shutdownTimeout;
-    private final ScheduledExecutorService executor;
+    private final ScheduledExecutorService connectionExecutor;
+    private final ExecutorService retirementExecutor;
     private final AtomicBoolean running = new AtomicBoolean(false);
     private final AtomicReference<SlackLifecycleState> state;
-    private final SlackSocketConnectionListener connectionListener = new SlackSocketConnectionListener() {
-        @Override
-        public void connected() {
-            if (running.get()) {
-                state.set(SlackLifecycleState.AVAILABLE);
-                logState("slack_connection_available", SlackLifecycleState.AVAILABLE);
-            }
-        }
-
-        @Override
-        public void disconnected() {
-            if (running.get()) {
-                state.set(SlackLifecycleState.DEGRADED);
-                logState("slack_connection_degraded", SlackLifecycleState.DEGRADED);
-            }
-        }
-    };
+    private final Object lifecycleMonitor = new Object();
+    private long generation;
 
     public SlackSocketLifecycle(SlackSocketClient socketClient, SlackProperties properties) {
         Assert.notNull(socketClient, "Slack socket client must not be null");
@@ -48,8 +35,13 @@ public final class SlackSocketLifecycle implements SmartLifecycle {
         this.enabled = properties.enabled();
         this.reconnectDelay = properties.reconnectDelay();
         this.shutdownTimeout = properties.shutdownTimeout();
-        this.executor = Executors.newSingleThreadScheduledExecutor(runnable -> {
+        this.connectionExecutor = Executors.newSingleThreadScheduledExecutor(runnable -> {
             Thread thread = new Thread(runnable, "session-agent-slack-socket");
+            thread.setDaemon(true);
+            return thread;
+        });
+        this.retirementExecutor = Executors.newSingleThreadExecutor(runnable -> {
+            Thread thread = new Thread(runnable, "session-agent-slack-retirement");
             thread.setDaemon(true);
             return thread;
         });
@@ -58,20 +50,37 @@ public final class SlackSocketLifecycle implements SmartLifecycle {
 
     @Override
     public void start() {
-        if (!enabled || !running.compareAndSet(false, true)) {
+        if (!enabled) {
             return;
         }
+        long startedGeneration;
+        synchronized (lifecycleMonitor) {
+            if (running.get()) {
+                return;
+            }
+            running.set(true);
+            generation++;
+            startedGeneration = generation;
+            state.set(SlackLifecycleState.CONNECTING);
+        }
         logState("slack_connection_started", SlackLifecycleState.CONNECTING);
-        connect();
+        connect(startedGeneration);
     }
 
     @Override
     public void stop() {
-        if (!enabled || !running.compareAndSet(true, false)) {
+        if (!enabled) {
             return;
         }
-        state.set(SlackLifecycleState.STOPPED);
-        executor.execute(() -> {
+        synchronized (lifecycleMonitor) {
+            if (!running.get()) {
+                return;
+            }
+            running.set(false);
+            generation++;
+            state.set(SlackLifecycleState.STOPPED);
+        }
+        retirementExecutor.execute(() -> {
             try {
                 socketClient.stop();
             } catch (Exception ignored) {
@@ -80,13 +89,12 @@ public final class SlackSocketLifecycle implements SmartLifecycle {
                 logState("slack_connection_stopped", SlackLifecycleState.STOPPED);
             }
         });
-        executor.shutdown();
+        connectionExecutor.shutdownNow();
+        retirementExecutor.shutdown();
         try {
-            executor.awaitTermination(shutdownTimeout.toMillis(), TimeUnit.MILLISECONDS);
+            retirementExecutor.awaitTermination(shutdownTimeout.toMillis(), TimeUnit.MILLISECONDS);
         } catch (InterruptedException exception) {
             Thread.currentThread().interrupt();
-        } finally {
-            executor.shutdownNow();
         }
     }
 
@@ -109,27 +117,53 @@ public final class SlackSocketLifecycle implements SmartLifecycle {
         return state.get();
     }
 
-    private void connect() {
-        executor.execute(() -> {
-            if (!running.get()) {
+    private void connect(long connectionGeneration) {
+        connectionExecutor.execute(() -> {
+            if (!transition(connectionGeneration, SlackLifecycleState.CONNECTING)) {
                 return;
             }
-            state.set(SlackLifecycleState.CONNECTING);
             logState("slack_connection_attempt", SlackLifecycleState.CONNECTING);
             try {
-                socketClient.start(connectionListener);
+                socketClient.start(connectionListener(connectionGeneration));
             } catch (Exception ignored) {
-                if (running.get()) {
-                    state.set(SlackLifecycleState.DEGRADED);
+                if (transition(connectionGeneration, SlackLifecycleState.DEGRADED)) {
                     logState("slack_connection_retry", SlackLifecycleState.DEGRADED);
                     try {
-                        executor.schedule(this::connect, reconnectDelay.toMillis(), TimeUnit.MILLISECONDS);
+                        connectionExecutor.schedule(() -> connect(connectionGeneration), reconnectDelay.toMillis(), TimeUnit.MILLISECONDS);
                     } catch (RejectedExecutionException rejectedExecutionException) {
                         // Stop retired the lifecycle between the running check and retry scheduling.
                     }
                 }
             }
         });
+    }
+
+    private SlackSocketConnectionListener connectionListener(long connectionGeneration) {
+        return new SlackSocketConnectionListener() {
+            @Override
+            public void connected() {
+                if (transition(connectionGeneration, SlackLifecycleState.AVAILABLE)) {
+                    logState("slack_connection_available", SlackLifecycleState.AVAILABLE);
+                }
+            }
+
+            @Override
+            public void disconnected() {
+                if (transition(connectionGeneration, SlackLifecycleState.DEGRADED)) {
+                    logState("slack_connection_degraded", SlackLifecycleState.DEGRADED);
+                }
+            }
+        };
+    }
+
+    private boolean transition(long transitionGeneration, SlackLifecycleState nextState) {
+        synchronized (lifecycleMonitor) {
+            if (!running.get() || generation != transitionGeneration) {
+                return false;
+            }
+            state.set(nextState);
+            return true;
+        }
     }
 
     private static void logState(String event, SlackLifecycleState state) {
