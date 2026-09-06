@@ -8,6 +8,7 @@ import org.springframework.context.annotation.Configuration;
 import java.time.Duration;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException;
 
 class SlackConfigurationTest {
 
@@ -47,6 +48,13 @@ class SlackConfigurationTest {
                 Duration.ofSeconds(1), Duration.ofSeconds(1)), adapter);
 
         assertThat(client.buildApp().config().isSubtypedMessageEventsAutoAckEnabled()).isFalse();
+    }
+
+    @Test
+    void rejects_a_delivery_call_timeout_that_can_outlive_its_lease() {
+        assertThatIllegalArgumentException().isThrownBy(() -> new SlackProperties.Delivery(
+                Duration.ofSeconds(1), Duration.ofSeconds(30), Duration.ofSeconds(30), Duration.ofSeconds(1),
+                Duration.ofSeconds(60), 5));
     }
 
     @Configuration(proxyBeanMethods = false)

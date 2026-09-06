@@ -91,7 +91,7 @@ class SlackDeliveryWorkerTest {
         }
 
         @Override
-        public Optional<SlackDeliveryClaim> claimNext(String workerId, Duration leaseDuration) {
+        public Optional<SlackDeliveryClaim> claimNext(String workerId, Duration leaseDuration, int maximumAttempts) {
             transactionActiveDuringPost = false;
             return Optional.ofNullable(claims.poll());
         }

@@ -28,6 +28,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -59,7 +60,7 @@ class SlackDeliveryPostgresIT {
 
         initialStore.discover();
         initialStore.discover();
-        SlackDeliveryClaim expiredClaim = initialStore.claimNext("first-delivery-worker", Duration.ofSeconds(30)).orElseThrow();
+        SlackDeliveryClaim expiredClaim = initialStore.claimNext("first-delivery-worker", Duration.ofSeconds(30), 5).orElseThrow();
         jdbcTemplate.update("update slack_delivery set locked_until = clock_timestamp() - interval '1 millisecond' where delivery_id = ?",
                 expiredClaim.deliveryId());
         DatabaseInspectingSlackWebApi slack = new DatabaseInspectingSlackWebApi(jdbcTemplate);
@@ -100,6 +101,35 @@ class SlackDeliveryPostgresIT {
         });
         assertThat(jdbcTemplate.queryForObject("select model_calls from message_job where message_job_id = ?", Integer.class,
                 UUID.fromString(receipt.messageJobId().value()))).isEqualTo(1);
+    }
+
+    @Test
+    void terminalizes_an_expired_fifth_working_attempt_without_a_sixth_slack_call() {
+        completeSlackJobWithTerminalRuntime();
+        SlackPostgresDeliveryStore deliveryStore = new SlackPostgresDeliveryStore(dataSource());
+        deliveryStore.discover();
+        UUID deliveryId = jdbcTemplate.queryForObject("select delivery_id from slack_delivery", UUID.class);
+        jdbcTemplate.update("""
+                update slack_delivery set status = 'WORKING', worker_id = 'stopped-worker',
+                    locked_until = clock_timestamp() - interval '1 millisecond', claim_number = 1, attempt_count = 5
+                where delivery_id = ?
+                """, deliveryId);
+        AtomicBoolean posted = new AtomicBoolean(false);
+        SlackWebApi slack = request -> {
+            posted.set(true);
+            return "2.000001";
+        };
+        SlackDeliveryWorker recoveredWorker = new SlackDeliveryWorker(deliveryStore, slack, new SlackDeliveryProperties(),
+                "recovered-delivery-worker");
+
+        assertThat(recoveredWorker.poll()).isFalse();
+
+        assertThat(posted.get()).isFalse();
+        assertThat(deliveryStore.read(deliveryId)).hasValueSatisfying(delivery -> {
+            assertThat(delivery.status()).isEqualTo(SlackDeliveryStatus.FAILED);
+            assertThat(delivery.attemptCount()).isEqualTo(5);
+            assertThat(delivery.failureCategory()).contains(SlackDeliveryFailureCategory.TRANSIENT);
+        });
     }
 
     private MessageReceipt completeSlackJobWithTerminalRuntime() {

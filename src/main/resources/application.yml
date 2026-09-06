@@ -31,6 +31,7 @@ session-agent:
     delivery:
       poll-delay: 1s
       lease-duration: 30s
+      call-timeout: 25s
       initial-backoff: 1s
       maximum-backoff: 60s
       maximum-attempts: 5

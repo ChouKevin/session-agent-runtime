@@ -22,6 +22,7 @@ import com.java.system.sessionagent.slack.SlackRootIntakePort;
 import com.java.system.sessionagent.slack.SlackSocketClient;
 import com.java.system.sessionagent.slack.SlackSocketLifecycle;
 import com.java.system.sessionagent.slack.SlackDeliveryProperties;
+import com.java.system.sessionagent.slack.SlackDeliveryLifecycle;
 import com.java.system.sessionagent.slack.SlackDeliveryStore;
 import com.java.system.sessionagent.slack.SlackDeliveryWorker;
 import com.java.system.sessionagent.slack.SlackPostgresDeliveryStore;
@@ -177,7 +178,7 @@ public class RuntimeConfiguration {
         return new SlackPostgresDeliveryStore(dataSource);
     }
 
-    @Bean
+    @Bean(destroyMethod = "close")
     @ConditionalOnMissingBean(SlackWebApi.class)
     SlackWebApi slackWebApi(SlackProperties properties) {
         return new SlackSdkWebApi(properties);
@@ -189,6 +190,11 @@ public class RuntimeConfiguration {
             SlackWebApi slackWebApi,
             SlackDeliveryProperties slackDeliveryProperties) {
         return new SlackDeliveryWorker(slackDeliveryStore, slackWebApi, slackDeliveryProperties, "session-agent-slack-delivery");
+    }
+
+    @Bean
+    SlackDeliveryLifecycle slackDeliveryLifecycle(SlackDeliveryWorker slackDeliveryWorker, SlackProperties properties) {
+        return new SlackDeliveryLifecycle(slackDeliveryWorker, properties);
     }
 
     @Bean

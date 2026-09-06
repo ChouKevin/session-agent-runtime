@@ -8,7 +8,7 @@ public interface SlackDeliveryStore {
 
     void discover();
 
-    Optional<SlackDeliveryClaim> claimNext(String workerId, Duration leaseDuration);
+    Optional<SlackDeliveryClaim> claimNext(String workerId, Duration leaseDuration, int maximumAttempts);
 
     boolean markSent(SlackDeliveryClaim claim, String slackMessageTs);
 

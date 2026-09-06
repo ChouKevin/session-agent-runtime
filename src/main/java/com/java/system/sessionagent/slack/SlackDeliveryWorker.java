@@ -1,6 +1,5 @@
 package com.java.system.sessionagent.slack;
 
-import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.util.Assert;
 
 import java.time.Duration;
@@ -26,10 +25,9 @@ public final class SlackDeliveryWorker {
         this.workerId = workerId;
     }
 
-    @Scheduled(fixedDelayString = "${session-agent.slack.delivery.poll-delay:1s}")
     public boolean poll() {
         deliveryStore.discover();
-        Optional<SlackDeliveryClaim> claim = deliveryStore.claimNext(workerId, properties.leaseDuration());
+        Optional<SlackDeliveryClaim> claim = deliveryStore.claimNext(workerId, properties.leaseDuration(), properties.maximumAttempts());
         if (claim.isEmpty()) {
             return false;
         }

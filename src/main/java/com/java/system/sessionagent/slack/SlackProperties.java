@@ -45,6 +45,7 @@ public record SlackProperties(
     public record Delivery(
             @DefaultValue("1s") Duration pollDelay,
             @DefaultValue("30s") Duration leaseDuration,
+            @DefaultValue("25s") Duration callTimeout,
             @DefaultValue("1s") Duration initialBackoff,
             @DefaultValue("60s") Duration maximumBackoff,
             @DefaultValue("5") int maximumAttempts) {
@@ -52,10 +53,14 @@ public record SlackProperties(
         public Delivery {
             Assert.notNull(pollDelay, "Slack delivery poll delay must not be null");
             Assert.notNull(leaseDuration, "Slack delivery lease duration must not be null");
+            Assert.notNull(callTimeout, "Slack delivery call timeout must not be null");
             Assert.notNull(initialBackoff, "Slack delivery initial backoff must not be null");
             Assert.notNull(maximumBackoff, "Slack delivery maximum backoff must not be null");
             Assert.isTrue(!pollDelay.isNegative() && !pollDelay.isZero(), "Slack delivery poll delay must be positive");
             Assert.isTrue(!leaseDuration.isNegative() && !leaseDuration.isZero(), "Slack delivery lease duration must be positive");
+            Assert.isTrue(!callTimeout.isNegative() && !callTimeout.isZero(), "Slack delivery call timeout must be positive");
+            Assert.isTrue(callTimeout.compareTo(leaseDuration) < 0,
+                    "Slack delivery call timeout must be shorter than its lease duration");
             Assert.isTrue(!initialBackoff.isNegative() && !initialBackoff.isZero(), "Slack delivery initial backoff must be positive");
             Assert.isTrue(!maximumBackoff.isNegative() && !maximumBackoff.isZero(), "Slack delivery maximum backoff must be positive");
             Assert.isTrue(initialBackoff.compareTo(maximumBackoff) <= 0,
@@ -64,7 +69,8 @@ public record SlackProperties(
         }
 
         public Delivery() {
-            this(Duration.ofSeconds(1), Duration.ofSeconds(30), Duration.ofSeconds(1), Duration.ofSeconds(60), 5);
+            this(Duration.ofSeconds(1), Duration.ofSeconds(30), Duration.ofSeconds(25), Duration.ofSeconds(1),
+                    Duration.ofSeconds(60), 5);
         }
     }
 

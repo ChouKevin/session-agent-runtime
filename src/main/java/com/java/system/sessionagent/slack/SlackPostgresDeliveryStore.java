@@ -30,16 +30,19 @@ public final class SlackPostgresDeliveryStore implements SlackDeliveryStore {
     }
 
     @Override
-    public Optional<SlackDeliveryClaim> claimNext(String workerId, Duration leaseDuration) {
+    public Optional<SlackDeliveryClaim> claimNext(String workerId, Duration leaseDuration, int maximumAttempts) {
         Assert.hasText(workerId, "Slack delivery worker ID must not be blank");
         Duration requiredLeaseDuration = Objects.requireNonNull(leaseDuration, "Slack delivery lease duration must not be null");
         Assert.isTrue(!requiredLeaseDuration.isNegative() && !requiredLeaseDuration.isZero(), "Slack delivery lease duration must be positive");
-        SlackDeliveryClaim claim = transactionTemplate.execute(status -> jdbcTemplate.query("""
+        Assert.isTrue(maximumAttempts > 0, "Slack delivery maximum attempts must be positive");
+        SlackDeliveryClaim claim = transactionTemplate.execute(status -> {
+            terminalizeExpiredExhaustedDeliveries(maximumAttempts);
+            return jdbcTemplate.query("""
                 with candidate as (
                     select delivery_id
                     from slack_delivery
-                    where (status in ('PENDING', 'RETRY') and next_attempt_at <= clock_timestamp())
-                       or (status = 'WORKING' and locked_until <= clock_timestamp())
+                    where attempt_count < ? and ((status in ('PENDING', 'RETRY') and next_attempt_at <= clock_timestamp())
+                       or (status = 'WORKING' and locked_until <= clock_timestamp()))
                     order by next_attempt_at, created_at, delivery_id
                     for update skip locked limit 1)
                 update slack_delivery delivery set status = 'WORKING', worker_id = ?,
@@ -52,8 +55,9 @@ public final class SlackPostgresDeliveryStore implements SlackDeliveryStore {
                 resultSet.getObject("delivery_id", UUID.class), resultSet.getLong("claim_number"), resultSet.getInt("attempt_count"),
                 resultSet.getString("worker_id"), resultSet.getObject("locked_until", OffsetDateTime.class).toInstant(),
                 new SlackPostRequest(resultSet.getString("channel_id"), resultSet.getString("root_thread_ts"),
-                        resultSet.getString("terminal_text"))), workerId, positiveLeaseMilliseconds(requiredLeaseDuration))
-                .stream().findFirst().orElse(null)); // cs-allow TransactionTemplate permits nullable no-claim result
+                        resultSet.getString("terminal_text"))), maximumAttempts, workerId, positiveLeaseMilliseconds(requiredLeaseDuration))
+                .stream().findFirst().orElse(null); // cs-allow TransactionTemplate permits nullable no-claim result
+        });
         return Optional.ofNullable(claim);
     }
 
@@ -141,6 +145,14 @@ public final class SlackPostgresDeliveryStore implements SlackDeliveryStore {
     private static long positiveLeaseMilliseconds(Duration duration) {
         long milliseconds = duration.toMillis();
         return milliseconds > 0 ? milliseconds : 1;
+    }
+
+    private void terminalizeExpiredExhaustedDeliveries(int maximumAttempts) {
+        jdbcTemplate.update("""
+                update slack_delivery set status = 'FAILED', failure_category = coalesce(failure_category, 'TRANSIENT'),
+                    worker_id = null, locked_until = null
+                where status = 'WORKING' and locked_until <= clock_timestamp() and attempt_count >= ?
+                """, maximumAttempts);
     }
 
     private record NewDelivery(
