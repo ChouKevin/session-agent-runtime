@@ -6,6 +6,7 @@ import com.java.system.sessionagent.slack.domain.IncomingEvent;
 import com.java.system.sessionagent.slack.domain.MessageSubmission;
 import com.java.system.sessionagent.slack.domain.SlackDeliveryClaim;
 import com.java.system.sessionagent.slack.domain.SlackDeliveryFailureCategory;
+import com.java.system.sessionagent.slack.domain.SlackDeliveryPart;
 import com.java.system.sessionagent.slack.domain.SlackDeliveryStatus;
 import com.java.system.sessionagent.slack.domain.SlackDeliveryView;
 import com.java.system.sessionagent.slack.domain.SlackEventOutcome;
@@ -54,15 +55,25 @@ import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.testcontainers.postgresql.PostgreSQLContainer;
 
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.Timestamp;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
@@ -142,6 +153,169 @@ class SlackDeliveryPostgresIT {
         });
         assertThat(jdbcTemplate.queryForObject("select model_calls from message_job where message_job_id = ?", Integer.class,
                 UUID.fromString(receipt.messageJobId().value()))).isEqualTo(1);
+    }
+
+    @Test
+    void persists_fixed_parts_and_resumes_after_a_rate_limited_second_part_without_resending_the_prefix() {
+        completeSlackJobWithTerminalRuntime("1.000001", "x".repeat(4_001));
+        markQueuedNoticeSent();
+        SlackPostgresDeliveryStore deliveryStore = new SlackPostgresDeliveryStore(dataSource());
+        List<SlackPostRequest> posts = new ArrayList<>();
+        AtomicBoolean rateLimited = new AtomicBoolean();
+        SlackWebApi slack = request -> {
+            posts.add(request);
+            if (posts.size() == 2 && rateLimited.compareAndSet(false, true)) {
+                throw new SlackPostFailure(SlackDeliveryFailureCategory.RATE_LIMIT, Optional.of(Duration.ofSeconds(1)));
+            }
+            return "2.00000" + posts.size();
+        };
+        SlackDeliveryWorker worker = new SlackDeliveryWorker(deliveryStore, slack, new SlackDeliveryProperties(), "delivery-worker");
+
+        assertThat(worker.poll()).isTrue();
+        UUID deliveryId = answerDeliveryId();
+        assertThat(deliveryStore.read(deliveryId)).hasValueSatisfying(delivery -> {
+            assertThat(delivery.status()).isEqualTo(SlackDeliveryStatus.RETRY);
+            assertThat(delivery.totalParts()).contains(2);
+            assertThat(delivery.sentParts()).isEqualTo(1);
+        });
+        jdbcTemplate.update("""
+                update slack_delivery set next_attempt_at = clock_timestamp(), terminal_text = 'changed splitter source'
+                where delivery_id = ?
+                """, deliveryId);
+        SlackPostgresDeliveryStore restartedStore = new SlackPostgresDeliveryStore(dataSource());
+        SlackDeliveryClaim restartedClaim = restartedStore.claimNext("restart-probe", Duration.ofSeconds(30), 5).orElseThrow();
+        assertThat(restartedStore.nextPart(restartedClaim, () -> {
+            throw new AssertionError("Persisted delivery parts must not invoke a changed splitter");
+        }, Duration.ofSeconds(30))).hasValueSatisfying(part -> assertThat(part.text()).isEqualTo("x"));
+        assertThat(restartedStore.scheduleRetry(restartedClaim, SlackDeliveryFailureCategory.TRANSIENT, Duration.ZERO)).isTrue();
+        SlackDeliveryWorker recoveredWorker = new SlackDeliveryWorker(new SlackPostgresDeliveryStore(dataSource()), slack,
+                new SlackDeliveryProperties(), "recovered-delivery-worker");
+
+        assertThat(recoveredWorker.poll()).isTrue();
+
+        assertThat(posts).extracting(SlackPostRequest::text).containsExactly("x".repeat(4_000), "x", "x");
+        assertThat(deliveryStore.read(deliveryId)).hasValueSatisfying(delivery -> {
+            assertThat(delivery.status()).isEqualTo(SlackDeliveryStatus.SENT);
+            assertThat(delivery.totalParts()).contains(2);
+            assertThat(delivery.sentParts()).isEqualTo(2);
+        });
+    }
+
+    @Test
+    void renews_the_parent_lease_before_each_part_so_multiple_sends_outlive_the_original_lease() throws Exception {
+        completeSlackJobWithTerminalRuntime("1.000001", "x".repeat(4_001));
+        markQueuedNoticeSent();
+        SlackPostgresDeliveryStore deliveryStore = new SlackPostgresDeliveryStore(dataSource());
+        List<SlackPostRequest> posts = new ArrayList<>();
+        CountDownLatch firstSendStarted = new CountDownLatch(1);
+        CountDownLatch allowFirstSendToFinish = new CountDownLatch(1);
+        CountDownLatch secondSendStarted = new CountDownLatch(1);
+        CountDownLatch allowSecondSendToFinish = new CountDownLatch(1);
+        AtomicReference<Instant> originalLeaseExpiry = new AtomicReference<>();
+        SlackWebApi controlledSlack = request -> {
+            posts.add(request);
+            if (posts.size() == 1) {
+                originalLeaseExpiry.set(jdbcTemplate.queryForObject(
+                        "select locked_until from slack_delivery where kind = 'ANSWER'", Timestamp.class).toInstant());
+                firstSendStarted.countDown();
+                await(allowFirstSendToFinish);
+            } else {
+                secondSendStarted.countDown();
+                await(allowSecondSendToFinish);
+            }
+            return "2.00000" + posts.size();
+        };
+        SlackDeliveryWorker worker = new SlackDeliveryWorker(deliveryStore, controlledSlack,
+                new SlackDeliveryProperties(Duration.ofMillis(500), Duration.ofSeconds(1), Duration.ofSeconds(1), 5),
+                "delivery-worker");
+
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        try {
+            Future<Boolean> poll = executor.submit(worker::poll);
+            assertThat(firstSendStarted.await(5, TimeUnit.SECONDS)).isTrue();
+            Instant initialExpiry = originalLeaseExpiry.get();
+            assertThat(initialExpiry).isNotNull();
+            awaitDatabaseClockAfter(initialExpiry.minusMillis(200));
+            allowFirstSendToFinish.countDown();
+            assertThat(secondSendStarted.await(5, TimeUnit.SECONDS)).isTrue();
+            awaitDatabaseClockAfter(initialExpiry);
+            assertThat(jdbcTemplate.queryForObject(
+                    "select locked_until > clock_timestamp() from slack_delivery where kind = 'ANSWER'", Boolean.class)).isTrue();
+            allowSecondSendToFinish.countDown();
+            assertThat(poll.get(5, TimeUnit.SECONDS)).isTrue();
+        } finally {
+            allowFirstSendToFinish.countDown();
+            allowSecondSendToFinish.countDown();
+            executor.shutdownNow();
+        }
+
+        assertThat(posts).hasSize(2);
+        assertThat(deliveryStore.read(answerDeliveryId())).hasValueSatisfying(delivery -> {
+            assertThat(delivery.status()).isEqualTo(SlackDeliveryStatus.SENT);
+            assertThat(delivery.sentParts()).isEqualTo(2);
+        });
+    }
+
+    @Test
+    void serializes_nonfinal_progress_with_an_overlapping_reclaim() throws Exception {
+        completeSlackJobWithTerminalRuntime("1.000001", "x".repeat(4_001));
+        markQueuedNoticeSent();
+        SlackPostgresDeliveryStore deliveryStore = new SlackPostgresDeliveryStore(dataSource());
+        deliveryStore.discover();
+        SlackDeliveryClaim oldClaim = deliveryStore.claimNext("first-worker", Duration.ofSeconds(30), 5).orElseThrow();
+        SlackDeliveryPart firstPart = deliveryStore.nextPart(oldClaim,
+                () -> List.of("x".repeat(4_000), "x"), Duration.ofSeconds(30)).orElseThrow();
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try (Connection partLock = dataSource().getConnection()) {
+            partLock.setAutoCommit(false);
+            try (PreparedStatement statement = partLock.prepareStatement("""
+                    select 1 from slack_delivery_part where delivery_id = ? and part_index = 0 for update
+                    """)) {
+                statement.setObject(1, oldClaim.deliveryId());
+                statement.executeQuery();
+            }
+            Future<Boolean> confirmation = executor.submit(() -> deliveryStore.markPartSent(oldClaim, firstPart, "2.000001"));
+            awaitDatabaseLockWaiter("update slack_delivery_part part");
+            Future<Integer> reclaim = executor.submit(() -> jdbcTemplate.update("""
+                    update slack_delivery set worker_id = 'recovered-worker', claim_number = claim_number + 1,
+                        locked_until = clock_timestamp() + interval '30 seconds'
+                    where delivery_id = ?
+                    """, oldClaim.deliveryId()));
+            awaitDatabaseLockWaiter("update slack_delivery set worker_id");
+
+            partLock.commit();
+
+            assertThat(confirmation.get(5, TimeUnit.SECONDS)).isTrue();
+            assertThat(reclaim.get(5, TimeUnit.SECONDS)).isEqualTo(1);
+        } finally {
+            executor.shutdownNow();
+        }
+
+        assertThat(jdbcTemplate.queryForObject("""
+                select count(*) from slack_delivery_part where delivery_id = ? and status = 'SENT'
+                """, Integer.class, oldClaim.deliveryId())).isEqualTo(1);
+    }
+
+    @Test
+    void retains_a_known_truncation_timestamp_on_the_failed_part_without_marking_the_parent_sent() {
+        completeSlackJobWithTerminalRuntime();
+        markQueuedNoticeSent();
+        SlackPostgresDeliveryStore deliveryStore = new SlackPostgresDeliveryStore(dataSource());
+        SlackWebApi truncatingSlack = request -> {
+            throw new SlackPostFailure(SlackDeliveryFailureCategory.PERMANENT, Optional.empty(), Optional.of("2.000099"));
+        };
+        SlackDeliveryWorker worker = new SlackDeliveryWorker(deliveryStore, truncatingSlack, new SlackDeliveryProperties(),
+                "delivery-worker");
+
+        assertThat(worker.poll()).isTrue();
+
+        assertThat(deliveryStore.read(answerDeliveryId())).hasValueSatisfying(delivery -> {
+            assertThat(delivery.status()).isEqualTo(SlackDeliveryStatus.FAILED);
+            assertThat(delivery.sentParts()).isZero();
+        });
+        assertThat(jdbcTemplate.queryForObject("""
+                select slack_message_ts from slack_delivery_part where delivery_id = ? and part_index = 0
+                """, String.class, answerDeliveryId())).isEqualTo("2.000099");
     }
 
     @Test
@@ -385,7 +559,7 @@ class SlackDeliveryPostgresIT {
         ListAppender<ILoggingEvent> deliveryLogs = capture(SlackDeliveryWorker.class);
         IncomingEvent event = new IncomingEvent("event-lifecycle", "T1", "C1", "1.000001", "", "U1", "", "channel",
                 "<@UBOT> hello", "", false, false);
-        List<SlackPostRequest> posts = new java.util.ArrayList<>();
+        List<SlackPostRequest> posts = new ArrayList<>();
         try {
             assertThat(adapter.handle(event)).isEqualTo(SlackEventOutcome.ACCEPTED);
             assertThat(adapter.handle(event)).isEqualTo(SlackEventOutcome.ACCEPTED);
@@ -490,6 +664,10 @@ class SlackDeliveryPostgresIT {
     }
 
     private MessageReceipt completeSlackJobWithTerminalRuntime(String messageTs) {
+        return completeSlackJobWithTerminalRuntime(messageTs, "Runtime terminal response.");
+    }
+
+    private MessageReceipt completeSlackJobWithTerminalRuntime(String messageTs, String terminalText) {
         PostgresConversationStore conversationStore = new PostgresConversationStore(dataSource(), Clock.fixed(NOW, ZoneOffset.UTC),
                 new ObjectMapper());
         MessageIntakePort messageIntake = new MessageService(conversationStore, TestConfiguredModels.withDefault("test"),
@@ -503,7 +681,7 @@ class SlackDeliveryPostgresIT {
         assertThat(slackIntake.receive(intake).outcome()).isEqualTo(SlackEventOutcome.ACCEPTED);
         MessageReceipt receipt = conversationStore.receive(message, TestConfiguredModels.withDefault("test").defaultSelection(),
                 TestConfiguredModels.withDefault("test"));
-        completeNextWithTerminalRuntime(conversationStore);
+        completeNextWithTerminalRuntime(conversationStore, terminalText);
         return receipt;
     }
 
@@ -515,18 +693,60 @@ class SlackDeliveryPostgresIT {
     }
 
     private static void completeNextWithTerminalRuntime(PostgresConversationStore conversationStore) {
+        completeNextWithTerminalRuntime(conversationStore, "Runtime terminal response.");
+    }
+
+    private static void completeNextWithTerminalRuntime(PostgresConversationStore conversationStore, String terminalText) {
         MessageWorkClaim claim = conversationStore.claimNext("conversation-worker", Duration.ofSeconds(30)).orElseThrow();
         assertThat(conversationStore.reserveModelCall(claim, 2, NOW)).hasValue(1);
         conversationStore.append(claim, new ConversationStore.MessageBatch(List.of(
                 new ConversationStore.AssistantToolCallsData(Optional.of("Intermediate tool-call text"), List.of(
                         new ConversationStore.ToolCallData(new ToolCallId("call-1"), "lookup", Map.of()))),
                 new ConversationStore.ToolObservationData(new ToolCallId("call-1"), "lookup", Map.of("result", "value")),
-                new ConversationStore.RuntimeData("MODEL_UNAVAILABLE", "Runtime terminal response.")),
+                new ConversationStore.RuntimeData("MODEL_UNAVAILABLE", terminalText)),
                 ConversationStore.JobUpdate.COMPLETE), NOW);
     }
 
     private UUID answerDeliveryId() {
         return jdbcTemplate.queryForObject("select delivery_id from slack_delivery where kind = 'ANSWER'", UUID.class);
+    }
+
+    private void awaitDatabaseClockAfter(Instant instant) throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (System.nanoTime() < deadline) {
+            Boolean after = jdbcTemplate.queryForObject("select clock_timestamp() > ?", Boolean.class, Timestamp.from(instant));
+            if (Boolean.TRUE.equals(after)) {
+                return;
+            }
+            Thread.sleep(10);
+        }
+        throw new IllegalStateException("PostgreSQL clock did not pass the original Slack delivery lease");
+    }
+
+    private void awaitDatabaseLockWaiter(String queryFragment) throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (System.nanoTime() < deadline) {
+            Integer waiting = jdbcTemplate.queryForObject("""
+                    select count(*) from pg_stat_activity
+                    where datname = current_database() and wait_event_type = 'Lock' and query like ?
+                    """, Integer.class, "%" + queryFragment + "%");
+            if (waiting > 0) {
+                return;
+            }
+            Thread.sleep(10);
+        }
+        throw new IllegalStateException("Expected PostgreSQL lock waiter was not observed");
+    }
+
+    private static void await(CountDownLatch latch) {
+        try {
+            if (!latch.await(5, TimeUnit.SECONDS)) {
+                throw new IllegalStateException("Timed out waiting for controlled Slack response");
+            }
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException(exception);
+        }
     }
 
     private void markQueuedNoticeSent() {
@@ -547,7 +767,7 @@ class SlackDeliveryPostgresIT {
     private static final class DatabaseInspectingSlackWebApi implements SlackWebApi {
 
         private final JdbcTemplate jdbcTemplate;
-        private final List<SlackPostRequest> posts = new java.util.ArrayList<>();
+        private final List<SlackPostRequest> posts = new ArrayList<>();
         private boolean claimWasCommittedBeforePost;
 
         private DatabaseInspectingSlackWebApi(JdbcTemplate jdbcTemplate) {

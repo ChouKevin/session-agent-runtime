@@ -190,10 +190,14 @@ class PostgresMessageSubmissionPostgresIT {
 
         SlackDeliveryClaim queuedClaim = deliveryStore.claimNext("delivery-worker", Duration.ofSeconds(30), 5).orElseThrow();
         assertThat(queuedClaim.kind()).isEqualTo(SlackDeliveryKind.QUEUED);
-        assertThat(deliveryStore.markSent(queuedClaim, "10.000001")).isTrue();
+        assertThat(deliveryStore.markPartSent(queuedClaim,
+                deliveryStore.nextPart(queuedClaim, () -> List.of(queuedClaim.postRequest().text()), Duration.ofSeconds(30)).orElseThrow(),
+                "10.000001")).isTrue();
         SlackDeliveryClaim busyClaim = deliveryStore.claimNext("delivery-worker", Duration.ofSeconds(30), 5).orElseThrow();
         assertThat(busyClaim.kind()).isEqualTo(SlackDeliveryKind.BUSY);
-        assertThat(deliveryStore.markFailed(busyClaim, SlackDeliveryFailureCategory.PERMANENT)).isTrue();
+        assertThat(deliveryStore.markPartFailed(busyClaim,
+                deliveryStore.nextPart(busyClaim, () -> List.of(busyClaim.postRequest().text()), Duration.ofSeconds(30)).orElseThrow(),
+                SlackDeliveryFailureCategory.PERMANENT, Optional.empty())).isTrue();
 
         List<SlackDeliveryView> deliveries = deliveryStore.findBySource("T1", "C1", "2.000001");
         assertThat(deliveries).singleElement().satisfies(delivery -> {

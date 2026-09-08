@@ -151,14 +151,97 @@ public interface SlackDatabaseMapper extends BaseMapper<SlackDatabaseMapper.Deli
             @Param("leaseMilliseconds") long leaseMilliseconds);
 
     @Update("""
+            update slack_delivery set locked_until = clock_timestamp() + (#{leaseMilliseconds} * interval '1 millisecond')
+            where delivery_id = #{deliveryId} and status = 'WORKING' and worker_id = #{workerId} and claim_number = #{claimNumber}
+                and locked_until > clock_timestamp()
+            """)
+    int renewLease(
+            @Param("deliveryId") UUID deliveryId,
+            @Param("workerId") String workerId,
+            @Param("claimNumber") long claimNumber,
+            @Param("leaseMilliseconds") long leaseMilliseconds);
+
+    @Select("select count(*) from slack_delivery_part where delivery_id = #{deliveryId}")
+    int countParts(@Param("deliveryId") UUID deliveryId);
+
+    @Insert("""
+            <script>
+            insert into slack_delivery_part(delivery_id, part_index, part_text, status)
+            values <foreach collection="texts" item="text" index="index" separator=",">
+                (#{deliveryId}, #{index}, #{text}, 'PENDING')
+            </foreach>
+            on conflict (delivery_id, part_index) do nothing
+            </script>
+            """)
+    int insertParts(@Param("deliveryId") UUID deliveryId, @Param("texts") List<String> texts);
+
+    @Select("""
+            select part.part_index, part.part_text
+            from slack_delivery_part part join slack_delivery delivery on delivery.delivery_id = part.delivery_id
+            where part.delivery_id = #{deliveryId} and part.status = 'PENDING'
+                and delivery.status = 'WORKING' and delivery.worker_id = #{workerId}
+                and delivery.claim_number = #{claimNumber} and delivery.locked_until > clock_timestamp()
+            order by part.part_index limit 1
+            """)
+    @Options(flushCache = Options.FlushCachePolicy.FALSE, useCache = false)
+    List<DeliveryPartRow> findNextPart(
+            @Param("deliveryId") UUID deliveryId,
+            @Param("workerId") String workerId,
+            @Param("claimNumber") long claimNumber);
+
+    @Select("""
+            select delivery_id from slack_delivery
+            where delivery_id = #{deliveryId} and status = 'WORKING' and worker_id = #{workerId}
+                and claim_number = #{claimNumber} and locked_until > clock_timestamp()
+            for update
+            """)
+    List<UUID> lockOwnedDelivery(
+            @Param("deliveryId") UUID deliveryId,
+            @Param("workerId") String workerId,
+            @Param("claimNumber") long claimNumber);
+
+    @Update("""
+            update slack_delivery_part part set status = 'SENT', slack_message_ts = #{slackMessageTs}, sent_at = clock_timestamp()
+            from slack_delivery delivery
+            where part.delivery_id = #{deliveryId} and part.part_index = #{partIndex} and part.status = 'PENDING'
+                and delivery.delivery_id = part.delivery_id and delivery.status = 'WORKING'
+                and delivery.worker_id = #{workerId} and delivery.claim_number = #{claimNumber}
+                and delivery.locked_until > clock_timestamp()
+            """)
+    int markPartSent(
+            @Param("slackMessageTs") String slackMessageTs,
+            @Param("deliveryId") UUID deliveryId,
+            @Param("partIndex") int partIndex,
+            @Param("workerId") String workerId,
+            @Param("claimNumber") long claimNumber);
+
+    @Select("select count(*) from slack_delivery_part where delivery_id = #{deliveryId} and status <> 'SENT'")
+    int countUnsentParts(@Param("deliveryId") UUID deliveryId);
+
+    @Update("""
             update slack_delivery set status = 'SENT', slack_message_ts = #{slackMessageTs}, sent_at = clock_timestamp(),
                 worker_id = null, locked_until = null
             where delivery_id = #{deliveryId} and status = 'WORKING' and worker_id = #{workerId} and claim_number = #{claimNumber}
                 and locked_until > clock_timestamp()
             """)
-    int markSent(
+    int markDeliverySent(
             @Param("slackMessageTs") String slackMessageTs,
             @Param("deliveryId") UUID deliveryId,
+            @Param("workerId") String workerId,
+            @Param("claimNumber") long claimNumber);
+
+    @Update("""
+            update slack_delivery_part part set status = 'FAILED', slack_message_ts = #{slackMessageTs}
+            from slack_delivery delivery
+            where part.delivery_id = #{deliveryId} and part.part_index = #{partIndex} and part.status = 'PENDING'
+                and delivery.delivery_id = part.delivery_id and delivery.status = 'WORKING'
+                and delivery.worker_id = #{workerId} and delivery.claim_number = #{claimNumber}
+                and delivery.locked_until > clock_timestamp()
+            """)
+    int markPartFailed(
+            @Param("slackMessageTs") String slackMessageTs,
+            @Param("deliveryId") UUID deliveryId,
+            @Param("partIndex") int partIndex,
             @Param("workerId") String workerId,
             @Param("claimNumber") long claimNumber);
 
@@ -167,7 +250,7 @@ public interface SlackDatabaseMapper extends BaseMapper<SlackDatabaseMapper.Deli
             where delivery_id = #{deliveryId} and status = 'WORKING' and worker_id = #{workerId} and claim_number = #{claimNumber}
                 and locked_until > clock_timestamp()
             """)
-    int markFailed(
+    int markDeliveryFailed(
             @Param("category") String category,
             @Param("deliveryId") UUID deliveryId,
             @Param("workerId") String workerId,
@@ -194,7 +277,10 @@ public interface SlackDatabaseMapper extends BaseMapper<SlackDatabaseMapper.Deli
     int terminalizeExpiredExhaustedDeliveries(@Param("maximumAttempts") int maximumAttempts);
 
     @Select("""
-            select delivery_id, kind, status, attempt_count, failure_category, slack_message_ts, next_attempt_at, message_job_id
+            select delivery_id, kind, status, attempt_count, failure_category, slack_message_ts, next_attempt_at, message_job_id,
+                (select count(*) from slack_delivery_part part where part.delivery_id = slack_delivery.delivery_id) as total_parts,
+                (select count(*) from slack_delivery_part part where part.delivery_id = slack_delivery.delivery_id
+                    and part.status = 'SENT') as sent_parts
             from slack_delivery
             where delivery_id = #{deliveryId}
             """)
@@ -202,7 +288,10 @@ public interface SlackDatabaseMapper extends BaseMapper<SlackDatabaseMapper.Deli
     List<DeliveryViewRow> findDelivery(@Param("deliveryId") UUID deliveryId);
 
     @Select("""
-            select delivery_id, kind, status, attempt_count, failure_category, slack_message_ts, next_attempt_at, message_job_id
+            select delivery_id, kind, status, attempt_count, failure_category, slack_message_ts, next_attempt_at, message_job_id,
+                (select count(*) from slack_delivery_part part where part.delivery_id = slack_delivery.delivery_id) as total_parts,
+                (select count(*) from slack_delivery_part part where part.delivery_id = slack_delivery.delivery_id
+                    and part.status = 'SENT') as sent_parts
             from slack_delivery where team_id = #{teamId} and channel_id = #{channelId} and message_ts = #{messageTs}
             order by created_at, delivery_id
             """)
@@ -234,6 +323,7 @@ public interface SlackDatabaseMapper extends BaseMapper<SlackDatabaseMapper.Deli
             left join assistant_message assistant on assistant.session_id = terminal.session_id and assistant.sequence = terminal.sequence
             left join runtime_message runtime on runtime.session_id = terminal.session_id and runtime.sequence = terminal.sequence
             where job.status = 'DONE' and terminal.role in ('ASSISTANT', 'RUNTIME')
+              and (case terminal.role when 'ASSISTANT' then assistant.message else runtime.message end) ~ '[^[:space:]]'
               and terminal.sequence = (select max(later.sequence) from session_message later
                   where later.session_id = job.session_id and later.message_job_id = job.message_job_id)
               and not exists (select 1 from slack_delivery delivery
@@ -476,7 +566,12 @@ public interface SlackDatabaseMapper extends BaseMapper<SlackDatabaseMapper.Deli
             String failureCategory,
             String slackMessageTs,
             OffsetDateTime nextAttemptAt,
-            UUID messageJobId) {
+            UUID messageJobId,
+            int totalParts,
+            int sentParts) {
+    }
+
+    record DeliveryPartRow(int partIndex, String partText) {
     }
 
     record NewDeliveryRow(

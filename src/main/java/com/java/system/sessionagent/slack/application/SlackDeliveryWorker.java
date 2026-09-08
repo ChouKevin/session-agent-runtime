@@ -3,7 +3,10 @@ package com.java.system.sessionagent.slack.application;
 import com.java.system.sessionagent.slack.configuration.SlackDeliveryProperties;
 import com.java.system.sessionagent.slack.domain.SlackDeliveryClaim;
 import com.java.system.sessionagent.slack.domain.SlackDeliveryFailureCategory;
+import com.java.system.sessionagent.slack.domain.SlackDeliveryPart;
 import com.java.system.sessionagent.slack.domain.SlackPostFailure;
+import com.java.system.sessionagent.slack.domain.SlackPostRequest;
+import com.java.system.sessionagent.slack.domain.SlackTextParts;
 import com.java.system.sessionagent.slack.port.out.SlackDeliveryStore;
 import com.java.system.sessionagent.slack.port.out.SlackWebApi;
 
@@ -46,25 +49,49 @@ public final class SlackDeliveryWorker {
         }
         SlackDeliveryClaim currentClaim = claim.orElseThrow();
         logDelivery("slack_delivery_attempt", currentClaim, "ATTEMPT", Optional.empty());
-        try {
-            String slackMessageTs = slackWebApi.post(currentClaim.postRequest());
-            boolean sentCommitted = deliveryStore.markSent(currentClaim, slackMessageTs);
-            logDelivery(sentCommitted ? "slack_delivery_sent" : "slack_delivery_ambiguous", currentClaim,
-                    sentCommitted ? "SENT" : "POSTED_STATE_NOT_COMMITTED", Optional.empty());
-        } catch (SlackPostFailure failure) {
-            recordFailure(currentClaim, failure.category(), failure.retryAfter());
-        } catch (RuntimeException exception) {
-            recordFailure(currentClaim, SlackDeliveryFailureCategory.TRANSIENT, Optional.empty());
-        }
+        deliverParts(currentClaim);
         return true;
+    }
+
+    private void deliverParts(SlackDeliveryClaim claim) {
+        Optional<SlackDeliveryPart> nextPart;
+        try {
+            nextPart = deliveryStore.nextPart(claim, () -> SlackTextParts.split(claim.postRequest().text()), properties.leaseDuration());
+        } catch (RuntimeException exception) {
+            logDelivery("slack_delivery_ownership_lost", claim, "PARTS_NOT_PREPARED", Optional.empty());
+            return;
+        }
+        while (nextPart.isPresent()) {
+            SlackDeliveryPart part = nextPart.orElseThrow();
+            SlackPostRequest request = new SlackPostRequest(claim.postRequest().channelId(), claim.postRequest().rootThreadTs(), part.text());
+            try {
+                String slackMessageTs = slackWebApi.post(request);
+                boolean sentCommitted = deliveryStore.markPartSent(claim, part, slackMessageTs);
+                logDelivery(sentCommitted ? "slack_delivery_sent" : "slack_delivery_ambiguous", claim,
+                        sentCommitted ? "SENT" : "POSTED_STATE_NOT_COMMITTED", Optional.empty());
+                if (!sentCommitted) {
+                    return;
+                }
+                nextPart = deliveryStore.nextPart(claim, () -> SlackTextParts.split(claim.postRequest().text()),
+                        properties.leaseDuration());
+            } catch (SlackPostFailure failure) {
+                recordFailure(claim, part, failure.category(), failure.retryAfter(), failure.slackMessageTs());
+                return;
+            } catch (RuntimeException exception) {
+                recordFailure(claim, part, SlackDeliveryFailureCategory.TRANSIENT, Optional.empty(), Optional.empty());
+                return;
+            }
+        }
     }
 
     private void recordFailure(
             SlackDeliveryClaim claim,
+            SlackDeliveryPart part,
             SlackDeliveryFailureCategory category,
-            Optional<Duration> retryAfter) {
+            Optional<Duration> retryAfter,
+            Optional<String> slackMessageTs) {
         if (category == SlackDeliveryFailureCategory.PERMANENT || claim.attemptCount() >= properties.maximumAttempts()) {
-            boolean failedCommitted = deliveryStore.markFailed(claim, category);
+            boolean failedCommitted = deliveryStore.markPartFailed(claim, part, category, slackMessageTs);
             logDelivery(failedCommitted ? "slack_delivery_failed" : "slack_delivery_ownership_lost", claim,
                     failedCommitted ? category.name() : "FAILED_STATE_NOT_COMMITTED", Optional.empty());
             return;

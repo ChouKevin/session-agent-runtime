@@ -220,9 +220,10 @@ class MessageControllerTest {
                 .andExpect(jsonPath("$[0].jobId").value(JOB_ID))
                 .andExpect(jsonPath("$[1].failureCategory").value("PERMANENT"))
                 .andExpect(jsonPath("$[1].jobId").isEmpty())
+                .andExpect(jsonPath("$[0].totalParts").isEmpty())
+                .andExpect(jsonPath("$[0].sentParts").value(0))
                 .andExpect(jsonPath("$..terminalText").doesNotExist())
-                .andExpect(jsonPath("$..providerFailure").doesNotExist())
-                .andExpect(jsonPath("$..totalParts").doesNotExist());
+                .andExpect(jsonPath("$..providerFailure").doesNotExist());
     }
 
     @Test

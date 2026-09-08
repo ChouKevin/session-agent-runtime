@@ -57,6 +57,9 @@ public final class SlackSdkWebApi implements SlackWebApi, AutoCloseable {
             if (!StringUtils.hasText(response.getTs())) {
                 throw new SlackPostFailure(SlackDeliveryFailureCategory.TRANSIENT, Optional.empty());
             }
+            if (messageWasTruncated(response)) {
+                throw new SlackPostFailure(SlackDeliveryFailureCategory.PERMANENT, Optional.empty(), Optional.of(response.getTs()));
+            }
             return response.getTs();
         } catch (SlackApiException exception) {
             throw classifiedFailure(exception);
@@ -71,6 +74,13 @@ public final class SlackSdkWebApi implements SlackWebApi, AutoCloseable {
             return new SlackPostFailure(SlackDeliveryFailureCategory.RATE_LIMIT, retryAfter);
         }
         return classifiedFailure(response.getError());
+    }
+
+    private static boolean messageWasTruncated(ChatPostMessageResponse response) {
+        return Optional.ofNullable(response.getResponseMetadata())
+                .map(metadata -> metadata.getWarnings())
+                .orElse(List.of())
+                .contains("message_truncated");
     }
 
     private static SlackPostFailure classifiedFailure(SlackApiException exception) {

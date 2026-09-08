@@ -17,6 +17,8 @@ import java.util.ArrayDeque;
 import java.util.Optional;
 import java.util.Queue;
 import java.util.UUID;
+import java.util.List;
+import java.util.function.Supplier;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
@@ -75,6 +77,7 @@ class SlackDeliveryLifecycleTest {
         private final Queue<SlackDeliveryClaim> claims = new ArrayDeque<>(java.util.List.of(new SlackDeliveryClaim(
                 UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), 1, 1, "delivery-worker", Instant.now().plusSeconds(30),
                 new SlackPostRequest("C1", "1.000001", "Committed terminal response"))));
+        private boolean sent;
 
         @Override
         public void discover() {
@@ -86,12 +89,29 @@ class SlackDeliveryLifecycleTest {
         }
 
         @Override
-        public boolean markSent(SlackDeliveryClaim claim, String slackMessageTs) {
+        public Optional<com.java.system.sessionagent.slack.domain.SlackDeliveryPart> nextPart(
+                SlackDeliveryClaim claim,
+                Supplier<List<String>> texts,
+                Duration leaseDuration) {
+            return sent ? Optional.empty()
+                    : Optional.of(new com.java.system.sessionagent.slack.domain.SlackDeliveryPart(0, texts.get().getFirst()));
+        }
+
+        @Override
+        public boolean markPartSent(
+                SlackDeliveryClaim claim,
+                com.java.system.sessionagent.slack.domain.SlackDeliveryPart part,
+                String slackMessageTs) {
+            sent = true;
             return true;
         }
 
         @Override
-        public boolean markFailed(SlackDeliveryClaim claim, SlackDeliveryFailureCategory category) {
+        public boolean markPartFailed(
+                SlackDeliveryClaim claim,
+                com.java.system.sessionagent.slack.domain.SlackDeliveryPart part,
+                SlackDeliveryFailureCategory category,
+                Optional<String> slackMessageTs) {
             return true;
         }
 

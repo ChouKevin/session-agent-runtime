@@ -11,6 +11,8 @@ import com.slack.api.RequestConfigurator;
 import com.slack.api.methods.MethodsClient;
 import com.slack.api.methods.SlackApiException;
 import com.slack.api.methods.request.chat.ChatPostMessageRequest;
+import com.slack.api.methods.response.chat.ChatPostMessageResponse;
+import com.slack.api.model.ErrorResponseMetadata;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import okhttp3.Protocol;
@@ -82,6 +84,49 @@ class SlackSdkWebApiTest {
         assertThat(config.isStatsEnabled()).isFalse();
         assertThat(config.getHttpClientCallTimeoutMillis()).isEqualTo(25_000);
         assertThat(paths).containsExactly("/chat.postMessage");
+    }
+
+    @Test
+    void retains_the_timestamp_and_marks_a_truncated_ok_response_as_permanent() throws Exception {
+        Slack slack = Mockito.mock(Slack.class);
+        MethodsClient methods = Mockito.mock(MethodsClient.class);
+        ChatPostMessageResponse response = new ChatPostMessageResponse();
+        ErrorResponseMetadata metadata = new ErrorResponseMetadata();
+        metadata.setWarnings(List.of("message_truncated"));
+        response.setOk(true);
+        response.setTs("2.000003");
+        response.setResponseMetadata(metadata);
+        Mockito.when(slack.methods("xoxb-test")).thenReturn(methods);
+        Mockito.when(methods.chatPostMessage(Mockito.<RequestConfigurator<ChatPostMessageRequest.ChatPostMessageRequestBuilder>>any()))
+                .thenReturn(response);
+
+        try (SlackSdkWebApi webApi = new SlackSdkWebApi(properties(), slack)) {
+            Throwable thrown = catchThrowable(() -> webApi.post(request()));
+
+            assertThat(thrown).isInstanceOf(SlackPostFailure.class);
+            SlackPostFailure failure = (SlackPostFailure) thrown;
+            assertThat(failure.category()).isEqualTo(SlackDeliveryFailureCategory.PERMANENT);
+            assertThat(failure.slackMessageTs()).contains("2.000003");
+        }
+    }
+
+    @Test
+    void accepts_an_ok_response_with_an_unrelated_warning() throws Exception {
+        Slack slack = Mockito.mock(Slack.class);
+        MethodsClient methods = Mockito.mock(MethodsClient.class);
+        ChatPostMessageResponse response = new ChatPostMessageResponse();
+        ErrorResponseMetadata metadata = new ErrorResponseMetadata();
+        metadata.setWarnings(List.of("other_warning"));
+        response.setOk(true);
+        response.setTs("2.000004");
+        response.setResponseMetadata(metadata);
+        Mockito.when(slack.methods("xoxb-test")).thenReturn(methods);
+        Mockito.when(methods.chatPostMessage(Mockito.<RequestConfigurator<ChatPostMessageRequest.ChatPostMessageRequestBuilder>>any()))
+                .thenReturn(response);
+
+        try (SlackSdkWebApi webApi = new SlackSdkWebApi(properties(), slack)) {
+            assertThat(webApi.post(request())).isEqualTo("2.000004");
+        }
     }
 
     private static SlackPostFailure postFailure(SlackApiException sdkFailure) throws Exception {

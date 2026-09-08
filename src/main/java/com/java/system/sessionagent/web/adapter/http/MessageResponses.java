@@ -151,11 +151,13 @@ public final class MessageResponses {
             int attemptCount,
             String failureCategory,
             Instant nextAttemptAt,
-            String jobId) {
+            String jobId,
+            Integer totalParts,
+            int sentParts) {
         static SlackDeliveryResponse from(SlackDeliveryView view) {
             return new SlackDeliveryResponse(view.deliveryId().toString(), view.kind().name(), view.status().name(), view.attemptCount(),
                     view.failureCategory().map(Enum::name).orElse(null), view.nextAttemptAt(),
-                    view.messageJobId().map(Object::toString).orElse(null));
+                    view.messageJobId().map(Object::toString).orElse(null), view.totalParts().orElse(null), view.sentParts());
         }
     }
 }
