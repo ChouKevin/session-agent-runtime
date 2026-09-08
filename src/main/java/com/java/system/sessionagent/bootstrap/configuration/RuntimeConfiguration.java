@@ -504,7 +504,11 @@ public class RuntimeConfiguration {
 
     @Bean(destroyMethod = "shutdown")
     ScheduledExecutorService workerScheduler() {
-        return Executors.newSingleThreadScheduledExecutor();
+        return Executors.newSingleThreadScheduledExecutor(runnable -> {
+            Thread renewalWorker = new Thread(runnable, "session-agent-worker-renewal");
+            renewalWorker.setDaemon(true);
+            return renewalWorker;
+        });
     }
 
     @Bean(destroyMethod = "shutdown")

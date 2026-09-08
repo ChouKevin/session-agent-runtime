@@ -138,18 +138,31 @@ public final class MessageJobWorker implements SmartLifecycle {
                 activeClaim.revoke();
             }
         }
+        scheduler.shutdownNow();
         workerExecutor.shutdown();
     }
 
     private void awaitWorkerTermination() {
         try {
-            if (!workerExecutor.awaitTermination(SHUTDOWN_TIMEOUT.toNanos(), TimeUnit.NANOSECONDS)) {
+            long deadline = System.nanoTime() + SHUTDOWN_TIMEOUT.toNanos();
+            boolean workersTerminated = awaitTermination(workerExecutor, deadline);
+            boolean schedulerTerminated = awaitTermination(scheduler, deadline);
+            if (!workersTerminated) {
                 workerExecutor.shutdownNow();
+            }
+            if (!schedulerTerminated) {
+                scheduler.shutdownNow();
             }
         } catch (InterruptedException exception) {
             workerExecutor.shutdownNow();
+            scheduler.shutdownNow();
             Thread.currentThread().interrupt();
         }
+    }
+
+    private static boolean awaitTermination(ExecutorService executor, long deadline) throws InterruptedException {
+        long remaining = Math.max(0L, deadline - System.nanoTime());
+        return executor.awaitTermination(remaining, TimeUnit.NANOSECONDS);
     }
 
     private void runLoop() {
@@ -285,12 +298,15 @@ public final class MessageJobWorker implements SmartLifecycle {
             return;
         }
         try {
-            if (!conversationStore.extendClaim(claim, properties.claimDuration())) {
+            boolean extended = conversationStore.extendClaim(claim, properties.claimDuration());
+            if (!extended || !stillOwned.get()) {
                 stillOwned.set(false);
-                LOGGER.atInfo().addKeyValue("event", "message_job_recovery")
-                        .addKeyValue("messageJobId", claim.messageJobId().value())
-                        .addKeyValue("sessionId", claim.sessionId().value())
-                        .addKeyValue("outcome", "OWNERSHIP_LOST").log("runtime_lifecycle");
+                if (!extended) {
+                    LOGGER.atInfo().addKeyValue("event", "message_job_recovery")
+                            .addKeyValue("messageJobId", claim.messageJobId().value())
+                            .addKeyValue("sessionId", claim.sessionId().value())
+                            .addKeyValue("outcome", "OWNERSHIP_LOST").log("runtime_lifecycle");
+                }
             }
         } catch (RuntimeException exception) {
             stillOwned.set(false);

@@ -25,6 +25,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -65,12 +66,16 @@ class RuntimeConfigurationTest {
     void creates_daemon_worker_threads() throws Exception {
         RuntimeConfiguration configuration = new RuntimeConfiguration();
         ExecutorService workerExecutor = configuration.workerExecutor(new WorkerProperties());
+        ScheduledExecutorService workerScheduler = configuration.workerScheduler();
         try {
-            Future<Boolean> daemon = workerExecutor.submit(() -> Thread.currentThread().isDaemon());
+            Future<Boolean> workerDaemon = workerExecutor.submit(() -> Thread.currentThread().isDaemon());
+            Future<Boolean> renewalDaemon = workerScheduler.submit(() -> Thread.currentThread().isDaemon());
 
-            assertThat(daemon.get()).isTrue();
+            assertThat(workerDaemon.get()).isTrue();
+            assertThat(renewalDaemon.get()).isTrue();
         } finally {
             workerExecutor.shutdownNow();
+            workerScheduler.shutdownNow();
         }
     }
 

@@ -30,7 +30,13 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalInt;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
@@ -45,6 +51,48 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class MessageJobRecoveryTest {
+
+    @Test
+    void does_not_call_the_provider_when_reservation_returns_after_ownership_is_revoked() throws Exception {
+        ConversationStore store = mock(ConversationStore.class);
+        MessageWorkClaim claim = claim();
+        when(store.loadHistory(claim.sessionId())).thenReturn(List.of(user()));
+        CountDownLatch reservationStarted = new CountDownLatch(1);
+        CountDownLatch releaseReservation = new CountDownLatch(1);
+        when(store.reserveModelCall(eq(claim), eq(2), any(Instant.class))).thenAnswer(invocation -> {
+            reservationStarted.countDown();
+            try {
+                releaseReservation.await();
+            } catch (InterruptedException exception) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException(exception);
+            }
+            return OptionalInt.of(1);
+        });
+        AtomicInteger providerRequests = new AtomicInteger();
+        ConversationModel model = model(TEST_ROUTE_ID, (request, reservation, usage) -> {
+            reservation.reserve();
+            providerRequests.incrementAndGet();
+            return result(new ModelReply.Text("response"));
+        });
+        AtomicBoolean owned = new AtomicBoolean(true);
+        ExecutorService processorExecutor = Executors.newSingleThreadExecutor();
+        try {
+            Future<MessageJobProcessingResult> processing = processorExecutor.submit(() ->
+                    service(store, model, catalog()).process(claim, owned::get));
+            assertThat(reservationStarted.await(5, TimeUnit.SECONDS)).isTrue();
+
+            owned.set(false);
+            releaseReservation.countDown();
+
+            assertThat(processing.get(5, TimeUnit.SECONDS)).isEqualTo(MessageJobProcessingResult.OWNERSHIP_LOST);
+            assertThat(providerRequests).hasValue(0);
+            verify(store, Mockito.never()).append(any(), any(), any(Instant.class));
+        } finally {
+            releaseReservation.countDown();
+            processorExecutor.shutdownNow();
+        }
+    }
 
     @Test
     void completes_invalid_history_without_a_reservation_or_reclaimable_work() {

@@ -297,6 +297,67 @@ class MessageJobWorkerTest {
     }
 
     @Test
+    void interrupts_and_retires_a_running_renewal_during_shutdown_handoff() throws Exception {
+        MessageWorkClaim activeClaim = claim("active", "session");
+        ConversationStore store = mock(ConversationStore.class);
+        when(store.claimNext(any(String.class), any(Duration.class), org.mockito.ArgumentMatchers.<Set<SessionId>>any()))
+                .thenReturn(Optional.of(activeClaim), Optional.empty());
+        CountDownLatch workflowStarted = new CountDownLatch(1);
+        CountDownLatch releaseWorkflow = new CountDownLatch(1);
+        CountDownLatch renewalStarted = new CountDownLatch(1);
+        CountDownLatch blockRenewal = new CountDownLatch(1);
+        CountDownLatch renewalInterrupted = new CountDownLatch(1);
+        CountDownLatch shutdownCallback = new CountDownLatch(1);
+        AtomicReference<WorkGuard> activeGuard = new AtomicReference<>();
+        when(store.extendClaim(activeClaim, Duration.ofSeconds(1))).thenAnswer(invocation -> {
+            renewalStarted.countDown();
+            try {
+                blockRenewal.await();
+            } catch (InterruptedException exception) {
+                renewalInterrupted.countDown();
+                Thread.currentThread().interrupt();
+                return false;
+            }
+            return true;
+        });
+        MessageJobPort jobs = (claim, guard) -> {
+            activeGuard.set(guard);
+            workflowStarted.countDown();
+            try {
+                releaseWorkflow.await();
+            } catch (InterruptedException exception) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException(exception);
+            }
+            return MessageJobProcessingResult.COMPLETED;
+        };
+        ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
+        ExecutorService workerExecutor = Executors.newSingleThreadExecutor();
+        WorkerProperties properties = new WorkerProperties(Duration.ofSeconds(1), Duration.ofMillis(10), Duration.ofMillis(10), 1);
+        MessageJobWorker worker = new MessageJobWorker(store, jobs, properties, Clock.fixed(Instant.EPOCH, ZoneOffset.UTC),
+                scheduler, workerExecutor, "worker", new NoOpConversationTelemetry());
+        try {
+            worker.start();
+            assertThat(workflowStarted.await(5, TimeUnit.SECONDS)).isTrue();
+            assertThat(renewalStarted.await(5, TimeUnit.SECONDS)).isTrue();
+
+            worker.stop(shutdownCallback::countDown);
+
+            assertThat(renewalInterrupted.await(250, TimeUnit.MILLISECONDS)).isTrue();
+            assertThat(activeGuard.get().stillOwned()).isFalse();
+            releaseWorkflow.countDown();
+            assertThat(shutdownCallback.await(5, TimeUnit.SECONDS)).isTrue();
+            assertThat(scheduler.awaitTermination(5, TimeUnit.SECONDS)).isTrue();
+            assertThat(workerExecutor.awaitTermination(5, TimeUnit.SECONDS)).isTrue();
+        } finally {
+            releaseWorkflow.countDown();
+            worker.stop();
+            scheduler.shutdownNow();
+            workerExecutor.shutdownNow();
+        }
+    }
+
+    @Test
     void does_not_grant_ownership_when_shutdown_handoff_races_confirmation() throws Exception {
         MessageWorkClaim claim = claim("active", "session");
         ConversationStore store = mock(ConversationStore.class);

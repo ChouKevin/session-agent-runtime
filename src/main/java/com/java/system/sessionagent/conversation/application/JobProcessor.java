@@ -455,6 +455,9 @@ public final class JobProcessor implements MessageJobPort {
         if (reserved.isEmpty()) {
             throw new BudgetExhausted();
         }
+        if (!guard.stillOwned()) {
+            throw new StaleWorkClaimException();
+        }
         state.setOrdinal(reserved.getAsInt());
         return reserved.getAsInt();
     }
