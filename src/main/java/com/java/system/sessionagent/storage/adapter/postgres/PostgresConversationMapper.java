@@ -141,6 +141,7 @@ public interface PostgresConversationMapper extends BaseMapper<PostgresConversat
                       select 1 from message_job working
                       where working.session_id = candidate.session_id
                         and working.message_job_id <> candidate.message_job_id and working.status = 'WORKING')
+                  and candidate.session_id != all(#{excludedSessionIds}::uuid[])
                 order by candidate.available_at, candidate.created_at, candidate.message_job_id
                 for update skip locked limit 1)
             update message_job job set status = 'WORKING', worker_id = #{workerId},
@@ -152,7 +153,8 @@ public interface PostgresConversationMapper extends BaseMapper<PostgresConversat
     @Options(flushCache = Options.FlushCachePolicy.TRUE, useCache = false)
     List<WorkClaimRow> claimNext(
             @Param("workerId") String workerId,
-            @Param("leaseMilliseconds") long leaseMilliseconds);
+            @Param("leaseMilliseconds") long leaseMilliseconds,
+            @Param("excludedSessionIds") String[] excludedSessionIds);
 
     @Update("""
             update message_job set locked_until = clock_timestamp() + (#{leaseMilliseconds} * interval '1 millisecond')

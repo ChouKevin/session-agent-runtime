@@ -483,7 +483,7 @@ public final class JobProcessor implements MessageJobPort {
                 .toList();
         messages.add(new ConversationStore.AssistantToolCallsData(reply.message(), calls));
         for (ToolRequest request : reply.requests()) {
-            if (!guard.stillOwned()) {
+            if (!guard.confirmOwnership()) {
                 return List.of();
             }
             messages.add(executeTool(claim, ordinal, tools, request));

@@ -78,7 +78,13 @@ public record RuntimeProperties(
             @DefaultValue("1s") Duration pollDelay,
             @DefaultValue("30s") Duration lockDuration,
             @PositiveOrZero @DefaultValue("3") int transientRetries,
-            @DefaultValue("60s") Duration maximumBackoff) {
+            @DefaultValue("60s") Duration maximumBackoff,
+            @Positive @DefaultValue("4") int concurrency) {
+        public Worker(Duration pollDelay, Duration lockDuration, int transientRetries, Duration maximumBackoff) {
+            this(pollDelay, lockDuration, transientRetries, maximumBackoff, 4); // cs-allow compatibility constructor
+        }
+
+        @ConstructorBinding
         public Worker {
             Assert.notNull(pollDelay, "Worker poll delay must not be null");
             Assert.notNull(lockDuration, "Worker lock duration must not be null");
@@ -86,6 +92,7 @@ public record RuntimeProperties(
             Assert.isTrue(!pollDelay.isNegative() && !pollDelay.isZero(), "Worker poll delay must be positive");
             Assert.isTrue(!lockDuration.isNegative() && !lockDuration.isZero(), "Worker lock duration must be positive");
             Assert.isTrue(!maximumBackoff.isNegative() && !maximumBackoff.isZero(), "Worker maximum backoff must be positive");
+            Assert.isTrue(concurrency > 0, "Worker concurrency must be positive");
         }
     }
 

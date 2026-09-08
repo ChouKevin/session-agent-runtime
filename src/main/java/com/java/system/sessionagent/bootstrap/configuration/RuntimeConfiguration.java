@@ -83,6 +83,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 
@@ -489,7 +490,8 @@ public class RuntimeConfiguration {
     @Bean
     WorkerProperties workerProperties(RuntimeProperties properties) {
         Duration renewalInterval = properties.worker().lockDuration().dividedBy(3);
-        return new WorkerProperties(properties.worker().lockDuration(), renewalInterval);
+        return new WorkerProperties(properties.worker().lockDuration(), renewalInterval,
+                properties.worker().pollDelay(), properties.worker().concurrency());
     }
 
     @Bean
@@ -505,6 +507,11 @@ public class RuntimeConfiguration {
         return Executors.newSingleThreadScheduledExecutor();
     }
 
+    @Bean(destroyMethod = "shutdown")
+    ExecutorService workerExecutor(WorkerProperties workerProperties) {
+        return Executors.newFixedThreadPool(workerProperties.concurrency());
+    }
+
     @Bean
     MessageJobWorker messageJobWorker(
             ConversationStore conversationStore,
@@ -512,8 +519,9 @@ public class RuntimeConfiguration {
             WorkerProperties workerProperties,
             Clock runtimeClock,
             ScheduledExecutorService workerScheduler,
+            ExecutorService workerExecutor,
             ConversationTelemetry conversationTelemetry) {
         return new MessageJobWorker(conversationStore, messageJobService, workerProperties, runtimeClock, workerScheduler,
-                "session-agent-worker", conversationTelemetry);
+                workerExecutor, "session-agent-worker", conversationTelemetry);
     }
 }

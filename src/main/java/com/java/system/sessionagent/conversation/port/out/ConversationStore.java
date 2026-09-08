@@ -26,6 +26,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalInt;
+import java.util.Set;
 
 public interface ConversationStore {
 
@@ -36,7 +37,14 @@ public interface ConversationStore {
 
     Optional<ModelSelection> selectModel(SessionId sessionId, ModelSelection selection);
 
-    Optional<MessageWorkClaim> claimNext(String workerId, Duration leaseDuration);
+    Optional<MessageWorkClaim> claimNext(
+            String workerId,
+            Duration leaseDuration,
+            Set<SessionId> excludedSessionIds);
+
+    default Optional<MessageWorkClaim> claimNext(String workerId, Duration leaseDuration) {
+        return claimNext(workerId, leaseDuration, Set.of());
+    }
 
     boolean extendClaim(MessageWorkClaim claim, Duration leaseDuration);
 

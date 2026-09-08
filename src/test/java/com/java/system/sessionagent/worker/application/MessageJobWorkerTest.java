@@ -10,6 +10,7 @@ import com.java.system.sessionagent.conversation.domain.SessionId;
 import com.java.system.sessionagent.conversation.port.in.MessageJobPort;
 import com.java.system.sessionagent.conversation.port.in.MessageJobProcessingResult;
 import com.java.system.sessionagent.conversation.port.out.ConversationStore;
+import com.java.system.sessionagent.conversation.port.out.NoOpConversationTelemetry;
 import com.java.system.sessionagent.worker.configuration.WorkerProperties;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -20,12 +21,23 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.concurrent.atomic.AtomicReference;
-import java.util.stream.Collectors;
+import java.util.Set;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.stream.Collectors;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -40,7 +52,8 @@ class MessageJobWorkerTest {
     @Test
     void reports_empty_when_no_claim_is_available() {
         ConversationStore store = mock(ConversationStore.class);
-        when(store.claimNext(any(String.class), any(Duration.class))).thenReturn(Optional.empty());
+        when(store.claimNext(any(String.class), any(Duration.class), org.mockito.ArgumentMatchers.<Set<SessionId>>any()))
+                .thenReturn(Optional.empty());
         MessageJobWorker worker = worker(store, mock(MessageJobPort.class), mock(ScheduledExecutorService.class));
 
         assertThat(worker.poll()).isFalse();
@@ -52,7 +65,8 @@ class MessageJobWorkerTest {
         MessageWorkClaim claim = new MessageWorkClaim(new MessageJobId("job"), new SessionId("session"),
                 new ModelSelection("test", "v1:test"), "worker", 1,
                 Instant.parse("2026-08-31T00:00:00Z"), Instant.parse("2026-08-31T00:01:00Z"));
-        when(store.claimNext(any(String.class), any(Duration.class))).thenReturn(Optional.of(claim));
+        when(store.claimNext(any(String.class), any(Duration.class), org.mockito.ArgumentMatchers.<Set<SessionId>>any()))
+                .thenReturn(Optional.of(claim));
         ScheduledExecutorService scheduler = mock(ScheduledExecutorService.class);
         ScheduledFuture<?> renewal = mock(ScheduledFuture.class);
         org.mockito.Mockito.doReturn(renewal).when(scheduler).scheduleAtFixedRate(any(Runnable.class),
@@ -66,12 +80,175 @@ class MessageJobWorkerTest {
     }
 
     @Test
+    void does_not_start_a_second_local_workflow_for_an_occupied_session() throws Exception {
+        ConversationStore store = mock(ConversationStore.class);
+        MessageWorkClaim firstClaim = claim("first", "session");
+        MessageWorkClaim secondClaim = claim("second", "session");
+        when(store.claimNext(any(String.class), any(Duration.class), org.mockito.ArgumentMatchers.<Set<SessionId>>any()))
+                .thenReturn(Optional.of(firstClaim), Optional.of(secondClaim));
+        ScheduledExecutorService scheduler = mock(ScheduledExecutorService.class);
+        ScheduledFuture<?> renewal = mock(ScheduledFuture.class);
+        org.mockito.Mockito.doReturn(renewal).when(scheduler).scheduleAtFixedRate(any(Runnable.class),
+                org.mockito.ArgumentMatchers.anyLong(), org.mockito.ArgumentMatchers.anyLong(), any());
+        CountDownLatch firstStarted = new CountDownLatch(1);
+        CountDownLatch releaseFirst = new CountDownLatch(1);
+        AtomicInteger activeWorkflows = new AtomicInteger();
+        AtomicInteger maximumActiveWorkflows = new AtomicInteger();
+        MessageJobPort jobs = (claim, guard) -> {
+            int active = activeWorkflows.incrementAndGet();
+            maximumActiveWorkflows.accumulateAndGet(active, Math::max);
+            if (claim.messageJobId().equals(firstClaim.messageJobId())) {
+                firstStarted.countDown();
+                try {
+                    releaseFirst.await();
+                } catch (InterruptedException exception) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException(exception);
+                }
+            }
+            activeWorkflows.decrementAndGet();
+            return MessageJobProcessingResult.COMPLETED;
+        };
+        MessageJobWorker worker = worker(store, jobs, scheduler);
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            Future<Boolean> first = executor.submit(worker::poll);
+            assertThat(firstStarted.await(5, TimeUnit.SECONDS)).isTrue();
+
+            Future<Boolean> second = executor.submit(worker::poll);
+            assertThat(second.get(5, TimeUnit.SECONDS)).isFalse();
+            assertThat(maximumActiveWorkflows).hasValue(1);
+
+            releaseFirst.countDown();
+            assertThat(first.get(5, TimeUnit.SECONDS)).isTrue();
+        } finally {
+            releaseFirst.countDown();
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    void releases_local_occupancy_when_renewal_scheduling_fails() {
+        ConversationStore store = mock(ConversationStore.class);
+        MessageWorkClaim firstClaim = claim("first", "session");
+        MessageWorkClaim secondClaim = claim("second", "session");
+        when(store.claimNext(any(String.class), any(Duration.class), org.mockito.ArgumentMatchers.<Set<SessionId>>any()))
+                .thenReturn(Optional.of(firstClaim), Optional.of(secondClaim));
+        ScheduledExecutorService scheduler = mock(ScheduledExecutorService.class);
+        ScheduledFuture<?> renewal = mock(ScheduledFuture.class);
+        org.mockito.Mockito.doThrow(new RejectedExecutionException("scheduler stopped")).doReturn(renewal)
+                .when(scheduler).scheduleAtFixedRate(any(Runnable.class), org.mockito.ArgumentMatchers.anyLong(),
+                        org.mockito.ArgumentMatchers.anyLong(), any());
+        MessageJobPort jobs = mock(MessageJobPort.class);
+        when(jobs.process(org.mockito.Mockito.eq(secondClaim), any())).thenReturn(MessageJobProcessingResult.COMPLETED);
+        MessageJobWorker worker = worker(store, jobs, scheduler);
+
+        assertThatThrownBy(worker::poll).isInstanceOf(RejectedExecutionException.class);
+        assertThat(worker.poll()).isTrue();
+
+        verify(jobs).process(org.mockito.Mockito.eq(secondClaim), any());
+        verify(renewal).cancel(false);
+    }
+
+    @Test
+    void starts_configured_loops_and_recovers_a_failed_loop_before_shutdown_finishes_its_active_work() throws Exception {
+        ConversationStore store = mock(ConversationStore.class);
+        MessageWorkClaim firstClaim = claim("first", "first-session");
+        MessageWorkClaim secondClaim = claim("second", "second-session");
+        MessageWorkClaim thirdClaim = claim("third", "third-session");
+        MessageWorkClaim fourthClaim = claim("fourth", "fourth-session");
+        MessageWorkClaim recoveredClaim = claim("recovered", "recovered-session");
+        AtomicLong claimAttempts = new AtomicLong();
+        AtomicLong failedLoopId = new AtomicLong(-1L);
+        AtomicBoolean recoveredClaimIssued = new AtomicBoolean();
+        when(store.claimNext(any(String.class), any(Duration.class), org.mockito.ArgumentMatchers.<Set<SessionId>>any()))
+                .thenAnswer(invocation -> {
+                    long claimAttempt = claimAttempts.getAndIncrement();
+                    if (claimAttempt < 4) {
+                        return Optional.of(List.of(firstClaim, secondClaim, thirdClaim, fourthClaim).get((int) claimAttempt));
+                    }
+                    if (failedLoopId.get() == Thread.currentThread().threadId() && recoveredClaimIssued.compareAndSet(false, true)) {
+                        return Optional.of(recoveredClaim);
+                    }
+                    return Optional.empty();
+                });
+        CountDownLatch allStarted = new CountDownLatch(4);
+        CountDownLatch renewalObserved = new CountDownLatch(4);
+        CountDownLatch releaseInitialWork = new CountDownLatch(1);
+        CountDownLatch recoveredStarted = new CountDownLatch(1);
+        CountDownLatch releaseRecoveredWork = new CountDownLatch(1);
+        AtomicInteger activeWorkflows = new AtomicInteger();
+        AtomicInteger maximumActiveWorkflows = new AtomicInteger();
+        AtomicInteger processed = new AtomicInteger();
+        MessageJobPort jobs = (claim, guard) -> {
+            int active = activeWorkflows.incrementAndGet();
+            maximumActiveWorkflows.accumulateAndGet(active, Math::max);
+            processed.incrementAndGet();
+            try {
+                if (claim.messageJobId().equals(recoveredClaim.messageJobId())) {
+                    assertThat(Thread.currentThread().threadId()).isEqualTo(failedLoopId.get());
+                    recoveredStarted.countDown();
+                    releaseRecoveredWork.await();
+                    return MessageJobProcessingResult.COMPLETED;
+                }
+                allStarted.countDown();
+                releaseInitialWork.await();
+                if (claim.messageJobId().equals(firstClaim.messageJobId())) {
+                    failedLoopId.set(Thread.currentThread().threadId());
+                    throw new IllegalStateException("processing failed once");
+                }
+            } catch (InterruptedException exception) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException(exception);
+            } finally {
+                activeWorkflows.decrementAndGet();
+            }
+            return MessageJobProcessingResult.COMPLETED;
+        };
+        ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
+        ExecutorService workerExecutor = Executors.newFixedThreadPool(4);
+        WorkerProperties properties = new WorkerProperties(Duration.ofMillis(100), Duration.ofMillis(10), Duration.ofMillis(10), 4);
+        MessageJobWorker worker = new MessageJobWorker(store, jobs, properties, Clock.fixed(Instant.EPOCH, ZoneOffset.UTC),
+                scheduler, workerExecutor, "worker", new NoOpConversationTelemetry());
+        try {
+            org.mockito.Mockito.doAnswer(invocation -> {
+                renewalObserved.countDown();
+                return true;
+            }).when(store).extendClaim(any(MessageWorkClaim.class), any(Duration.class));
+
+            worker.start();
+
+            assertThat(allStarted.await(5, TimeUnit.SECONDS)).isTrue();
+            assertThat(renewalObserved.await(5, TimeUnit.SECONDS)).isTrue();
+            assertThat(maximumActiveWorkflows).hasValue(4);
+            assertThat(worker.isRunning()).isTrue();
+
+            releaseInitialWork.countDown();
+            assertThat(recoveredStarted.await(5, TimeUnit.SECONDS)).isTrue();
+            assertThat(recoveredClaimIssued).isTrue();
+
+            worker.stop();
+            releaseRecoveredWork.countDown();
+            assertThat(workerExecutor.awaitTermination(5, TimeUnit.SECONDS)).isTrue();
+            assertThat(processed).hasValue(5);
+            assertThat(worker.isRunning()).isFalse();
+        } finally {
+            releaseInitialWork.countDown();
+            releaseRecoveredWork.countDown();
+            worker.stop();
+            scheduler.shutdownNow();
+            workerExecutor.shutdownNow();
+        }
+    }
+
+    @Test
     void reports_lost_ownership_to_processing_when_the_heartbeat_is_rejected() {
         ConversationStore store = mock(ConversationStore.class);
         MessageWorkClaim claim = new MessageWorkClaim(new MessageJobId("job"), new SessionId("session"),
                 new ModelSelection("test", "v1:test"), "worker", 1,
                 Instant.parse("2026-08-31T00:00:00Z"), Instant.parse("2026-08-31T00:01:00Z"));
-        when(store.claimNext(any(String.class), any(Duration.class))).thenReturn(Optional.of(claim));
+        when(store.claimNext(any(String.class), any(Duration.class), org.mockito.ArgumentMatchers.<Set<SessionId>>any()))
+                .thenReturn(Optional.of(claim));
         when(store.extendClaim(claim, Duration.ofSeconds(30))).thenReturn(false);
         ScheduledExecutorService scheduler = mock(ScheduledExecutorService.class);
         ScheduledFuture<?> renewal = mock(ScheduledFuture.class);
@@ -120,7 +297,8 @@ class MessageJobWorkerTest {
         MessageWorkClaim claim = new MessageWorkClaim(new MessageJobId("job"), new SessionId("session"),
                 new ModelSelection("test", "v1:test"), "worker", 1,
                 Instant.parse("2026-08-31T00:00:00Z"), Instant.parse("2026-08-31T00:01:00Z"));
-        when(store.claimNext(any(String.class), any(Duration.class))).thenReturn(Optional.of(claim));
+        when(store.claimNext(any(String.class), any(Duration.class), org.mockito.ArgumentMatchers.<Set<SessionId>>any()))
+                .thenReturn(Optional.of(claim));
         ScheduledExecutorService scheduler = mock(ScheduledExecutorService.class);
         ScheduledFuture<?> renewal = mock(ScheduledFuture.class);
         org.mockito.Mockito.doReturn(renewal).when(scheduler).scheduleAtFixedRate(any(Runnable.class),
@@ -158,5 +336,11 @@ class MessageJobWorkerTest {
 
     private static MessageJobWorker worker(ConversationStore store, MessageJobPort jobs, ScheduledExecutorService scheduler) {
         return new MessageJobWorker(store, jobs, new WorkerProperties(), Clock.fixed(Instant.EPOCH, ZoneOffset.UTC), scheduler, "worker");
+    }
+
+    private static MessageWorkClaim claim(String jobId, String sessionId) {
+        return new MessageWorkClaim(new MessageJobId(jobId), new SessionId(sessionId),
+                new ModelSelection("test", "v1:test"), "worker", 1,
+                Instant.parse("2026-08-31T00:00:00Z"), Instant.parse("2026-08-31T00:01:00Z"));
     }
 }

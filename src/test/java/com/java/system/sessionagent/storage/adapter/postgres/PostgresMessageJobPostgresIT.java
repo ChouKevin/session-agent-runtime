@@ -4,13 +4,35 @@ import com.java.system.sessionagent.conversation.domain.IncomingMessage;
 import com.java.system.sessionagent.conversation.domain.JobStatus;
 import com.java.system.sessionagent.conversation.domain.MessageReceipt;
 import com.java.system.sessionagent.conversation.domain.MessageWorkClaim;
-import com.java.system.sessionagent.conversation.domain.ModelRouteId;
+import com.java.system.sessionagent.conversation.domain.ModelCallResult;
 import com.java.system.sessionagent.conversation.domain.ModelDescriptor;
+import com.java.system.sessionagent.conversation.domain.ModelReply.UseTools;
+import com.java.system.sessionagent.conversation.domain.ModelRequest;
+import com.java.system.sessionagent.conversation.domain.ModelRouteId;
 import com.java.system.sessionagent.conversation.domain.ModelSelection;
+import com.java.system.sessionagent.conversation.domain.ModelUsage;
 import com.java.system.sessionagent.conversation.domain.SessionId;
+import com.java.system.sessionagent.conversation.domain.ToolCallId;
+import com.java.system.sessionagent.conversation.domain.ToolRequest;
+import com.java.system.sessionagent.conversation.application.JobProcessor;
+import com.java.system.sessionagent.conversation.application.MessageJobRetryPolicy;
+import com.java.system.sessionagent.conversation.port.in.MessageJobPort;
+import com.java.system.sessionagent.conversation.port.in.MessageJobProcessingResult;
+import com.java.system.sessionagent.conversation.port.out.ConversationModel;
+import com.java.system.sessionagent.conversation.port.out.ConversationModels;
 import com.java.system.sessionagent.conversation.port.out.ConversationStore;
+import com.java.system.sessionagent.conversation.port.out.ModelCallReservation;
 import com.java.system.sessionagent.conversation.port.out.ModelRouteMismatchException;
+import com.java.system.sessionagent.conversation.port.out.NoOpConversationTelemetry;
 import com.java.system.sessionagent.conversation.port.out.StaleWorkClaimException;
+import com.java.system.sessionagent.tool.domain.ToolName;
+import com.java.system.sessionagent.tool.port.ToolBinding;
+import com.java.system.sessionagent.tool.port.ToolCatalog;
+import com.java.system.sessionagent.tool.port.ToolDefinition;
+import com.java.system.sessionagent.tool.port.ToolOutput;
+import com.java.system.sessionagent.tool.port.ToolSnapshot;
+import com.java.system.sessionagent.worker.application.MessageJobWorker;
+import com.java.system.sessionagent.worker.configuration.WorkerProperties;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.AfterEach;
@@ -28,6 +50,7 @@ import java.time.ZoneOffset;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.Objects;
@@ -37,6 +60,11 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -102,6 +130,167 @@ class PostgresMessageJobPostgresIT {
         assertThat(reservations).containsExactlyInAnyOrder(OptionalInt.of(1), OptionalInt.empty());
         assertThat(jdbcTemplate.queryForObject("select model_calls from message_job where message_job_id = ?", Integer.class,
                 UUID.fromString(receipt.messageJobId().value()))).isEqualTo(1);
+    }
+
+    @Test
+    void skips_a_locked_or_backed_off_session_head_to_another_session() throws Exception {
+        ConversationStore store = store();
+        MessageReceipt firstA = receive(store, new IncomingMessage("a-thread", "alice", "a-first", "one"));
+        MessageReceipt secondA = receive(store, new IncomingMessage("a-thread", "alice", "a-second", "two"));
+        MessageReceipt b = receive(store, new IncomingMessage("b-thread", "alice", "b", "three"));
+        MessageReceipt c = receive(store, new IncomingMessage("c-thread", "alice", "c", "four"));
+        UUID firstAJobId = UUID.fromString(firstA.messageJobId().value());
+        jdbcTemplate.update("update message_job set available_at = clock_timestamp() - interval '10 seconds' where message_job_id = ?", firstAJobId);
+        jdbcTemplate.update("update message_job set available_at = clock_timestamp() - interval '5 seconds' where message_job_id = ?",
+                UUID.fromString(b.messageJobId().value()));
+
+        try (Connection connection = dataSource().getConnection();
+                PreparedStatement lock = connection.prepareStatement(
+                        "select message_job_id from message_job where message_job_id = ? for update")) {
+            connection.setAutoCommit(false);
+            lock.setObject(1, firstAJobId);
+            lock.executeQuery();
+
+            MessageWorkClaim afterLockedHead = store.claimNext("worker", Duration.ofSeconds(30)).orElseThrow();
+
+            assertThat(afterLockedHead.sessionId()).isEqualTo(b.sessionId());
+            connection.rollback();
+        }
+
+        jdbcTemplate.update("update message_job set available_at = clock_timestamp() + interval '1 hour' where message_job_id = ?", firstAJobId);
+        MessageWorkClaim afterBackoffHead = store.claimNext("worker", Duration.ofSeconds(30)).orElseThrow();
+
+        assertThat(afterBackoffHead.sessionId()).isEqualTo(c.sessionId());
+        assertThat(store.readJob(secondA.messageJobId()).orElseThrow().status()).isEqualTo(JobStatus.PENDING);
+    }
+
+    @Test
+    void skips_an_expired_locally_occupied_session_and_claims_another_session() throws Exception {
+        ConversationStore store = store();
+        MessageReceipt firstReceipt = receive(store, new IncomingMessage("thread", "alice", "first", "one"));
+        MessageReceipt secondReceipt = receive(store, new IncomingMessage("other-thread", "alice", "second", "two"));
+        CountDownLatch firstToolStarted = new CountDownLatch(1);
+        CountDownLatch firstProcessorFinished = new CountDownLatch(1);
+        CountDownLatch secondStarted = new CountDownLatch(1);
+        CountDownLatch releaseFirstTool = new CountDownLatch(1);
+        CountDownLatch releaseFirstWorkflow = new CountDownLatch(1);
+        AtomicInteger firstToolCalls = new AtomicInteger();
+        AtomicInteger laterToolCalls = new AtomicInteger();
+        AtomicReference<MessageJobProcessingResult> firstResult = new AtomicReference<>();
+        AtomicReference<SessionId> secondClaimedSession = new AtomicReference<>();
+        MessageJobPort processor = processor(store, firstToolStarted, releaseFirstTool, firstToolCalls, laterToolCalls);
+        MessageJobPort jobs = (claim, guard) -> {
+            if (claim.sessionId().equals(firstReceipt.sessionId())) {
+                MessageJobProcessingResult result = processor.process(claim, guard);
+                firstResult.set(result);
+                firstProcessorFinished.countDown();
+                try {
+                    releaseFirstWorkflow.await();
+                } catch (InterruptedException exception) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException(exception);
+                }
+                return result;
+            } else {
+                secondClaimedSession.set(claim.sessionId());
+                secondStarted.countDown();
+            }
+            return MessageJobProcessingResult.COMPLETED;
+        };
+        ScheduledExecutorService renewalScheduler = Executors.newSingleThreadScheduledExecutor();
+        ExecutorService workerExecutor = Executors.newSingleThreadExecutor();
+        ExecutorService invocations = Executors.newFixedThreadPool(2);
+        MessageJobWorker worker = new MessageJobWorker(store, jobs,
+                new WorkerProperties(Duration.ofSeconds(30), Duration.ofSeconds(10), Duration.ofSeconds(1), 4),
+                Clock.systemUTC(), renewalScheduler, workerExecutor, "worker", new NoOpConversationTelemetry());
+        try {
+            Future<Boolean> first = invocations.submit(worker::poll);
+            assertThat(firstToolStarted.await(5, TimeUnit.SECONDS)).isTrue();
+            jdbcTemplate.update("update message_job set locked_until = clock_timestamp() - interval '1 millisecond' where message_job_id = ?",
+                    UUID.fromString(firstReceipt.messageJobId().value()));
+
+            releaseFirstTool.countDown();
+            assertThat(firstProcessorFinished.await(5, TimeUnit.SECONDS)).isTrue();
+            assertThat(firstResult).hasValue(MessageJobProcessingResult.OWNERSHIP_LOST);
+            assertThat(firstToolCalls).hasValue(1);
+            assertThat(laterToolCalls).hasValue(0);
+            assertThat(store.loadHistory(firstReceipt.sessionId())).hasSize(1);
+
+            Future<Boolean> second = invocations.submit(worker::poll);
+            assertThat(secondStarted.await(5, TimeUnit.SECONDS)).isTrue();
+            assertThat(second.get(5, TimeUnit.SECONDS)).isTrue();
+            assertThat(secondClaimedSession).hasValue(secondReceipt.sessionId());
+            assertThat(store.readJob(firstReceipt.messageJobId()).orElseThrow().status()).isEqualTo(JobStatus.WORKING);
+
+            releaseFirstWorkflow.countDown();
+            assertThat(first.get(5, TimeUnit.SECONDS)).isTrue();
+        } finally {
+            releaseFirstTool.countDown();
+            releaseFirstWorkflow.countDown();
+            invocations.shutdownNow();
+            workerExecutor.shutdownNow();
+            renewalScheduler.shutdownNow();
+        }
+    }
+
+    private static MessageJobPort processor(
+            ConversationStore store,
+            CountDownLatch firstToolStarted,
+            CountDownLatch releaseFirstTool,
+            AtomicInteger firstToolCalls,
+            AtomicInteger laterToolCalls) {
+        ModelRouteId routeId = new ModelRouteId("test");
+        ConversationModel model = new ConversationModel() {
+            @Override
+            public ModelRouteId routeId() {
+                return routeId;
+            }
+
+            @Override
+            public ModelCallResult respond(
+                    ModelRequest request,
+                    ModelCallReservation reservation,
+                    Consumer<ModelUsage> usageObserver) {
+                reservation.reserve();
+                return new ModelCallResult(new UseTools(Optional.empty(), List.of(
+                        new ToolRequest(new ToolCallId("first"), new ToolName("first"), Map.of()),
+                        new ToolRequest(new ToolCallId("second"), new ToolName("second"), Map.of()))), Optional.empty());
+            }
+        };
+        ConversationModels models = new ConversationModels() {
+            @Override
+            public Optional<ModelSelection> findSelection(String modelName) {
+                return Optional.of(TEST_SELECTION);
+            }
+
+            @Override
+            public ModelSelection defaultSelection() {
+                return TEST_SELECTION;
+            }
+
+            @Override
+            public Optional<ConversationModel> resolve(ModelSelection selection) {
+                return Optional.of(model);
+            }
+        };
+        ToolCatalog catalog = () -> new ToolSnapshot(List.of(
+                new ToolBinding(new ToolDefinition(new ToolName("first"), "first", Map.of()), arguments -> {
+                    firstToolCalls.incrementAndGet();
+                    firstToolStarted.countDown();
+                    try {
+                        releaseFirstTool.await();
+                    } catch (InterruptedException exception) {
+                        Thread.currentThread().interrupt();
+                        throw new IllegalStateException(exception);
+                    }
+                    return new ToolOutput(false, Map.of("first", true));
+                }),
+                new ToolBinding(new ToolDefinition(new ToolName("second"), "second", Map.of()), arguments -> {
+                    laterToolCalls.incrementAndGet();
+                    return new ToolOutput(false, Map.of("second", true));
+                })));
+        return new JobProcessor(store, models, catalog, Clock.systemUTC(), 2,
+                new MessageJobRetryPolicy(3, Duration.ofSeconds(60)), new NoOpConversationTelemetry());
     }
 
     @Test

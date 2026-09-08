@@ -62,6 +62,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalInt;
+import java.util.Set;
 import java.util.UUID;
 import java.util.function.Supplier;
 
@@ -186,12 +187,24 @@ public final class PostgresConversationStore implements ConversationStore {
 
     @Override
     public Optional<MessageWorkClaim> claimNext(String workerId, Duration leaseDuration) {
+        return claimNext(workerId, leaseDuration, Set.of());
+    }
+
+    @Override
+    public Optional<MessageWorkClaim> claimNext(
+            String workerId,
+            Duration leaseDuration,
+            Set<SessionId> excludedSessionIds) {
         Assert.hasText(workerId, "Worker ID must not be blank");
         Duration requiredLeaseDuration = Objects.requireNonNull(leaseDuration, "Lease duration must not be null");
+        Set<SessionId> requiredExcludedSessionIds = Objects.requireNonNull(
+                excludedSessionIds, "Excluded session IDs must not be null");
         Assert.isTrue(!requiredLeaseDuration.isNegative() && !requiredLeaseDuration.isZero(), "Lease duration must be positive");
         try {
             Optional<MessageWorkClaim> claim = transactionTemplate.execute(status -> mapper.claimNext(
-                    workerId, positiveLeaseMilliseconds(requiredLeaseDuration)).stream()
+                    workerId, positiveLeaseMilliseconds(requiredLeaseDuration), requiredExcludedSessionIds.stream()
+                            .map(SessionId::value)
+                            .toArray(String[]::new)).stream()
                     .map(row -> new MessageWorkClaim(
                             new MessageJobId(row.messageJobId().toString()), new SessionId(row.sessionId().toString()),
                             new ModelSelection(row.modelKey(), row.modelFingerprint()), row.workerId(), row.claimNumber(),

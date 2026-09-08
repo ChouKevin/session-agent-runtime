@@ -4,4 +4,8 @@ package com.java.system.sessionagent.conversation.port.in;
 public interface WorkGuard {
 
     boolean stillOwned();
+
+    default boolean confirmOwnership() {
+        return stillOwned();
+    }
 }
