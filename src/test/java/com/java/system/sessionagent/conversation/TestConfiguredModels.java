@@ -30,4 +30,25 @@ public final class TestConfiguredModels {
             }
         };
     }
+
+    public static ConversationModels withModel(ConversationModel conversationModel) {
+        ConversationModel requiredModel = java.util.Objects.requireNonNull(conversationModel, "Conversation model must not be null");
+        ModelSelection selection = new ModelSelection("test", "v1:test");
+        return new ConversationModels() {
+            @Override
+            public ModelSelection defaultSelection() {
+                return selection;
+            }
+
+            @Override
+            public Optional<ModelSelection> findSelection(String key) {
+                return selection.model().equals(key) ? Optional.of(selection) : Optional.empty();
+            }
+
+            @Override
+            public Optional<ConversationModel> resolve(ModelSelection requestedSelection) {
+                return selection.equals(requestedSelection) ? Optional.of(requiredModel) : Optional.empty();
+            }
+        };
+    }
 }

@@ -5,6 +5,7 @@ import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
 import com.java.system.sessionagent.conversation.domain.MessageJobId;
 import com.java.system.sessionagent.conversation.domain.MessageWorkClaim;
+import com.java.system.sessionagent.conversation.domain.ModelSelection;
 import com.java.system.sessionagent.conversation.domain.SessionId;
 import com.java.system.sessionagent.conversation.port.in.MessageJobPort;
 import com.java.system.sessionagent.conversation.port.in.MessageJobProcessingResult;
@@ -48,7 +49,8 @@ class MessageJobWorkerTest {
     @Test
     void rethrows_processing_failure_after_claiming_work() {
         ConversationStore store = mock(ConversationStore.class);
-        MessageWorkClaim claim = new MessageWorkClaim(new MessageJobId("job"), new SessionId("session"), "worker", 1,
+        MessageWorkClaim claim = new MessageWorkClaim(new MessageJobId("job"), new SessionId("session"),
+                new ModelSelection("test", "v1:test"), "worker", 1,
                 Instant.parse("2026-08-31T00:00:00Z"), Instant.parse("2026-08-31T00:01:00Z"));
         when(store.claimNext(any(String.class), any(Duration.class))).thenReturn(Optional.of(claim));
         ScheduledExecutorService scheduler = mock(ScheduledExecutorService.class);
@@ -66,7 +68,8 @@ class MessageJobWorkerTest {
     @Test
     void reports_lost_ownership_to_processing_when_the_heartbeat_is_rejected() {
         ConversationStore store = mock(ConversationStore.class);
-        MessageWorkClaim claim = new MessageWorkClaim(new MessageJobId("job"), new SessionId("session"), "worker", 1,
+        MessageWorkClaim claim = new MessageWorkClaim(new MessageJobId("job"), new SessionId("session"),
+                new ModelSelection("test", "v1:test"), "worker", 1,
                 Instant.parse("2026-08-31T00:00:00Z"), Instant.parse("2026-08-31T00:01:00Z"));
         when(store.claimNext(any(String.class), any(Duration.class))).thenReturn(Optional.of(claim));
         when(store.extendClaim(claim, Duration.ofSeconds(30))).thenReturn(false);
@@ -114,7 +117,8 @@ class MessageJobWorkerTest {
     void reports_the_processing_outcome_without_rereading_mutable_job_state(
             MessageJobProcessingResult processingResult, String expectedEvent, String expectedOutcome, String unexpectedEvent) {
         ConversationStore store = mock(ConversationStore.class);
-        MessageWorkClaim claim = new MessageWorkClaim(new MessageJobId("job"), new SessionId("session"), "worker", 1,
+        MessageWorkClaim claim = new MessageWorkClaim(new MessageJobId("job"), new SessionId("session"),
+                new ModelSelection("test", "v1:test"), "worker", 1,
                 Instant.parse("2026-08-31T00:00:00Z"), Instant.parse("2026-08-31T00:01:00Z"));
         when(store.claimNext(any(String.class), any(Duration.class))).thenReturn(Optional.of(claim));
         ScheduledExecutorService scheduler = mock(ScheduledExecutorService.class);

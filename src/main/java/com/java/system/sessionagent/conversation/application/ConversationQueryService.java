@@ -31,14 +31,6 @@ public final class ConversationQueryService implements ConversationQueryPort {
 
     public ConversationQueryService(
             ConversationStore conversationStore,
-            ConversationModel conversationModel,
-            ToolCatalog toolCatalog,
-            ContextUsageEstimator contextUsageEstimator) {
-        this(conversationStore, fixedModels(conversationModel), toolCatalog, contextUsageEstimator);
-    }
-
-    public ConversationQueryService(
-            ConversationStore conversationStore,
             ConversationModels conversationModels,
             ToolCatalog toolCatalog,
             ContextUsageEstimator contextUsageEstimator) {
@@ -98,26 +90,6 @@ public final class ConversationQueryService implements ConversationQueryPort {
                             conversationModel.descriptor().modelId(), conversationModel.descriptor().contextWindowTokens(), estimate.tokens(),
                             (double) estimate.tokens() / conversationModel.descriptor().contextWindowTokens(), estimate.basis()));
         });
-    }
-
-    private static ConversationModels fixedModels(ConversationModel conversationModel) {
-        ConversationModel requiredModel = Objects.requireNonNull(conversationModel, "Conversation model must not be null");
-        return new ConversationModels() {
-            @Override
-            public ModelSelection defaultSelection() {
-                return new ModelSelection(requiredModel.routeId().value(), "v1:fixed");
-            }
-
-            @Override
-            public Optional<ModelSelection> findSelection(String model) {
-                return Optional.of(new ModelSelection(model, "v1:fixed"));
-            }
-
-            @Override
-            public Optional<ConversationModel> resolve(ModelSelection selection) {
-                return Optional.of(requiredModel);
-            }
-        };
     }
 
     private MessageJobView toJobView(ConversationStore.MessageJobProjection projection) {

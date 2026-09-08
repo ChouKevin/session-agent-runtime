@@ -23,14 +23,4 @@ public record MessageWorkClaim(
         Assert.notNull(lockedUntil, "Lock expiry must not be null");
         Assert.isTrue(lockedUntil.isAfter(claimedAt), "Lock expiry must be after claim time");
     }
-
-    public MessageWorkClaim(
-            MessageJobId messageJobId,
-            SessionId sessionId,
-            String workerId,
-            long claimNumber,
-            Instant claimedAt,
-            Instant lockedUntil) {
-        this(messageJobId, sessionId, new ModelSelection("test", "v1:test"), workerId, claimNumber, claimedAt, lockedUntil);
-    }
 }

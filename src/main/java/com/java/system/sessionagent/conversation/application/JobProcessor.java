@@ -67,36 +67,6 @@ public final class JobProcessor implements MessageJobPort {
 
     public JobProcessor(
             ConversationStore conversationStore,
-            ConversationModel conversationModel,
-            ToolCatalog toolCatalog,
-            Clock clock) {
-        this(conversationStore, fixedModels(conversationModel), toolCatalog, clock, Integer.MAX_VALUE,
-                new MessageJobRetryPolicy(3, Duration.ofSeconds(60)), new NoOpConversationTelemetry());
-    }
-
-    public JobProcessor(
-            ConversationStore conversationStore,
-            ConversationModel conversationModel,
-            ToolCatalog toolCatalog,
-            Clock clock,
-            MessageJobRetryPolicy retryPolicy,
-            ConversationTelemetry telemetry) {
-        this(conversationStore, fixedModels(conversationModel), toolCatalog, clock, Integer.MAX_VALUE, retryPolicy, telemetry);
-    }
-
-    public JobProcessor(
-            ConversationStore conversationStore,
-            ConversationModel conversationModel,
-            ToolCatalog toolCatalog,
-            Clock clock,
-            int maxModelCalls,
-            MessageJobRetryPolicy retryPolicy,
-            ConversationTelemetry telemetry) {
-        this(conversationStore, fixedModels(conversationModel), toolCatalog, clock, maxModelCalls, retryPolicy, telemetry);
-    }
-
-    public JobProcessor(
-            ConversationStore conversationStore,
             ConversationModels conversationModels,
             ToolCatalog toolCatalog,
             Clock clock,
@@ -111,26 +81,6 @@ public final class JobProcessor implements MessageJobPort {
         this.maxModelCalls = maxModelCalls;
         this.retryPolicy = Objects.requireNonNull(retryPolicy, "Message job retry policy must not be null");
         this.telemetry = Objects.requireNonNull(telemetry, "Conversation telemetry must not be null");
-    }
-
-    private static ConversationModels fixedModels(ConversationModel conversationModel) {
-        ConversationModel requiredModel = Objects.requireNonNull(conversationModel, "Conversation model must not be null");
-        return new ConversationModels() {
-            @Override
-            public ModelSelection defaultSelection() {
-                return new ModelSelection(requiredModel.routeId().value(), "v1:fixed");
-            }
-
-            @Override
-            public Optional<ModelSelection> findSelection(String model) {
-                return Optional.of(new ModelSelection(model, "v1:fixed"));
-            }
-
-            @Override
-            public Optional<ConversationModel> resolve(ModelSelection selection) {
-                return Optional.of(requiredModel);
-            }
-        };
     }
 
     @Override

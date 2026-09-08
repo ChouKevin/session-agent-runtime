@@ -2,6 +2,7 @@ package com.java.system.sessionagent.storage.adapter.postgres;
 
 import com.java.system.sessionagent.conversation.domain.IncomingMessage;
 import com.java.system.sessionagent.conversation.domain.MessageReceipt;
+import com.java.system.sessionagent.conversation.domain.ModelSelection;
 import com.java.system.sessionagent.conversation.domain.UserMessage;
 import com.java.system.sessionagent.conversation.port.in.MessageConflictException;
 import com.java.system.sessionagent.conversation.port.out.ConversationStore;
@@ -18,6 +19,7 @@ import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -29,14 +31,15 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class PostgresMessageIntakePostgresIT {
     private static final PostgreSQLContainer POSTGRES = new PostgreSQLContainer("postgres:17-alpine");
+    private static final ModelSelection TEST_SELECTION = new ModelSelection("test", "v1:test");
     @BeforeEach void migrate() { POSTGRES.start(); flyway().clean(); flyway().migrate(); }
     @AfterEach void clean() { flyway().clean(); }
     @Test void retains_inbound_idempotency_and_rejects_conflicting_duplicate_content() {
         ConversationStore store = new PostgresConversationStore(dataSource(), Clock.fixed(Instant.parse("2026-08-31T10:00:01Z"), ZoneOffset.UTC), new ObjectMapper());
-        MessageReceipt first = store.receive(new IncomingMessage("thread", "alice", "source", "first"));
-        MessageReceipt duplicate = store.receive(new IncomingMessage("thread", "alice", "source", "first"));
+        MessageReceipt first = receive(store, new IncomingMessage("thread", "alice", "source", "first"));
+        MessageReceipt duplicate = receive(store, new IncomingMessage("thread", "alice", "source", "first"));
         assertThat(duplicate).isEqualTo(first);
-        assertThatThrownBy(() -> store.receive(new IncomingMessage("thread", "alice", "source", "changed"))).isInstanceOf(MessageConflictException.class);
+        assertThatThrownBy(() -> receive(store, new IncomingMessage("thread", "alice", "source", "changed"))).isInstanceOf(MessageConflictException.class);
         assertThat(store.loadHistory(first.sessionId())).singleElement().isInstanceOfSatisfying(UserMessage.class, message -> {
             assertThat(message.message()).isEqualTo("first");
             assertThat(message.participantId()).isEqualTo("alice");
@@ -47,8 +50,8 @@ class PostgresMessageIntakePostgresIT {
     }
     @Test void allocates_ordered_sequences_under_concurrent_intake_without_duplicate_source_jobs() throws Exception {
         ConversationStore store = new PostgresConversationStore(dataSource(), Clock.fixed(Instant.parse("2026-08-31T10:00:01Z"), ZoneOffset.UTC), new ObjectMapper());
-        List<MessageReceipt> duplicates = concurrently(() -> store.receive(new IncomingMessage("thread", "alice", "same", "hello")));
-        List<MessageReceipt> distinct = concurrently(() -> store.receive(new IncomingMessage("thread", "alice",
+        List<MessageReceipt> duplicates = concurrently(() -> receive(store, new IncomingMessage("thread", "alice", "same", "hello")));
+        List<MessageReceipt> distinct = concurrently(() -> receive(store, new IncomingMessage("thread", "alice",
                 "source-" + Thread.currentThread().threadId(), "message")));
         assertThat(duplicates).containsOnly(duplicates.getFirst());
         assertThat(distinct).extracting(receipt -> receipt.messageJobId())
@@ -73,6 +76,9 @@ class PostgresMessageIntakePostgresIT {
         } finally {
             executor.shutdownNow();
         }
+    }
+    private static MessageReceipt receive(ConversationStore store, IncomingMessage incomingMessage) {
+        return store.receive(incomingMessage, TEST_SELECTION, model -> Optional.of(TEST_SELECTION));
     }
     private DriverManagerDataSource dataSource() { return new DriverManagerDataSource(POSTGRES.getJdbcUrl(), POSTGRES.getUsername(), POSTGRES.getPassword()); }
     private Flyway flyway() { return Flyway.configure().dataSource(dataSource()).cleanDisabled(false).load(); }

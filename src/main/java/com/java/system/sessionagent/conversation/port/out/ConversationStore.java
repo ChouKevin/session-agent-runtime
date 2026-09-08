@@ -29,22 +29,12 @@ import java.util.OptionalInt;
 
 public interface ConversationStore {
 
-    MessageReceipt receive(IncomingMessage incomingMessage);
-
-    default MessageReceipt receive(IncomingMessage incomingMessage, ModelSelection defaultSelection) {
-        return receive(incomingMessage);
-    }
-
-    default MessageReceipt receive(
+    MessageReceipt receive(
             IncomingMessage incomingMessage,
             ModelSelection defaultSelection,
-            ModelSelectionLookup selectionLookup) {
-        return receive(incomingMessage, defaultSelection);
-    }
+            ModelSelectionLookup selectionLookup);
 
-    default Optional<ModelSelection> selectModel(SessionId sessionId, ModelSelection selection) {
-        return Optional.empty();
-    }
+    Optional<ModelSelection> selectModel(SessionId sessionId, ModelSelection selection);
 
     Optional<MessageWorkClaim> claimNext(String workerId, Duration leaseDuration);
 
@@ -125,9 +115,6 @@ public interface ConversationStore {
             Assert.hasText(selectedModel, "Selected model must not be blank");
         }
 
-        public SessionProjection(SessionId sessionId, Instant createdAt, Optional<MessageJobProjection> currentJob) {
-            this(sessionId, createdAt, currentJob, "test");
-        }
     }
 
     enum JobUpdate {

@@ -20,6 +20,7 @@ import ch.qos.logback.core.read.ListAppender;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.java.system.sessionagent.conversation.application.MessageService;
 import com.java.system.sessionagent.conversation.application.JobProcessor;
+import com.java.system.sessionagent.conversation.application.MessageJobRetryPolicy;
 import com.java.system.sessionagent.conversation.TestConfiguredModels;
 import com.java.system.sessionagent.conversation.domain.IncomingMessage;
 import com.java.system.sessionagent.conversation.domain.IncomingMessageSource;
@@ -182,8 +183,10 @@ class SlackDeliveryPostgresIT {
             assertThat(adapter.handle(event)).isEqualTo(SlackEventOutcome.ACCEPTED);
             assertThat(adapter.handle(event)).isEqualTo(SlackEventOutcome.ACCEPTED);
             MessageWorkClaim claim = conversationStore.claimNext("conversation-worker", Duration.ofSeconds(30)).orElseThrow();
-            JobProcessor service = new JobProcessor(conversationStore, successfulModel(), emptyToolCatalog(),
-                    Clock.fixed(NOW, ZoneOffset.UTC));
+            ConversationModel model = successfulModel();
+            JobProcessor service = new JobProcessor(conversationStore, TestConfiguredModels.withModel(model), emptyToolCatalog(),
+                    Clock.fixed(NOW, ZoneOffset.UTC), 3, new MessageJobRetryPolicy(3, Duration.ofSeconds(1)),
+                    new NoOpConversationTelemetry());
             service.process(claim, () -> true);
             SlackDeliveryWorker deliveryWorker = new SlackDeliveryWorker(new SlackPostgresDeliveryStore(dataSource()), request -> {
                 posts.add(request);
@@ -280,7 +283,8 @@ class SlackDeliveryPostgresIT {
                 SlackIntakeClassification.ACCEPTED, Optional.of(message));
 
         assertThat(slackIntake.receive(intake).outcome()).isEqualTo(SlackEventOutcome.ACCEPTED);
-        MessageReceipt receipt = conversationStore.receive(message);
+        MessageReceipt receipt = conversationStore.receive(message, TestConfiguredModels.withDefault("test").defaultSelection(),
+                TestConfiguredModels.withDefault("test"));
         MessageWorkClaim claim = conversationStore.claimNext("conversation-worker", Duration.ofSeconds(30)).orElseThrow();
         assertThat(conversationStore.reserveModelCall(claim, 2, NOW)).hasValue(1);
         conversationStore.append(claim, new ConversationStore.MessageBatch(List.of(

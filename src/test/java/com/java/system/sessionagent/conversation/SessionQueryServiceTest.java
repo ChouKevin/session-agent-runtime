@@ -43,7 +43,7 @@ class SessionQueryServiceTest {
         when(store.loadHistoryPage(new SessionId("a1d4cefe-d5b5-4f40-b9f6-beb41a6831a0"), 0, 2)).thenReturn(Optional.empty());
         when(store.loadHistory(any())).thenThrow(new AssertionError("Paged history must not load complete history"));
         ConversationQueryService service = new ConversationQueryService(store,
-                model(new ModelDescriptor(new ModelRouteId("test"), "test-model", 1_000)),
+                TestConfiguredModels.withModel(model(new ModelDescriptor(new ModelRouteId("test"), "test-model", 1_000))),
                 () -> new ToolSnapshot(List.of()), new ContextUsageEstimator());
 
         assertThat(service.messages(SESSION_ID, 3, 2)).contains(List.of(pageMessage));
@@ -62,14 +62,15 @@ class SessionQueryServiceTest {
         SessionId sessionId = new SessionId(SESSION_ID);
         when(store.readSession(sessionId)).thenReturn(Optional.of(new ConversationStore.SessionProjection(sessionId, CREATED_AT,
                 Optional.of(new ConversationStore.MessageJobProjection(new MessageJobId("f47bdb7e-75c3-4dbf-bdd4-1f8681705b62"), sessionId,
-                        com.java.system.sessionagent.conversation.domain.JobStatus.DONE, 1, 2)))));
+                        com.java.system.sessionagent.conversation.domain.JobStatus.DONE, 1, 2)), "test")));
         when(store.loadHistory(sessionId)).thenReturn(List.of(new UserMessage(sessionId, new SessionSequence(1),
                 Optional.of(new MessageJobId("f47bdb7e-75c3-4dbf-bdd4-1f8681705b62")), CREATED_AT, MessageRole.USER, "U01", "private text")));
         when(store.loadCompaction(sessionId)).thenReturn(Optional.empty());
         ModelDescriptor descriptor = new ModelDescriptor(new ModelRouteId("google-genai"), "gemini-3.1-flash-lite", 1_048_576);
         ConversationModel model = model(descriptor);
         ToolCatalog tools = () -> new ToolSnapshot(List.of());
-        ConversationQueryService service = new ConversationQueryService(store, model, tools, new ContextUsageEstimator());
+        ConversationQueryService service = new ConversationQueryService(store, TestConfiguredModels.withModel(model), tools,
+                new ContextUsageEstimator());
 
         SessionDetailView detail = service.session(SESSION_ID).orElseThrow();
 

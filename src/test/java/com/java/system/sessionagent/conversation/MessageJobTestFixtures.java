@@ -61,7 +61,7 @@ final class MessageJobTestFixtures {
     }
 
     static JobProcessor service(ConversationStore store, ConversationModel model, ToolCatalog catalog, int maximumCalls) {
-        return new JobProcessor(store, model, catalog, Clock.fixed(Instant.EPOCH, ZoneOffset.UTC), maximumCalls,
+        return new JobProcessor(store, TestConfiguredModels.withModel(model), catalog, Clock.fixed(Instant.EPOCH, ZoneOffset.UTC), maximumCalls,
                 new MessageJobRetryPolicy(3, Duration.ofSeconds(60)), new NoOpConversationTelemetry());
     }
 
@@ -85,7 +85,8 @@ final class MessageJobTestFixtures {
 
     static MessageWorkClaim claim() {
         Instant claimedAt = Instant.parse("2026-09-01T00:00:00Z");
-        return new MessageWorkClaim(new MessageJobId("job-1"), new SessionId("session-1"), "worker", 1, claimedAt,
+        return new MessageWorkClaim(new MessageJobId("job-1"), new SessionId("session-1"),
+                new com.java.system.sessionagent.conversation.domain.ModelSelection(TEST_ROUTE_ID.value(), "v1:test"), "worker", 1, claimedAt,
                 claimedAt.plusSeconds(30));
     }
 

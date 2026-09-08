@@ -19,6 +19,7 @@ import ch.qos.logback.core.AppenderBase;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.java.system.sessionagent.conversation.application.MessageService;
 import com.java.system.sessionagent.conversation.application.JobProcessor;
+import com.java.system.sessionagent.conversation.application.MessageJobRetryPolicy;
 import com.java.system.sessionagent.conversation.TestConfiguredModels;
 import com.java.system.sessionagent.conversation.domain.IncomingMessage;
 import com.java.system.sessionagent.conversation.domain.IncomingMessageSource;
@@ -505,8 +506,9 @@ class PostgresMessageSubmissionPostgresIT {
             }
         };
         ToolCatalog toolCatalog = () -> new ToolSnapshot(List.of());
-        JobProcessor messageJobService = new JobProcessor(store, model, toolCatalog,
-                Clock.fixed(Instant.parse("2026-09-06T00:00:02Z"), ZoneOffset.UTC));
+        JobProcessor messageJobService = new JobProcessor(store, TestConfiguredModels.withModel(model), toolCatalog,
+                Clock.fixed(Instant.parse("2026-09-06T00:00:02Z"), ZoneOffset.UTC), 3,
+                new MessageJobRetryPolicy(3, Duration.ofSeconds(1)), new NoOpConversationTelemetry());
 
         messageJobService.process(store.claimNext("worker", Duration.ofSeconds(30)).orElseThrow(), () -> true);
 

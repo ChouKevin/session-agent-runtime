@@ -93,12 +93,6 @@ public final class PostgresConversationStore implements ConversationStore {
     }
 
     @Override
-    public MessageReceipt receive(IncomingMessage incomingMessage) {
-        ModelSelection legacySelection = new ModelSelection("default", "v1:legacy");
-        return receive(incomingMessage, legacySelection, model -> Optional.of(legacySelection));
-    }
-
-    @Override
     public MessageReceipt receive(
             IncomingMessage incomingMessage,
             ModelSelection defaultSelection,

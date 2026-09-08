@@ -24,6 +24,7 @@ import com.java.system.sessionagent.conversation.domain.ToolObservation;
 import com.java.system.sessionagent.conversation.domain.UserMessage;
 import com.java.system.sessionagent.conversation.domain.RuntimeMessage;
 import com.java.system.sessionagent.conversation.application.JobProcessor;
+import com.java.system.sessionagent.conversation.TestConfiguredModels;
 import com.java.system.sessionagent.conversation.port.out.ConversationModel;
 import com.java.system.sessionagent.conversation.port.out.ModelCallReservation;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -73,6 +74,7 @@ class PostgresConversationCommitPostgresIT {
 
     private static final PostgreSQLContainer POSTGRES = new PostgreSQLContainer("postgres:17-alpine");
     private static final Instant NOW = Instant.parse("2026-08-31T10:00:01Z");
+    private static final ModelSelection TEST_SELECTION = new ModelSelection("test", "v1:test");
 
     private JdbcTemplate jdbcTemplate;
 
@@ -133,7 +135,7 @@ class PostgresConversationCommitPostgresIT {
     @Test
     void atomically_appends_native_assistant_calls_and_tool_results() {
         ConversationStore store = store();
-        MessageReceipt receipt = store.receive(new IncomingMessage("thread", "alice", "source", "hello"));
+        MessageReceipt receipt = receive(store, new IncomingMessage("thread", "alice", "source", "hello"));
         MessageWorkClaim claim = store.claimNext("worker", Duration.ofSeconds(30)).orElseThrow();
 
         store.append(claim, new ConversationStore.MessageBatch(List.of(
@@ -170,7 +172,7 @@ class PostgresConversationCommitPostgresIT {
     @Test
     void loads_only_the_next_database_history_page_in_sequence_order_and_preserves_raw_message_variants() {
         ConversationStore store = store();
-        MessageReceipt receipt = store.receive(new IncomingMessage("thread", "alice", "paged-source", "original user message"));
+        MessageReceipt receipt = receive(store, new IncomingMessage("thread", "alice", "paged-source", "original user message"));
         MessageWorkClaim claim = store.claimNext("worker", Duration.ofSeconds(30)).orElseThrow();
         store.append(claim, new ConversationStore.MessageBatch(List.of(
                 new ConversationStore.AssistantData("assistant text"),
@@ -220,7 +222,7 @@ class PostgresConversationCommitPostgresIT {
     @Test
     void persists_compaction_without_replacing_raw_history_and_durably_limits_overflow_recovery() {
         ConversationStore store = store();
-        MessageReceipt receipt = store.receive(new IncomingMessage("thread", "alice", "compaction", "hello"));
+        MessageReceipt receipt = receive(store, new IncomingMessage("thread", "alice", "compaction", "hello"));
         MessageWorkClaim claim = store.claimNext("worker", Duration.ofSeconds(30)).orElseThrow();
         ModelDescriptor descriptor = new ModelDescriptor(new ModelRouteId("google-genai"), "gemini-3.1-flash-lite", 1_048_576);
         ConversationStore.CompactionData compact = new ConversationStore.CompactionData(1,
@@ -245,7 +247,7 @@ class PostgresConversationCommitPostgresIT {
     void keeps_unique_ascending_raw_history_after_multiple_compactions_and_reads_the_latest_job_projection() {
         ConversationStore store = store();
         ModelDescriptor descriptor = new ModelDescriptor(new ModelRouteId("google-genai"), "gemini-3.1-flash-lite", 1_048_576);
-        MessageReceipt first = store.receive(new IncomingMessage("thread", "alice", "source-1", "first"));
+        MessageReceipt first = receive(store, new IncomingMessage("thread", "alice", "source-1", "first"));
         MessageWorkClaim firstClaim = store.claimNext("worker", Duration.ofSeconds(30)).orElseThrow();
         store.compact(firstClaim, new ConversationStore.CompactionData(1,
                 com.java.system.sessionagent.conversation.domain.ContextCompaction.Reason.THRESHOLD, "first summary", new SessionSequence(1),
@@ -253,7 +255,7 @@ class PostgresConversationCommitPostgresIT {
         store.append(firstClaim, new ConversationStore.MessageBatch(List.of(new ConversationStore.AssistantData("first answer")),
                 ConversationStore.JobUpdate.COMPLETE), NOW);
 
-        MessageReceipt second = store.receive(new IncomingMessage("thread", "alice", "source-2", "second"));
+        MessageReceipt second = receive(store, new IncomingMessage("thread", "alice", "source-2", "second"));
         MessageWorkClaim secondClaim = store.claimNext("worker", Duration.ofSeconds(30)).orElseThrow();
         store.compact(secondClaim, new ConversationStore.CompactionData(2,
                 com.java.system.sessionagent.conversation.domain.ContextCompaction.Reason.THRESHOLD, "second summary", new SessionSequence(2),
@@ -278,7 +280,9 @@ class PostgresConversationCommitPostgresIT {
     @Test
     void persists_available_model_usage_with_the_committed_response_boundary() {
         ConversationStore store = store();
-        MessageReceipt receipt = store.receive(new IncomingMessage("thread", "alice", "source", "hello"));
+        ModelSelection selection = new ModelSelection("test", "v1:test");
+        MessageReceipt receipt = store.receive(new IncomingMessage("thread", "alice", "source", "hello"), selection,
+                model -> Optional.of(selection));
         MessageWorkClaim claim = store.claimNext("worker", Duration.ofSeconds(30)).orElseThrow();
         ModelDescriptor descriptor = new ModelDescriptor(new ModelRouteId("google-genai"), "gemini-3.1-flash-lite", 1_048_576);
         ModelUsage usage = new ModelUsage(50, 20, 70, true);
@@ -296,7 +300,9 @@ class PostgresConversationCommitPostgresIT {
             }
         };
         ToolCatalog toolCatalog = () -> new ToolSnapshot(List.of());
-        JobProcessor service = new JobProcessor(store, model, toolCatalog, Clock.fixed(NOW, ZoneOffset.UTC));
+        JobProcessor service = new JobProcessor(store, TestConfiguredModels.withModel(model), toolCatalog,
+                Clock.fixed(NOW, ZoneOffset.UTC), 3, new com.java.system.sessionagent.conversation.application.MessageJobRetryPolicy(3,
+                Duration.ofSeconds(1)), new com.java.system.sessionagent.conversation.port.out.NoOpConversationTelemetry());
 
         service.process(claim, () -> true);
 
@@ -307,7 +313,6 @@ class PostgresConversationCommitPostgresIT {
         assertThat(history).extracting(message -> message.sequence().value()).containsExactly(1L, 2L);
         assertThat(history.get(1)).isInstanceOfSatisfying(AssistantMessage.class,
                 assistant -> assertThat(assistant.message()).isEqualTo("done"));
-        ModelSelection selection = new ModelSelection("default", "v1:legacy");
         assertThat(restartedStore.loadUsageCheckpoint(receipt.sessionId(), selection, descriptor, fingerprint, 0))
                 .hasValueSatisfying(checkpoint -> {
                     assertThat(checkpoint.responseBoundary().value()).isEqualTo(2L);
@@ -321,7 +326,7 @@ class PostgresConversationCommitPostgresIT {
     @Test
     void restores_current_job_continuation_after_runtime_reconstruction_and_removes_it_on_completion() {
         ConversationStore originalStore = store();
-        MessageReceipt receipt = originalStore.receive(new IncomingMessage("thread", "alice", "continuation", "hello"));
+        MessageReceipt receipt = receive(originalStore, new IncomingMessage("thread", "alice", "continuation", "hello"));
         MessageWorkClaim claim = originalStore.claimNext("worker", Duration.ofSeconds(30)).orElseThrow();
         ModelContinuation continuation = new ModelContinuation(new ModelRouteId("gemini-primary"), "opaque-v1", new byte[] {1, 2, 3});
         originalStore.bindModelRoute(claim, continuation.modelRouteId());
@@ -350,7 +355,7 @@ class PostgresConversationCommitPostgresIT {
     @Test
     void rejects_a_nonterminal_append_when_its_claim_expires_while_waiting_for_session_sequence_allocation() throws Exception {
         ConversationStore store = store();
-        MessageReceipt receipt = store.receive(new IncomingMessage("thread", "alice", "source", "hello"));
+        MessageReceipt receipt = receive(store, new IncomingMessage("thread", "alice", "source", "hello"));
         MessageWorkClaim claim = store.claimNext("worker", Duration.ofSeconds(1)).orElseThrow();
         ExecutorService executor = Executors.newSingleThreadExecutor();
         try (Connection connection = dataSource().getConnection()) {
@@ -383,7 +388,7 @@ class PostgresConversationCommitPostgresIT {
     @Test
     void protects_committed_message_details_from_later_update_or_delete() {
         ConversationStore store = store();
-        MessageReceipt receipt = store.receive(new IncomingMessage("thread", "alice", "source", "hello"));
+        MessageReceipt receipt = receive(store, new IncomingMessage("thread", "alice", "source", "hello"));
         MessageWorkClaim claim = store.claimNext("worker", Duration.ofSeconds(30)).orElseThrow();
         store.append(claim, new ConversationStore.MessageBatch(List.of(new ConversationStore.AssistantData("original")),
                 ConversationStore.JobUpdate.COMPLETE), NOW);
@@ -398,7 +403,7 @@ class PostgresConversationCommitPostgresIT {
     @Test
     void rolls_back_the_entire_native_batch_when_a_later_tool_result_insert_fails() {
         ConversationStore store = store();
-        MessageReceipt receipt = store.receive(new IncomingMessage("thread", "alice", "source", "hello"));
+        MessageReceipt receipt = receive(store, new IncomingMessage("thread", "alice", "source", "hello"));
         MessageWorkClaim claim = store.claimNext("worker", Duration.ofSeconds(30)).orElseThrow();
         jdbcTemplate.execute("""
                 create function fail_test_tool_detail() returns trigger language plpgsql as $$
@@ -437,7 +442,7 @@ class PostgresConversationCommitPostgresIT {
     @Test
     void rejects_whitespace_only_tool_and_runtime_fields_before_they_can_poison_history() {
         ConversationStore store = store();
-        MessageReceipt receipt = store.receive(new IncomingMessage("thread", "alice", "source", "hello"));
+        MessageReceipt receipt = receive(store, new IncomingMessage("thread", "alice", "source", "hello"));
         MessageWorkClaim claim = store.claimNext("worker", Duration.ofSeconds(30)).orElseThrow();
         DataSource dataSource = Objects.requireNonNull(jdbcTemplate.getDataSource(), "JDBC data source must not be null");
         TransactionTemplate transaction = new TransactionTemplate(new DataSourceTransactionManager(dataSource));
@@ -477,7 +482,7 @@ class PostgresConversationCommitPostgresIT {
         int index = 0;
         for (String calls : malformedCalls) {
             index++;
-            MessageReceipt receipt = store().receive(new IncomingMessage("thread-" + index, "alice", "source-" + index, "hello"));
+            MessageReceipt receipt = receive(store(), new IncomingMessage("thread-" + index, "alice", "source-" + index, "hello"));
             MessageWorkClaim claim = store().claimNext("worker-" + index, Duration.ofSeconds(30)).orElseThrow();
             insertMalformedAssistantCalls(receipt, claim, calls);
 
@@ -490,8 +495,8 @@ class PostgresConversationCommitPostgresIT {
     @Test
     void exposes_cross_job_native_tool_corruption_to_the_terminal_history_projector() {
         ConversationStore store = store();
-        MessageReceipt firstReceipt = store.receive(new IncomingMessage("thread", "alice", "source-1", "first"));
-        MessageReceipt secondReceipt = store.receive(new IncomingMessage("thread", "alice", "source-2", "second"));
+        MessageReceipt firstReceipt = receive(store, new IncomingMessage("thread", "alice", "source-1", "first"));
+        MessageReceipt secondReceipt = receive(store, new IncomingMessage("thread", "alice", "source-2", "second"));
         MessageWorkClaim firstClaim = store.claimNext("worker", Duration.ofSeconds(30)).orElseThrow();
         UUID sessionId = UUID.fromString(firstReceipt.sessionId().value());
         UUID firstJobId = UUID.fromString(firstClaim.messageJobId().value());
@@ -552,6 +557,10 @@ class PostgresConversationCommitPostgresIT {
 
     private ConversationStore store() {
         return new PostgresConversationStore(dataSource(), Clock.fixed(NOW, ZoneOffset.UTC), new ObjectMapper());
+    }
+
+    private static MessageReceipt receive(ConversationStore store, IncomingMessage incomingMessage) {
+        return store.receive(incomingMessage, TEST_SELECTION, model -> Optional.of(TEST_SELECTION));
     }
 
     private DriverManagerDataSource dataSource() {

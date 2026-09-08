@@ -1,6 +1,7 @@
 package com.java.system.sessionagent.storage.adapter.postgres;
 
 import com.java.system.sessionagent.conversation.domain.IncomingMessage;
+import com.java.system.sessionagent.conversation.domain.JobStatus;
 import com.java.system.sessionagent.conversation.domain.MessageReceipt;
 import com.java.system.sessionagent.conversation.domain.MessageWorkClaim;
 import com.java.system.sessionagent.conversation.domain.ModelRouteId;
@@ -29,6 +30,7 @@ import java.sql.PreparedStatement;
 import java.util.List;
 import java.util.Optional;
 import java.util.OptionalInt;
+import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CountDownLatch;
@@ -43,6 +45,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 class PostgresMessageJobPostgresIT {
 
     private static final Instant NOW = Instant.parse("2026-08-31T10:00:01Z");
+    private static final ModelSelection TEST_SELECTION = new ModelSelection("test", "v1:test");
     private static final PostgreSQLContainer POSTGRES = new PostgreSQLContainer("postgres:17-alpine");
 
     private JdbcTemplate jdbcTemplate;
@@ -63,7 +66,7 @@ class PostgresMessageJobPostgresIT {
     @Test
     void keeps_committed_history_visible_across_retry_and_global_job_ordering() {
         ConversationStore store = store();
-        MessageReceipt first = store.receive(new IncomingMessage("thread", "alice", "first", "one"));
+        MessageReceipt first = receive(store, new IncomingMessage("thread", "alice", "first", "one"));
         MessageWorkClaim firstClaim = store.claimNext("worker", Duration.ofSeconds(30)).orElseThrow();
         store.append(firstClaim, new ConversationStore.MessageBatch(List.of(new ConversationStore.AssistantData("working")),
                 ConversationStore.JobUpdate.KEEP_WORKING), NOW);
@@ -74,7 +77,7 @@ class PostgresMessageJobPostgresIT {
                 .containsExactly(1L, 2L);
         store.append(reclaimed, new ConversationStore.MessageBatch(List.of(new ConversationStore.AssistantData("done")),
                 ConversationStore.JobUpdate.COMPLETE), NOW.plusSeconds(1));
-        MessageReceipt second = store.receive(new IncomingMessage("thread", "alice", "second", "two"));
+        MessageReceipt second = receive(store, new IncomingMessage("thread", "alice", "second", "two"));
         MessageWorkClaim secondClaim = store.claimNext("worker", Duration.ofSeconds(30)).orElseThrow();
         assertThat(store.loadHistory(second.sessionId())).extracting(message -> message.sequence().value())
                 .containsExactly(1L, 2L, 3L, 4L);
@@ -87,7 +90,7 @@ class PostgresMessageJobPostgresIT {
     @Test
     void allows_only_one_concurrent_claim_and_model_reservation_for_a_session() throws Exception {
         ConversationStore store = store();
-        MessageReceipt receipt = store.receive(new IncomingMessage("thread", "alice", "source", "hello"));
+        MessageReceipt receipt = receive(store, new IncomingMessage("thread", "alice", "source", "hello"));
         List<Optional<MessageWorkClaim>> claims = concurrently(() -> store.claimNext(
                 "worker-" + Thread.currentThread().threadId(), Duration.ofSeconds(30)));
 
@@ -104,7 +107,7 @@ class PostgresMessageJobPostgresIT {
     @Test
     void consumes_a_reserved_ordinal_across_reclaim_while_leaving_uncommitted_tool_work_replayable() {
         ConversationStore store = store();
-        MessageReceipt receipt = store.receive(new IncomingMessage("thread", "alice", "source", "hello"));
+        MessageReceipt receipt = receive(store, new IncomingMessage("thread", "alice", "source", "hello"));
         MessageWorkClaim original = store.claimNext("worker", Duration.ofSeconds(30)).orElseThrow();
 
         assertThat(store.reserveModelCall(original, 2, NOW)).hasValue(1);
@@ -119,7 +122,7 @@ class PostgresMessageJobPostgresIT {
     @Test
     void rejects_an_aba_stale_claim_without_allocating_or_appending_a_message() {
         ConversationStore store = store();
-        MessageReceipt receipt = store.receive(new IncomingMessage("thread", "alice", "source", "hello"));
+        MessageReceipt receipt = receive(store, new IncomingMessage("thread", "alice", "source", "hello"));
         MessageWorkClaim original = store.claimNext("worker", Duration.ofSeconds(30)).orElseThrow();
         jdbcTemplate.update("update message_job set locked_until = clock_timestamp() - interval '1 millisecond' where message_job_id = ?",
                 UUID.fromString(receipt.messageJobId().value()));
@@ -136,7 +139,7 @@ class PostgresMessageJobPostgresIT {
     @Test
     void binds_one_model_route_for_the_complete_job() {
         ConversationStore store = store();
-        store.receive(new IncomingMessage("thread", "alice", "route-job", "hello"));
+        receive(store, new IncomingMessage("thread", "alice", "route-job", "hello"));
         MessageWorkClaim claim = store.claimNext("worker", Duration.ofSeconds(30)).orElseThrow();
 
         store.bindModelRoute(claim, new ModelRouteId("gemini-primary"));
@@ -144,6 +147,27 @@ class PostgresMessageJobPostgresIT {
 
         assertThatThrownBy(() -> store.bindModelRoute(claim, new ModelRouteId("codex-primary")))
                 .isExactlyInstanceOf(ModelRouteMismatchException.class);
+    }
+
+    @Test
+    void rejects_direct_model_identity_changes_while_preserving_claim_retry_and_completion_transitions() {
+        ConversationStore store = store();
+        ModelSelection selection = new ModelSelection("google-primary", "v1:google-a");
+        MessageReceipt receipt = store.receive(new IncomingMessage("thread", "alice", "source", "hello"), selection,
+                model -> Optional.of(selection));
+        UUID messageJobId = UUID.fromString(receipt.messageJobId().value());
+
+        assertThatThrownBy(() -> jdbcTemplate.update("update message_job set model_key = ? where message_job_id = ?",
+                "openai-primary", messageJobId)).isInstanceOf(RuntimeException.class);
+        assertThatThrownBy(() -> jdbcTemplate.update("update message_job set model_fingerprint = ? where message_job_id = ?",
+                "v2:openai-b", messageJobId)).isInstanceOf(RuntimeException.class);
+
+        MessageWorkClaim claim = store.claimNext("worker", Duration.ofSeconds(30)).orElseThrow();
+        assertThat(store.scheduleRetry(claim, Duration.ZERO)).isTrue();
+        MessageWorkClaim retry = store.claimNext("worker", Duration.ofSeconds(30)).orElseThrow();
+        store.append(retry, new ConversationStore.MessageBatch(List.of(new ConversationStore.AssistantData("done")),
+                ConversationStore.JobUpdate.COMPLETE), NOW);
+        assertThat(store.readJob(receipt.messageJobId()).orElseThrow().status()).isEqualTo(JobStatus.DONE);
     }
 
     @Test
@@ -191,14 +215,12 @@ class PostgresMessageJobPostgresIT {
     }
 
     @Test
-    void serializes_a_latch_released_session_switch_and_intake_without_a_partial_job_binding() throws Exception {
+    void binds_the_original_selection_when_a_waiting_intake_precedes_a_waiting_switch() throws Exception {
         ConversationStore store = store();
         ModelSelection first = new ModelSelection("google-primary", "v1:google-a");
         ModelSelection second = new ModelSelection("openai-primary", "v1:openai-b");
         MessageReceipt initial = store.receive(new IncomingMessage("thread", "alice", "initial", "one"), first,
                 model -> selection(model, first, second));
-        CountDownLatch ready = new CountDownLatch(2);
-        CountDownLatch release = new CountDownLatch(1);
         ExecutorService executor = Executors.newFixedThreadPool(2);
         try (Connection connection = dataSource().getConnection();
                 PreparedStatement lock = connection.prepareStatement(
@@ -206,26 +228,48 @@ class PostgresMessageJobPostgresIT {
             connection.setAutoCommit(false);
             lock.setObject(1, UUID.fromString(initial.sessionId().value()));
             lock.executeQuery();
-            Future<Optional<ModelSelection>> switchResult = executor.submit(() -> {
-                ready.countDown();
-                release.await();
-                return store.selectModel(initial.sessionId(), second);
-            });
             Future<MessageReceipt> intakeResult = executor.submit(() -> {
-                ready.countDown();
-                release.await();
                 return store.receive(new IncomingMessage("thread", "alice", "concurrent", "two"), first,
                         model -> selection(model, first, second));
             });
-            ready.await();
-            release.countDown();
+            awaitDatabaseLockWaiter("where source_type");
+            Future<Optional<ModelSelection>> switchResult = executor.submit(() -> store.selectModel(initial.sessionId(), second));
+            awaitDatabaseLockWaiter("where session_id");
             connection.commit();
 
             MessageReceipt concurrent = intakeResult.get();
             assertThat(switchResult.get()).contains(second);
-            assertThat(jobSelection(concurrent)).isIn(first, second);
+            assertThat(jobSelection(concurrent)).isEqualTo(first);
             assertThat(jdbcTemplate.queryForObject("select selected_model from conversation_session where session_id = ?", String.class,
                     UUID.fromString(initial.sessionId().value()))).isEqualTo(second.model());
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    void binds_the_new_selection_when_a_waiting_switch_precedes_a_waiting_intake() throws Exception {
+        ConversationStore store = store();
+        ModelSelection first = new ModelSelection("google-primary", "v1:google-a");
+        ModelSelection second = new ModelSelection("openai-primary", "v1:openai-b");
+        MessageReceipt initial = store.receive(new IncomingMessage("thread", "alice", "initial", "one"), first,
+                model -> selection(model, first, second));
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try (Connection connection = dataSource().getConnection();
+                PreparedStatement lock = connection.prepareStatement(
+                        "select session_id from conversation_session where session_id = ? for update")) {
+            connection.setAutoCommit(false);
+            lock.setObject(1, UUID.fromString(initial.sessionId().value()));
+            lock.executeQuery();
+            Future<Optional<ModelSelection>> switchResult = executor.submit(() -> store.selectModel(initial.sessionId(), second));
+            awaitDatabaseLockWaiter("where session_id");
+            Future<MessageReceipt> intakeResult = executor.submit(() -> store.receive(
+                    new IncomingMessage("thread", "alice", "concurrent", "two"), first, model -> selection(model, first, second)));
+            awaitDatabaseLockWaiter("where source_type");
+            connection.commit();
+
+            assertThat(switchResult.get()).contains(second);
+            assertThat(jobSelection(intakeResult.get())).isEqualTo(second);
         } finally {
             executor.shutdownNow();
         }
@@ -254,6 +298,10 @@ class PostgresMessageJobPostgresIT {
         return jdbcTemplate.queryForObject("select model_key, model_fingerprint from message_job where message_job_id = ?",
                 (resultSet, row) -> new ModelSelection(resultSet.getString("model_key"), resultSet.getString("model_fingerprint")),
                 UUID.fromString(receipt.messageJobId().value()));
+    }
+
+    private static MessageReceipt receive(ConversationStore store, IncomingMessage incomingMessage) {
+        return store.receive(incomingMessage, TEST_SELECTION, model -> Optional.of(TEST_SELECTION));
     }
 
     private static java.util.Optional<ModelSelection> selection(
@@ -287,6 +335,24 @@ class PostgresMessageJobPostgresIT {
         } finally {
             executor.shutdownNow();
         }
+    }
+
+    private void awaitDatabaseLockWaiter(String queryFragment) {
+        long deadline = System.nanoTime() + Duration.ofSeconds(10).toNanos();
+        while (System.nanoTime() < deadline) {
+            int waiting = Objects.requireNonNull(jdbcTemplate.queryForObject("""
+                    select count(*)
+                    from pg_stat_activity
+                    where datname = current_database()
+                      and wait_event_type = 'Lock'
+                      and query like ?
+                    """, Integer.class, "%" + queryFragment + "%"), "PostgreSQL count must not be null");
+            if (waiting > 0) {
+                return;
+            }
+            Thread.onSpinWait();
+        }
+        throw new AssertionError("Timed out waiting for the controlled PostgreSQL row-lock boundary");
     }
 
     private ConversationStore store() {
