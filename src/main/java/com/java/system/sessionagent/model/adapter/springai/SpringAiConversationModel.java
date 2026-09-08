@@ -42,6 +42,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.UUID;
 import java.util.Map;
 import java.util.function.Predicate;
@@ -335,19 +336,28 @@ public final class SpringAiConversationModel implements ConversationModel {
         if (responseUsage.isEmpty()) {
             return new ModelUsage(0, 0, 0, false);
         }
+        OptionalLong cachedInputTokens = cachedInputTokens(responseUsage.get());
         Optional<Integer> promptTokens = Optional.ofNullable(responseUsage.get().getPromptTokens());
         Optional<Integer> completionTokens = Optional.ofNullable(responseUsage.get().getCompletionTokens());
         Optional<Integer> totalTokens = Optional.ofNullable(responseUsage.get().getTotalTokens());
         if (promptTokens.isEmpty() || completionTokens.isEmpty() || totalTokens.isEmpty()) {
-            return new ModelUsage(0, 0, 0, false);
+            return new ModelUsage(0, 0, 0, false, cachedInputTokens);
         }
         int prompt = promptTokens.get();
         int completion = completionTokens.get();
         int total = totalTokens.get();
         if (prompt < 0 || completion < 0 || total < 0) {
-            return new ModelUsage(0, 0, 0, false);
+            return new ModelUsage(0, 0, 0, false, cachedInputTokens);
         }
-        return new ModelUsage(prompt, completion, total, true);
+        return new ModelUsage(prompt, completion, total, true, cachedInputTokens);
+    }
+
+    private static OptionalLong cachedInputTokens(Usage usage) {
+        Optional<Long> cachedInputTokens = Optional.ofNullable(usage.getCacheReadInputTokens())
+                .filter(value -> value >= 0);
+        return cachedInputTokens.isPresent()
+                ? OptionalLong.of(cachedInputTokens.get())
+                : OptionalLong.empty();
     }
 
     private ModelCallFailure classifyProviderFailure(RuntimeException exception) {

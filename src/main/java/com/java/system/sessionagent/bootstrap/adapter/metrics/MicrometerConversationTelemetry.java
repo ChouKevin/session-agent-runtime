@@ -21,6 +21,7 @@ public final class MicrometerConversationTelemetry implements ConversationTeleme
     private static final Set<String> MODEL_OUTCOMES = Set.of("SUCCESS", "FAILURE");
     private static final Set<String> MODEL_CATEGORIES = Set.of(
             "STOP", "MAX_TOKENS", "SAFETY", "RECITATION", "OTHER", "UNAVAILABLE", "RESPONSE", "OUTPUT_INVALID");
+    private static final Set<String> CACHE_USAGE_STATES = Set.of("HIT", "ZERO", "UNKNOWN");
     private static final Set<String> TOOL_OUTCOMES = Set.of("SUCCESS", "INVALID_INPUT", "FAILURE");
     private static final Set<String> RUNTIME_MESSAGE_CODES = Arrays.stream(RuntimeMessageCode.values())
             .map(code -> code.name())
@@ -61,6 +62,10 @@ public final class MicrometerConversationTelemetry implements ConversationTeleme
             meterRegistry.counter("session_agent.model.tokens", "kind", "completion").increment(usage.completionTokens());
             meterRegistry.counter("session_agent.model.tokens", "kind", "total").increment(usage.totalTokens());
         }
+        String cacheUsageState = cacheUsageState(usage);
+        increment("session_agent.model.cache_usage", "state", bounded(cacheUsageState, CACHE_USAGE_STATES));
+        usage.cachedInputTokens().ifPresent(cachedInputTokens ->
+                meterRegistry.counter("session_agent.model.tokens", "kind", "cached_input").increment(cachedInputTokens));
     }
 
     @Override
@@ -93,5 +98,12 @@ public final class MicrometerConversationTelemetry implements ConversationTeleme
 
     private static String bounded(String candidate, Set<String> allowed) {
         return allowed.contains(candidate) ? candidate : "OTHER";
+    }
+
+    private static String cacheUsageState(ModelUsage usage) {
+        if (usage.cachedInputTokens().isEmpty()) {
+            return "UNKNOWN";
+        }
+        return usage.cachedInputTokens().getAsLong() == 0 ? "ZERO" : "HIT";
     }
 }

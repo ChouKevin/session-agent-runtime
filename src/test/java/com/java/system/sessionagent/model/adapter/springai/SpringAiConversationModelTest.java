@@ -2,6 +2,7 @@ package com.java.system.sessionagent.model.adapter.springai;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.genai.errors.ClientException;
+import com.java.system.sessionagent.bootstrap.adapter.metrics.MicrometerConversationTelemetry;
 import com.java.system.sessionagent.conversation.domain.AssistantToolCallsMessage;
 import com.java.system.sessionagent.conversation.domain.ContextCompactionRequest;
 import com.java.system.sessionagent.conversation.domain.MessageJobId;
@@ -34,13 +35,20 @@ import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.model.Generation;
 import org.springframework.ai.model.tool.ToolCallingChatOptions;
 import org.springframework.ai.tool.ToolCallback;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 
 import java.time.Instant;
 import java.util.List;
 import java.util.ArrayList;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.lang.reflect.RecordComponent;
+import java.util.stream.Stream;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -49,6 +57,73 @@ import static org.mockito.Mockito.mock;
 class SpringAiConversationModelTest {
 
     private static final ModelRouteId GOOGLE_ROUTE_ID = new ModelRouteId("google-genai");
+
+    @Test
+    void exposes_cached_input_tokens_as_an_optional_usage_component() {
+        assertThat(ModelUsage.class.getRecordComponents())
+                .extracting(RecordComponent::getName)
+                .contains("cachedInputTokens");
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("cacheUsageCases")
+    void maps_cache_read_input_tokens_without_changing_existing_usage(
+            String scenario,
+            Optional<Long> providerValue,
+            OptionalLong expectedCachedInputTokens) {
+        Usage usage = usage(5, 3, 8, providerValue);
+        ModelCallResult result = model(new AssistantMessage("done"), usage, GOOGLE_ROUTE_ID)
+                .respond(new ModelRequest(List.of(), new ToolSnapshot(List.of())), () -> 1, ignored -> { });
+
+        assertThat(result.usage()).as(scenario)
+                .isEqualTo(new ModelUsage(5, 3, 8, true, expectedCachedInputTokens));
+    }
+
+    private static Stream<Arguments> cacheUsageCases() {
+        return Stream.of(
+                Arguments.of("hit", Optional.of(7L), OptionalLong.of(7)),
+                Arguments.of("zero", Optional.of(0L), OptionalLong.of(0)),
+                Arguments.of("unknown", Optional.empty(), OptionalLong.empty()),
+                Arguments.of("invalid-negative", Optional.of(-1L), OptionalLong.empty()));
+    }
+
+    @Test
+    void retains_known_cache_usage_when_other_provider_usage_is_unavailable() {
+        Usage usage = usage(null, null, null, Optional.of(4L));
+        ModelCallResult result = model(new AssistantMessage("done"), usage, GOOGLE_ROUTE_ID)
+                .respond(new ModelRequest(List.of(), new ToolSnapshot(List.of())), () -> 1, ignored -> { });
+
+        assertThat(result.usage()).isEqualTo(new ModelUsage(0, 0, 0, false, OptionalLong.of(4)));
+    }
+
+    @Test
+    void records_cached_usage_for_compaction_telemetry() {
+        SimpleMeterRegistry registry = new SimpleMeterRegistry();
+        Usage usage = usage(5, 3, 8, Optional.of(4L));
+        ChatModel chatModel = new ChatModel() {
+            @Override public ChatResponse call(Prompt prompt) {
+                return new ChatResponse(List.of(new Generation(new AssistantMessage("summary"))),
+                        ChatResponseMetadata.builder().usage(usage).build());
+            }
+
+            @Override public ToolCallingChatOptions getOptions() {
+                return ToolCallingChatOptions.builder().build();
+            }
+        };
+        ObjectMapper mapper = new ObjectMapper();
+        SpringAiConversationModel model = new SpringAiConversationModel(chatModel, new SystemPrompt(),
+                new MicrometerConversationTelemetry(registry), mapper,
+                new GoogleGenAiThoughtSignatureHandler(GOOGLE_ROUTE_ID, mapper));
+        UserMessage history = new UserMessage(new SessionId("session-1"), new SessionSequence(1),
+                Optional.of(new MessageJobId("job-1")), Instant.EPOCH, MessageRole.USER, "user", "history");
+
+        model.summarize(new ContextCompactionRequest(Optional.empty(), List.of(history)), () -> 1);
+
+        assertThat(registry.get("session_agent.model.cache_usage").tag("state", "HIT").counter().count())
+                .isEqualTo(1);
+        assertThat(registry.get("session_agent.model.tokens").tag("kind", "cached_input").counter().count())
+                .isEqualTo(4);
+    }
 
     @Test
     void preserves_nonblank_provider_ids_and_generic_arguments_for_mixed_text_calls() {
@@ -279,6 +354,45 @@ class SpringAiConversationModelTest {
 
     private static SpringAiConversationModel model(AssistantMessage message, ModelRouteId routeId) {
         return model(message, new AtomicBoolean(), routeId);
+    }
+
+    private static SpringAiConversationModel model(AssistantMessage message, Usage usage, ModelRouteId routeId) {
+        ChatModel chatModel = new ChatModel() {
+            @Override public ChatResponse call(Prompt prompt) {
+                return new ChatResponse(List.of(new Generation(message)), ChatResponseMetadata.builder().usage(usage).build());
+            }
+
+            @Override public ToolCallingChatOptions getOptions() {
+                return ToolCallingChatOptions.builder().build();
+            }
+        };
+        ObjectMapper mapper = new ObjectMapper();
+        return new SpringAiConversationModel(chatModel, new SystemPrompt(), new NoOpConversationTelemetry(), mapper,
+                new GoogleGenAiThoughtSignatureHandler(routeId, mapper));
+    }
+
+    private static Usage usage(Integer promptTokens, Integer completionTokens, Integer totalTokens, Optional<Long> cachedInputTokens) {
+        return new Usage() {
+            @Override public Integer getPromptTokens() {
+                return promptTokens;
+            }
+
+            @Override public Integer getCompletionTokens() {
+                return completionTokens;
+            }
+
+            @Override public Integer getTotalTokens() {
+                return totalTokens;
+            }
+
+            @Override public Long getCacheReadInputTokens() {
+                return cachedInputTokens.orElse(null);
+            }
+
+            @Override public Object getNativeUsage() {
+                return Map.of();
+            }
+        };
     }
 
     private static List<byte[]> thoughtSignatures(Object value) {
