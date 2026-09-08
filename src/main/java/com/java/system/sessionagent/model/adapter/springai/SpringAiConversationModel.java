@@ -44,6 +44,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.Map;
+import java.util.function.Predicate;
 
 public final class SpringAiConversationModel implements ConversationModel {
 
@@ -55,6 +56,7 @@ public final class SpringAiConversationModel implements ConversationModel {
     private final ObjectMapper objectMapper;
     private final SpringAiContinuationHandler continuationHandler;
     private final ModelDescriptor descriptor;
+    private final Predicate<Throwable> providerTransientFailure;
 
     public SpringAiConversationModel(
             ChatModel chatModel,
@@ -63,7 +65,18 @@ public final class SpringAiConversationModel implements ConversationModel {
             ObjectMapper objectMapper,
             SpringAiContinuationHandler continuationHandler) {
         this(chatModel, promptResource, telemetry, objectMapper, continuationHandler,
-                testDescriptor(continuationHandler));
+                testDescriptor(continuationHandler), ignored -> false);
+    }
+
+    public SpringAiConversationModel(
+            ChatModel chatModel,
+            SystemPrompt promptResource,
+            ConversationTelemetry telemetry,
+            ObjectMapper objectMapper,
+            SpringAiContinuationHandler continuationHandler,
+            Predicate<Throwable> providerTransientFailure) {
+        this(chatModel, promptResource, telemetry, objectMapper, continuationHandler,
+                testDescriptor(continuationHandler), providerTransientFailure);
     }
 
     public SpringAiConversationModel(
@@ -74,7 +87,19 @@ public final class SpringAiConversationModel implements ConversationModel {
             SpringAiContinuationHandler continuationHandler,
             ModelDescriptor descriptor) {
         this(chatModel, promptResource, new SpringAiToolCallbackFactory(objectMapper), new HistoryProjector(objectMapper), telemetry,
-                objectMapper, continuationHandler, descriptor);
+                objectMapper, continuationHandler, descriptor, ignored -> false);
+    }
+
+    public SpringAiConversationModel(
+            ChatModel chatModel,
+            SystemPrompt promptResource,
+            ConversationTelemetry telemetry,
+            ObjectMapper objectMapper,
+            SpringAiContinuationHandler continuationHandler,
+            ModelDescriptor descriptor,
+            Predicate<Throwable> providerTransientFailure) {
+        this(chatModel, promptResource, new SpringAiToolCallbackFactory(objectMapper), new HistoryProjector(objectMapper), telemetry,
+                objectMapper, continuationHandler, descriptor, providerTransientFailure);
     }
 
     SpringAiConversationModel(
@@ -98,6 +123,20 @@ public final class SpringAiConversationModel implements ConversationModel {
             ObjectMapper objectMapper,
             SpringAiContinuationHandler continuationHandler,
             ModelDescriptor descriptor) {
+        this(chatModel, promptResource, callbackFactory, historyProjector, telemetry, objectMapper, continuationHandler, descriptor,
+                ignored -> false);
+    }
+
+    SpringAiConversationModel(
+            ChatModel chatModel,
+            SystemPrompt promptResource,
+            SpringAiToolCallbackFactory callbackFactory,
+            HistoryProjector historyProjector,
+            ConversationTelemetry telemetry,
+            ObjectMapper objectMapper,
+            SpringAiContinuationHandler continuationHandler,
+            ModelDescriptor descriptor,
+            Predicate<Throwable> providerTransientFailure) {
         Assert.notNull(chatModel, "Chat model must not be null");
         Assert.notNull(promptResource, "Prompt resource must not be null");
         Assert.notNull(callbackFactory, "Tool callback factory must not be null");
@@ -106,6 +145,7 @@ public final class SpringAiConversationModel implements ConversationModel {
         Assert.notNull(objectMapper, "Object mapper must not be null");
         Assert.notNull(continuationHandler, "Spring AI continuation handler must not be null");
         Assert.notNull(descriptor, "Model descriptor must not be null");
+        Assert.notNull(providerTransientFailure, "Provider transient failure classifier must not be null");
         Assert.isTrue(descriptor.routeId().equals(continuationHandler.routeId()), "Model descriptor route must match continuation route");
         this.chatModel = chatModel;
         this.promptResource = promptResource;
@@ -115,6 +155,7 @@ public final class SpringAiConversationModel implements ConversationModel {
         this.objectMapper = objectMapper;
         this.continuationHandler = continuationHandler;
         this.descriptor = descriptor;
+        this.providerTransientFailure = providerTransientFailure;
     }
 
     @Override
@@ -309,7 +350,7 @@ public final class SpringAiConversationModel implements ConversationModel {
         return new ModelUsage(prompt, completion, total, true);
     }
 
-    private static ModelCallFailure classifyProviderFailure(RuntimeException exception) {
+    private ModelCallFailure classifyProviderFailure(RuntimeException exception) {
         if (hasContextTooLargeSignal(exception)) {
             return ModelCallFailure.contextTooLarge();
         }
@@ -345,7 +386,7 @@ public final class SpringAiConversationModel implements ConversationModel {
                 || (message.contains("maximum context length") && message.contains("requested"));
     }
 
-    private static boolean hasTransientSignal(Throwable exception) {
+    private boolean hasTransientSignal(Throwable exception) {
         for (Throwable current = exception; current != null; current = current.getCause()) { // cs-allow traversal ends at null
             if (current instanceof TransientAiException || current instanceof SocketTimeoutException
                     || current instanceof java.util.concurrent.TimeoutException
@@ -355,6 +396,9 @@ public final class SpringAiConversationModel implements ConversationModel {
             }
             if (current instanceof OpenAIServiceException providerFailure
                     && isTransientHttpStatus(providerFailure.statusCode())) {
+                return true;
+            }
+            if (providerTransientFailure.test(current)) {
                 return true;
             }
         }

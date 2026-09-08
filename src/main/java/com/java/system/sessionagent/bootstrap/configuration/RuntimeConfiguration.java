@@ -1,6 +1,7 @@
 package com.java.system.sessionagent.bootstrap.configuration;
 
 import com.baomidou.mybatisplus.autoconfigure.ConfigurationCustomizer;
+import com.google.genai.errors.ApiException;
 import com.java.system.sessionagent.conversation.application.MessageService;
 import com.java.system.sessionagent.conversation.application.ConversationQueryService;
 import com.java.system.sessionagent.conversation.application.MessageJobRetryPolicy;
@@ -89,6 +90,8 @@ public class RuntimeConfiguration {
 
     private static final String GOOGLE_GENAI_API_ROUTE = "https://generativelanguage.googleapis.com";
     private static final String OPENAI_DEFAULT_API_ROUTE = "https://api.openai.com/v1";
+    private static final String GOOGLE_GENAI_GENERATE_CONTENT_OPERATION = "models/{model}:generateContent";
+    private static final String OPENAI_CHAT_COMPLETIONS_OPERATION = "/chat/completions";
 
     @Bean
     @ConditionalOnMissingBean(ObjectMapper.class)
@@ -164,7 +167,8 @@ public class RuntimeConfiguration {
                 SpringAiConversationModel conversationModel = new SpringAiConversationModel(createdModel.chatModel(), promptResource,
                         conversationTelemetry, objectMapper,
                         continuationHandler(profile.profile().provider(), routeId, objectMapper),
-                        new ModelDescriptor(routeId, profile.profile().modelId(), profile.profile().contextWindowTokens()));
+                        new ModelDescriptor(routeId, profile.profile().modelId(), profile.profile().contextWindowTokens()),
+                        RuntimeConfiguration::isGoogleTransientFailure);
                 bindings.put(key, new ConfiguredModelBinding(key, fingerprint(profile), conversationModel));
             }
             return new ConfiguredModels(bindings, runtimeProperties.model().defaultModel(), resources);
@@ -218,7 +222,7 @@ public class RuntimeConfiguration {
         if ("openai".equals(profile.provider())) {
             OpenAiChatOptions.Builder options = OpenAiChatOptions.builder()
                     .apiKey(profile.apiKey())
-                    .baseUrl(effectiveProfile.apiRoute())
+                    .baseUrl(effectiveProfile.apiEndpoint())
                     .model(profile.modelId())
                     .maxCompletionTokens(profile.maxOutputTokens())
                     .maxRetries(0)
@@ -262,10 +266,10 @@ public class RuntimeConfiguration {
             if (profile.timeout() != null) { // cs-allow Google SDK accepts a bounded millisecond timeout
                 timeoutMillis(profile.timeout());
             }
-            return new EffectiveModelProfile(profile, GOOGLE_GENAI_API_ROUTE);
+            return new EffectiveModelProfile(profile, GOOGLE_GENAI_API_ROUTE, GOOGLE_GENAI_GENERATE_CONTENT_OPERATION);
         }
         if ("openai".equals(profile.provider())) {
-            return new EffectiveModelProfile(profile, canonicalOpenAiRoute(profile.baseUrl()));
+            return new EffectiveModelProfile(profile, canonicalOpenAiRoute(profile.baseUrl()), OPENAI_CHAT_COMPLETIONS_OPERATION);
         }
         throw new IllegalArgumentException("Unsupported configured model provider");
     }
@@ -275,6 +279,14 @@ public class RuntimeConfiguration {
             return OPENAI_DEFAULT_API_ROUTE;
         }
         return baseUrl.endsWith("/") ? baseUrl.substring(0, baseUrl.length() - 1) : baseUrl;
+    }
+
+    private static boolean isGoogleTransientFailure(Throwable failure) {
+        return failure instanceof ApiException providerFailure && isTransientHttpStatus(providerFailure.code());
+    }
+
+    private static boolean isTransientHttpStatus(int statusCode) {
+        return statusCode == 429 || (statusCode >= 500 && statusCode < 600);
     }
 
     private static void closeResources(List<AutoCloseable> resources, Throwable failure) {
@@ -308,9 +320,10 @@ public class RuntimeConfiguration {
         return new DiscardingContinuationHandler(routeId);
     }
 
-    private static String fingerprint(EffectiveModelProfile effectiveProfile) {
+    static String fingerprint(EffectiveModelProfile effectiveProfile) {
         RuntimeProperties.ModelProfile profile = effectiveProfile.profile();
-        String normalized = String.join("\n", profile.provider(), effectiveProfile.apiRoute(), profile.modelId(),
+        String normalized = String.join("\n", profile.provider(), effectiveProfile.apiEndpoint(), effectiveProfile.apiOperation(),
+                profile.modelId(),
                 String.valueOf(profile.contextWindowTokens()), String.valueOf(profile.maxOutputTokens()),
                 String.valueOf(profile.temperature()), String.valueOf(profile.topP()), String.valueOf(profile.timeout()),
                 String.valueOf(profile.reasoningEffort()));
@@ -322,7 +335,7 @@ public class RuntimeConfiguration {
         }
     }
 
-    record EffectiveModelProfile(RuntimeProperties.ModelProfile profile, String apiRoute) {
+    record EffectiveModelProfile(RuntimeProperties.ModelProfile profile, String apiEndpoint, String apiOperation) {
     }
 
     @FunctionalInterface
