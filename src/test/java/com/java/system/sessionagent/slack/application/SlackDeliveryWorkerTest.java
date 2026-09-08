@@ -107,8 +107,8 @@ class SlackDeliveryWorkerTest {
         ILoggingEvent ambiguous = appender.list.stream()
                 .filter(event -> "slack_delivery_ambiguous".equals(keyValues(event).get("event")))
                 .findFirst().orElseThrow();
-        assertThat(keyValues(ambiguous)).containsEntry("sessionId", claim.sessionId().toString())
-                .containsEntry("messageJobId", claim.messageJobId().toString())
+        assertThat(keyValues(ambiguous)).containsEntry("sessionId", claim.sessionId().orElseThrow().toString())
+                .containsEntry("messageJobId", claim.messageJobId().orElseThrow().toString())
                 .containsEntry("outcome", "POSTED_STATE_NOT_COMMITTED");
     }
 
@@ -143,7 +143,7 @@ class SlackDeliveryWorkerTest {
         assertThat(ownershipLost).extracting(values -> values.get("outcome"))
                 .containsExactly("FAILED_STATE_NOT_COMMITTED", "RETRY_STATE_NOT_COMMITTED");
         assertThat(ownershipLost).extracting(values -> values.get("sessionId"))
-                .containsExactly(permanentClaim.sessionId().toString(), retryClaim.sessionId().toString());
+                .containsExactly(permanentClaim.sessionId().orElseThrow().toString(), retryClaim.sessionId().orElseThrow().toString());
         assertThat(appender.list).extracting(event -> keyValues(event).get("event"))
                 .doesNotContain("slack_delivery_failed", "slack_delivery_retry");
     }
@@ -203,6 +203,11 @@ class SlackDeliveryWorkerTest {
         @Override
         public Optional<SlackDeliveryView> read(UUID deliveryId) {
             return Optional.empty();
+        }
+
+        @Override
+        public List<SlackDeliveryView> findBySource(String teamId, String channelId, String messageTs) {
+            return List.of();
         }
     }
 

@@ -10,6 +10,7 @@ import com.java.system.sessionagent.conversation.domain.SessionMessage;
 import com.java.system.sessionagent.conversation.domain.ToolObservation;
 import com.java.system.sessionagent.conversation.domain.UserMessage;
 import com.java.system.sessionagent.conversation.port.in.MessageJobView;
+import com.java.system.sessionagent.slack.domain.SlackDeliveryView;
 
 import java.time.Instant;
 import java.util.Optional;
@@ -141,5 +142,20 @@ public final class MessageResponses {
     }
 
     public record ErrorResponse(String code) {
+    }
+
+    public record SlackDeliveryResponse(
+            String deliveryId,
+            String kind,
+            String status,
+            int attemptCount,
+            String failureCategory,
+            Instant nextAttemptAt,
+            String jobId) {
+        static SlackDeliveryResponse from(SlackDeliveryView view) {
+            return new SlackDeliveryResponse(view.deliveryId().toString(), view.kind().name(), view.status().name(), view.attemptCount(),
+                    view.failureCategory().map(Enum::name).orElse(null), view.nextAttemptAt(),
+                    view.messageJobId().map(Object::toString).orElse(null));
+        }
     }
 }

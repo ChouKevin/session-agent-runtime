@@ -79,9 +79,14 @@ public record RuntimeProperties(
             @DefaultValue("30s") Duration lockDuration,
             @PositiveOrZero @DefaultValue("3") int transientRetries,
             @DefaultValue("60s") Duration maximumBackoff,
-            @Positive @DefaultValue("4") int concurrency) {
+            @Positive @DefaultValue("4") int concurrency,
+            @Positive @DefaultValue("100") int maxUnfinishedJobs) {
+        public Worker(Duration pollDelay, Duration lockDuration, int transientRetries, Duration maximumBackoff, int concurrency) {
+            this(pollDelay, lockDuration, transientRetries, maximumBackoff, concurrency, 100); // cs-allow compatibility constructor
+        }
+
         public Worker(Duration pollDelay, Duration lockDuration, int transientRetries, Duration maximumBackoff) {
-            this(pollDelay, lockDuration, transientRetries, maximumBackoff, 4); // cs-allow compatibility constructor
+            this(pollDelay, lockDuration, transientRetries, maximumBackoff, 4, 100); // cs-allow compatibility constructor
         }
 
         @ConstructorBinding
@@ -93,6 +98,7 @@ public record RuntimeProperties(
             Assert.isTrue(!lockDuration.isNegative() && !lockDuration.isZero(), "Worker lock duration must be positive");
             Assert.isTrue(!maximumBackoff.isNegative() && !maximumBackoff.isZero(), "Worker maximum backoff must be positive");
             Assert.isTrue(concurrency > 0, "Worker concurrency must be positive");
+            Assert.isTrue(maxUnfinishedJobs > 0, "Worker maximum unfinished jobs must be positive");
         }
     }
 

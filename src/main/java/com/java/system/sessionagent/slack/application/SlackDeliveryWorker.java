@@ -95,12 +95,13 @@ public final class SlackDeliveryWorker {
             Optional<Duration> retryDelay) {
         LoggingEventBuilder builder = LOGGER.atInfo().addKeyValue("event", event)
                 .addKeyValue("deliveryId", claim.deliveryId().toString())
-                .addKeyValue("sessionId", claim.sessionId().toString())
-                .addKeyValue("messageJobId", claim.messageJobId().toString())
+                .addKeyValue("kind", claim.kind().name())
                 .addKeyValue("slackChannelId", claim.postRequest().channelId())
                 .addKeyValue("slackThreadTs", claim.postRequest().rootThreadTs())
                 .addKeyValue("attempt", claim.attemptCount())
                 .addKeyValue("outcome", outcome);
+        claim.sessionId().ifPresent(sessionId -> builder.addKeyValue("sessionId", sessionId.toString()));
+        claim.messageJobId().ifPresent(messageJobId -> builder.addKeyValue("messageJobId", messageJobId.toString()));
         retryDelay.ifPresent(delay -> builder.addKeyValue("retryDelayMs", delay.toMillis()));
         builder.log("runtime_lifecycle");
     }

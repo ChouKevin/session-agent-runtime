@@ -104,5 +104,10 @@ class SlackDeliveryLifecycleTest {
         public Optional<SlackDeliveryView> read(UUID deliveryId) {
             return Optional.empty();
         }
+
+        @Override
+        public java.util.List<SlackDeliveryView> findBySource(String teamId, String channelId, String messageTs) {
+            return java.util.List.of();
+        }
     }
 }

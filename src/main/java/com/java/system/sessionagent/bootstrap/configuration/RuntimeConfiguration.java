@@ -370,8 +370,10 @@ public class RuntimeConfiguration {
             PostgresConversationMapper mapper,
             DataSource dataSource,
             Clock runtimeClock,
-            ObjectMapper objectMapper) {
-        return new PostgresConversationStore(mapper, dataSource, runtimeClock, objectMapper);
+            ObjectMapper objectMapper,
+            RuntimeProperties properties) {
+        return new PostgresConversationStore(mapper, dataSource, runtimeClock, objectMapper,
+                properties.worker().maxUnfinishedJobs());
     }
 
     @Bean
@@ -397,8 +399,10 @@ public class RuntimeConfiguration {
             SlackDatabaseMapper mapper,
             DataSource dataSource,
             MessageIntakePort messageIntakePort,
-            Clock runtimeClock) {
-        return new PostgresMessageSubmission(mapper, dataSource, messageIntakePort, runtimeClock);
+            Clock runtimeClock,
+            RuntimeProperties properties) {
+        return new PostgresMessageSubmission(mapper, dataSource, messageIntakePort, runtimeClock,
+                properties.worker().maxUnfinishedJobs());
     }
 
     @Bean

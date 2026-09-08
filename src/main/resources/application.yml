@@ -17,6 +17,7 @@ session-agent:
     max-model-calls-per-message: ${SESSION_AGENT_MAX_MODEL_CALLS_PER_MESSAGE:12}
   worker:
     concurrency: 4
+    max-unfinished-jobs: 100
     poll-delay: 1s
     lock-duration: 30s
     transient-retries: 3

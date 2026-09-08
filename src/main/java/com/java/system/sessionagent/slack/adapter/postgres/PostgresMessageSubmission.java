@@ -28,13 +28,28 @@ public final class PostgresMessageSubmission implements MessageSubmissionPort {
     private final TransactionTemplate transactionTemplate;
     private final MessageIntakePort messageIntakePort;
     private final Clock clock;
+    private final int maximumUnfinishedJobs;
 
     public PostgresMessageSubmission(DataSource dataSource, MessageIntakePort messageIntakePort, Clock clock) {
-        this(SlackMybatisMapperFactory.create(dataSource), dataSource, messageIntakePort, clock);
+        this(SlackMybatisMapperFactory.create(dataSource), dataSource, messageIntakePort, clock, 100);
+    }
+
+    public PostgresMessageSubmission(
+            DataSource dataSource, MessageIntakePort messageIntakePort, Clock clock, int maximumUnfinishedJobs) {
+        this(SlackMybatisMapperFactory.create(dataSource), dataSource, messageIntakePort, clock, maximumUnfinishedJobs);
     }
 
     public PostgresMessageSubmission(
             SlackDatabaseMapper mapper, DataSource dataSource, MessageIntakePort messageIntakePort, Clock clock) {
+        this(mapper, dataSource, messageIntakePort, clock, 100);
+    }
+
+    public PostgresMessageSubmission(
+            SlackDatabaseMapper mapper,
+            DataSource dataSource,
+            MessageIntakePort messageIntakePort,
+            Clock clock,
+            int maximumUnfinishedJobs) {
         DataSource requiredDataSource = Objects.requireNonNull(dataSource, "Data source must not be null");
         this.mapper = Objects.requireNonNull(mapper, "Slack database mapper must not be null");
         DataSourceTransactionManager transactionManager = new DataSourceTransactionManager(requiredDataSource);
@@ -42,6 +57,8 @@ public final class PostgresMessageSubmission implements MessageSubmissionPort {
         this.transactionTemplate.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRED);
         this.messageIntakePort = Objects.requireNonNull(messageIntakePort, "Message intake port must not be null");
         this.clock = Objects.requireNonNull(clock, "Clock must not be null");
+        Assert.isTrue(maximumUnfinishedJobs > 0, "Maximum unfinished jobs must be positive");
+        this.maximumUnfinishedJobs = maximumUnfinishedJobs;
     }
 
     @Override
@@ -60,6 +77,7 @@ public final class PostgresMessageSubmission implements MessageSubmissionPort {
     }
 
     private SlackIntakeResult receiveInTransaction(MessageSubmission intake) {
+        mapper.lockIntakeCapacity();
         Optional<StoredEventReceipt> existingEvent = findEventReceipt(intake.eventId());
         if (existingEvent.isPresent()) {
             return verifyExistingEvent(intake, existingEvent.orElseThrow());
@@ -79,7 +97,13 @@ public final class PostgresMessageSubmission implements MessageSubmissionPort {
                         intake.rootThreadTs(), intake.messageTs(), SlackIntakeClassification.UNBOUND_THREAD, Optional.empty());
                 return ignore(ignoredIntake);
             }
+            if (mapper.countUnfinishedJobs() >= maximumUnfinishedJobs) {
+                return busy(intake);
+            }
             return accept(intake, binding.orElseThrow());
+        }
+        if (mapper.countUnfinishedJobs() >= maximumUnfinishedJobs) {
+            return busy(intake);
         }
         return acceptRoot(intake);
     }
@@ -112,6 +136,7 @@ public final class PostgresMessageSubmission implements MessageSubmissionPort {
         if (!newLogicalMessage) {
             return SlackIntakeResult.duplicateAccepted(sessionId, jobId);
         }
+        insertNotice(intake, "QUEUED", jobId, "已收到，正在排隊處理。");
         return sessionResolution == SlackSessionResolution.CREATED
                 ? SlackIntakeResult.newSessionAccepted(sessionId, jobId)
                 : SlackIntakeResult.resolvedSessionAccepted(sessionId, jobId);
@@ -119,6 +144,9 @@ public final class PostgresMessageSubmission implements MessageSubmissionPort {
 
     private SlackIntakeResult verifyExistingEvent(MessageSubmission intake, StoredEventReceipt existing) {
         Assert.isTrue(existing.matchesEnvelope(intake), "Slack event ID must retain one logical identity");
+        if (existing.isBusy()) {
+            return SlackIntakeResult.duplicateBusy();
+        }
         if (!existing.isAccepted()) {
             return SlackIntakeResult.duplicateIgnored();
         }
@@ -134,6 +162,10 @@ public final class PostgresMessageSubmission implements MessageSubmissionPort {
     }
 
     private SlackIntakeResult replayLogicalMessage(MessageSubmission intake, StoredMessageReceipt existing) {
+        if (existing.isBusy()) {
+            persistAndVerifyEventReceipt(intake, SlackIntakeClassification.BUSY, null);
+            return SlackIntakeResult.duplicateBusy();
+        }
         if (!existing.isAccepted()) {
             persistAndVerifyEventReceipt(intake, existing.classification(), null);
             return SlackIntakeResult.duplicateIgnored();
@@ -160,6 +192,22 @@ public final class PostgresMessageSubmission implements MessageSubmissionPort {
         boolean newLogicalMessage = persistLogicalReceipt(intake, intake.classification(), null, null);
         persistAndVerifyEventReceipt(intake, intake.classification(), null);
         return newLogicalMessage ? SlackIntakeResult.newIgnored() : SlackIntakeResult.duplicateIgnored();
+    }
+
+    private SlackIntakeResult busy(MessageSubmission intake) {
+        boolean newLogicalMessage = persistLogicalReceipt(intake, SlackIntakeClassification.BUSY, null, null);
+        persistAndVerifyEventReceipt(intake, SlackIntakeClassification.BUSY, null);
+        if (!newLogicalMessage) {
+            return SlackIntakeResult.duplicateBusy();
+        }
+        insertNotice(intake, "BUSY", null, "目前工作已滿，這則訊息尚未受理，請稍後重新送出。");
+        return SlackIntakeResult.newBusy();
+    }
+
+    private void insertNotice(MessageSubmission intake, String kind, UUID messageJobId, String text) {
+        int inserted = mapper.insertNoticeDelivery(UUID.randomUUID(), kind, messageJobId, intake.teamId(), intake.channelId(),
+                intake.rootThreadTs(), intake.messageTs(), text);
+        Assert.isTrue(inserted == 1, "New Slack outcome must persist one delivery notice");
     }
 
     private SlackIntakeResult duplicateAccepted(MessageSubmission intake) {
@@ -213,7 +261,7 @@ public final class PostgresMessageSubmission implements MessageSubmissionPort {
     private static boolean canAcceptTopLevelRootAfterIgnored(MessageSubmission intake, StoredMessageReceipt existing) {
         return intake.classification() == SlackIntakeClassification.ACCEPTED
                 && !isThreadReply(intake)
-                && existing.isIgnoredTopLevel();
+                && existing.isIgnoredTopLevel() && !existing.isBusy();
     }
 
     private void acquireLogicalMessageLock(MessageSubmission intake) {
@@ -244,6 +292,10 @@ public final class PostgresMessageSubmission implements MessageSubmissionPort {
             return classification == SlackIntakeClassification.ACCEPTED;
         }
 
+        private boolean isBusy() {
+            return classification == SlackIntakeClassification.BUSY;
+        }
+
         private boolean matchesOutcome(SlackIntakeClassification expectedClassification, UUID expectedCorrelationId) {
             return classification == expectedClassification && Objects.equals(correlationId, expectedCorrelationId);
         }
@@ -257,6 +309,10 @@ public final class PostgresMessageSubmission implements MessageSubmissionPort {
 
         private boolean isIgnoredTopLevel() {
             return topLevel && !isAccepted();
+        }
+
+        private boolean isBusy() {
+            return classification == SlackIntakeClassification.BUSY;
         }
 
         private boolean matches(SlackIntakeClassification expectedClassification, UUID expectedSessionId, UUID expectedJobId) {

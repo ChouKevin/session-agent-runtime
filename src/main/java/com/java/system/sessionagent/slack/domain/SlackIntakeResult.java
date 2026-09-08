@@ -24,6 +24,12 @@ public record SlackIntakeResult(
             Assert.isTrue(disposition == SlackIntakeDisposition.NEW_ACCEPTED
                             || disposition == SlackIntakeDisposition.DUPLICATE_ACCEPTED,
                     "Accepted Slack intake must use an accepted disposition");
+        } else if (outcome == SlackEventOutcome.BUSY) {
+            Assert.isTrue(sessionId.isEmpty() && messageJobId.isEmpty() && sessionResolution.isEmpty(),
+                    "Busy Slack intake must not include correlation identifiers");
+            Assert.isTrue(disposition == SlackIntakeDisposition.NEW_BUSY
+                            || disposition == SlackIntakeDisposition.DUPLICATE_BUSY,
+                    "Busy Slack intake must use a busy disposition");
         } else {
             Assert.isTrue(sessionId.isEmpty() && messageJobId.isEmpty() && sessionResolution.isEmpty(),
                     "Ignored Slack intake must not include correlation identifiers");
@@ -43,6 +49,14 @@ public record SlackIntakeResult(
 
     public static SlackIntakeResult duplicateAccepted(UUID sessionId, UUID messageJobId) {
         return accepted(SlackIntakeDisposition.DUPLICATE_ACCEPTED, SlackSessionResolution.RESOLVED, sessionId, messageJobId);
+    }
+
+    public static SlackIntakeResult newBusy() {
+        return busy(SlackIntakeDisposition.NEW_BUSY);
+    }
+
+    public static SlackIntakeResult duplicateBusy() {
+        return busy(SlackIntakeDisposition.DUPLICATE_BUSY);
     }
 
     public static SlackIntakeResult newIgnored() {
@@ -66,5 +80,9 @@ public record SlackIntakeResult(
 
     private static SlackIntakeResult ignored(SlackIntakeDisposition disposition) {
         return new SlackIntakeResult(SlackEventOutcome.IGNORED, disposition, Optional.empty(), Optional.empty(), Optional.empty());
+    }
+
+    private static SlackIntakeResult busy(SlackIntakeDisposition disposition) {
+        return new SlackIntakeResult(SlackEventOutcome.BUSY, disposition, Optional.empty(), Optional.empty(), Optional.empty());
     }
 }

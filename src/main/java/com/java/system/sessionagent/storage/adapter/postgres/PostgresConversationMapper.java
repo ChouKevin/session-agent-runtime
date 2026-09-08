@@ -27,6 +27,12 @@ import java.util.UUID;
 @Mapper
 public interface PostgresConversationMapper extends BaseMapper<PostgresConversationMapper.MessageJobEntity> {
 
+    @Select("select pg_advisory_xact_lock(731_937_205)")
+    String lockIntakeCapacity();
+
+    @Select("select count(*) from message_job where status in ('PENDING', 'WORKING', 'RETRY')")
+    long countUnfinishedJobs();
+
     @Select("select pg_advisory_xact_lock(#{firstLockKey}, #{secondLockKey})")
     String lockSourceIdentity(@Param("firstLockKey") int firstLockKey, @Param("secondLockKey") int secondLockKey);
 

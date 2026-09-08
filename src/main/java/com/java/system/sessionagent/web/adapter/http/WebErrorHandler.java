@@ -1,6 +1,7 @@
 package com.java.system.sessionagent.web.adapter.http;
 
 import com.java.system.sessionagent.conversation.port.in.MessageConflictException;
+import com.java.system.sessionagent.conversation.port.in.QueueFullException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.MethodArgumentNotValidException;
@@ -21,6 +22,11 @@ public final class WebErrorHandler {
     @ExceptionHandler(MessageConflictException.class)
     ResponseEntity<MessageResponses.ErrorResponse> conflict(MessageConflictException exception) {
         return error(HttpStatus.CONFLICT, "message_conflict");
+    }
+
+    @ExceptionHandler(QueueFullException.class)
+    ResponseEntity<MessageResponses.ErrorResponse> queueFull(QueueFullException exception) {
+        return error(HttpStatus.TOO_MANY_REQUESTS, "queue_full");
     }
 
     @ExceptionHandler(NotFoundException.class)

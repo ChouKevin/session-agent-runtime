@@ -1,11 +1,17 @@
 package com.java.system.sessionagent.slack.adapter.sdk;
 
 import com.java.system.sessionagent.slack.adapter.postgres.PostgresMessageSubmission;
+import com.java.system.sessionagent.slack.adapter.postgres.SlackPostgresDeliveryStore;
 import com.java.system.sessionagent.slack.adapter.postgres.SlackPostgresSessionLookup;
 import com.java.system.sessionagent.slack.application.MessageHandler;
 import com.java.system.sessionagent.slack.domain.IncomingEvent;
 import com.java.system.sessionagent.slack.domain.MessageSubmission;
 import com.java.system.sessionagent.slack.domain.SlackEventOutcome;
+import com.java.system.sessionagent.slack.domain.SlackDeliveryClaim;
+import com.java.system.sessionagent.slack.domain.SlackDeliveryFailureCategory;
+import com.java.system.sessionagent.slack.domain.SlackDeliveryKind;
+import com.java.system.sessionagent.slack.domain.SlackDeliveryStatus;
+import com.java.system.sessionagent.slack.domain.SlackDeliveryView;
 import com.java.system.sessionagent.slack.domain.SlackIntakeClassification;
 import com.java.system.sessionagent.slack.domain.SlackIntakeDisposition;
 import com.java.system.sessionagent.slack.domain.SlackIntakeResult;
@@ -34,7 +40,9 @@ import com.java.system.sessionagent.conversation.domain.MessageReceipt;
 import com.java.system.sessionagent.conversation.domain.SessionId;
 import com.java.system.sessionagent.conversation.port.in.MessageConflictException;
 import com.java.system.sessionagent.conversation.port.in.MessageIntakePort;
+import com.java.system.sessionagent.conversation.port.in.QueueFullException;
 import com.java.system.sessionagent.conversation.port.out.ConversationModel;
+import com.java.system.sessionagent.conversation.port.out.ConversationModels;
 import com.java.system.sessionagent.conversation.port.out.ConversationStore;
 import com.java.system.sessionagent.conversation.port.out.ModelCallReservation;
 import com.java.system.sessionagent.conversation.port.out.NoOpConversationTelemetry;
@@ -63,6 +71,7 @@ import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
@@ -83,9 +92,12 @@ class PostgresMessageSubmissionPostgresIT {
 
     private static final PostgreSQLContainer POSTGRES = new PostgreSQLContainer("postgres:17-alpine");
 
+    private DriverManagerDataSource dataSource;
+
     @BeforeEach
     void migrate() {
         POSTGRES.start();
+        dataSource = new DriverManagerDataSource(POSTGRES.getJdbcUrl(), POSTGRES.getUsername(), POSTGRES.getPassword());
         flyway().clean();
         flyway().migrate();
     }
@@ -118,6 +130,179 @@ class PostgresMessageSubmissionPostgresIT {
         assertThat(count(jdbcTemplate, "select count(*) from source_message where source_type = 'slack'")).isEqualTo(1);
         assertThat(count(jdbcTemplate, "select count(*) from session_message where role = 'USER'")).isEqualTo(1);
         assertThat(count(jdbcTemplate, "select count(*) from message_job")).isEqualTo(1);
+    }
+
+    @Test
+    void preserves_a_busy_logical_source_and_its_notice_when_capacity_is_full() {
+        PostgresMessageSubmission intake = intake(1);
+        JdbcTemplate jdbcTemplate = new JdbcTemplate(dataSource());
+
+        assertThat(intake.receive(rootIntake("T1", "C1", "1.000001")).outcome()).isEqualTo(SlackEventOutcome.ACCEPTED);
+        assertThat(intake.receive(rootIntake("T1", "C1", "2.000001")).outcome()).isEqualTo(SlackEventOutcome.BUSY);
+        assertThat(intake.receive(replyIntake("new-envelope", "T1", "C1", "2.000001", "2.000001", "U1", "hello")).outcome())
+                .isEqualTo(SlackEventOutcome.BUSY);
+
+        assertThat(count(jdbcTemplate, "select count(*) from message_job")).isEqualTo(1);
+        assertThat(count(jdbcTemplate, "select count(*) from conversation_session where session_key like '%2.000001'")).isZero();
+        assertThat(count(jdbcTemplate, "select count(*) from slack_delivery where kind = 'BUSY'")).isEqualTo(1);
+        assertThat(count(jdbcTemplate, "select count(*) from slack_delivery where kind = 'QUEUED'")).isEqualTo(1);
+    }
+
+    @Test
+    void preserves_accepted_replays_and_content_conflicts_before_rejecting_new_sources_at_capacity() {
+        PostgresMessageSubmission intake = intake(1);
+        MessageSubmission accepted = rootIntake("T1", "C1", "1.000001");
+
+        assertThat(intake.receive(accepted).outcome()).isEqualTo(SlackEventOutcome.ACCEPTED);
+        assertThat(intake.receive(accepted).outcome()).isEqualTo(SlackEventOutcome.ACCEPTED);
+        assertThatThrownBy(() -> intake.receive(replyIntake("event-content-conflict", "T1", "C1", "1.000001", "1.000001",
+                "U1", "changed"))).isInstanceOf(MessageConflictException.class);
+        assertThat(intake.receive(rootIntake("T1", "C1", "2.000001")).outcome()).isEqualTo(SlackEventOutcome.BUSY);
+    }
+
+    @Test
+    void retains_a_busy_outcome_after_capacity_releases_without_promoting_it_to_accepted() {
+        Clock clock = Clock.fixed(Instant.parse("2026-09-06T00:00:00Z"), ZoneOffset.UTC);
+        ConversationStore conversationStore = new PostgresConversationStore(dataSource(), clock, new ObjectMapper(), 1);
+        PostgresMessageSubmission intake = intake(conversationStore, clock, 1);
+        MessageSubmission busySource = rootIntake("T1", "C1", "2.000001");
+
+        assertThat(intake.receive(rootIntake("T1", "C1", "1.000001")).outcome()).isEqualTo(SlackEventOutcome.ACCEPTED);
+        assertThat(intake.receive(busySource).outcome()).isEqualTo(SlackEventOutcome.BUSY);
+        MessageWorkClaim claim = conversationStore.claimNext("worker", Duration.ofSeconds(30)).orElseThrow();
+        conversationStore.append(claim, new ConversationStore.MessageBatch(List.of(new ConversationStore.AssistantData("done")),
+                ConversationStore.JobUpdate.COMPLETE), Instant.parse("2026-09-06T00:00:01Z"));
+
+        assertThat(intake.receive(busySource).outcome()).isEqualTo(SlackEventOutcome.BUSY);
+        assertThat(intake.receive(rootIntake("T1", "C1", "3.000001")).outcome()).isEqualTo(SlackEventOutcome.ACCEPTED);
+        JdbcTemplate jdbcTemplate = new JdbcTemplate(dataSource());
+        assertThat(count(jdbcTemplate, "select count(*) from message_job")).isEqualTo(2);
+        assertThat(count(jdbcTemplate, "select count(*) from slack_delivery where message_ts = '2.000001' and kind = 'BUSY'"))
+                .isEqualTo(1);
+    }
+
+    @Test
+    void exposes_a_permanently_failed_no_job_busy_notice_by_source() {
+        PostgresMessageSubmission intake = intake(1);
+        assertThat(intake.receive(rootIntake("T1", "C1", "1.000001")).outcome()).isEqualTo(SlackEventOutcome.ACCEPTED);
+        assertThat(intake.receive(rootIntake("T1", "C1", "2.000001")).outcome()).isEqualTo(SlackEventOutcome.BUSY);
+        SlackPostgresDeliveryStore deliveryStore = new SlackPostgresDeliveryStore(dataSource());
+
+        SlackDeliveryClaim queuedClaim = deliveryStore.claimNext("delivery-worker", Duration.ofSeconds(30), 5).orElseThrow();
+        assertThat(queuedClaim.kind()).isEqualTo(SlackDeliveryKind.QUEUED);
+        assertThat(deliveryStore.markSent(queuedClaim, "10.000001")).isTrue();
+        SlackDeliveryClaim busyClaim = deliveryStore.claimNext("delivery-worker", Duration.ofSeconds(30), 5).orElseThrow();
+        assertThat(busyClaim.kind()).isEqualTo(SlackDeliveryKind.BUSY);
+        assertThat(deliveryStore.markFailed(busyClaim, SlackDeliveryFailureCategory.PERMANENT)).isTrue();
+
+        List<SlackDeliveryView> deliveries = deliveryStore.findBySource("T1", "C1", "2.000001");
+        assertThat(deliveries).singleElement().satisfies(delivery -> {
+            assertThat(delivery.kind()).isEqualTo(SlackDeliveryKind.BUSY);
+            assertThat(delivery.status()).isEqualTo(SlackDeliveryStatus.FAILED);
+            assertThat(delivery.failureCategory()).contains(SlackDeliveryFailureCategory.PERMANENT);
+            assertThat(delivery.messageJobId()).isEmpty();
+        });
+    }
+
+    @Test
+    void permits_exactly_one_of_mixed_http_and_slack_intake_at_the_final_capacity_slot() throws Exception {
+        Clock clock = Clock.fixed(Instant.parse("2026-09-06T00:00:00Z"), ZoneOffset.UTC);
+        ConversationStore httpStore = new PostgresConversationStore(dataSource(), clock, new ObjectMapper(), 100);
+        for (int index = 0; index < 99; index++) {
+            receive(httpStore, new IncomingMessage("http-" + index, "alice", "http-source-" + index, "message"));
+        }
+        PostgresMessageSubmission slackIntake = intake(100);
+        CountDownLatch ready = new CountDownLatch(2);
+        CountDownLatch start = new CountDownLatch(1);
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            Future<Boolean> httpAccepted = executor.submit(() -> {
+                ready.countDown();
+                start.await();
+                try {
+                    receive(httpStore, new IncomingMessage("http-final", "alice", "http-final-source", "message"));
+                    return true;
+                } catch (QueueFullException exception) {
+                    return false;
+                }
+            });
+            Future<Boolean> slackAccepted = executor.submit(() -> {
+                ready.countDown();
+                start.await();
+                return slackIntake.receive(rootIntake("T1", "C1", "1.000001")).outcome() == SlackEventOutcome.ACCEPTED;
+            });
+            ready.await();
+            start.countDown();
+
+            assertThat(List.of(httpAccepted.get(), slackAccepted.get())).containsExactlyInAnyOrder(true, false);
+        } finally {
+            executor.shutdownNow();
+        }
+        JdbcTemplate jdbcTemplate = new JdbcTemplate(dataSource());
+        assertThat(count(jdbcTemplate, "select count(*) from message_job")).isEqualTo(100);
+        assertThat(count(jdbcTemplate, "select count(*) from slack_delivery where kind in ('QUEUED', 'BUSY')")).isEqualTo(1);
+    }
+
+    @Test
+    void counts_pending_working_and_retry_jobs_until_terminal_completion_releases_capacity() {
+        ConversationStore conversationStore = new PostgresConversationStore(dataSource(),
+                Clock.fixed(Instant.parse("2026-09-06T00:00:00Z"), ZoneOffset.UTC), new ObjectMapper(), 1);
+        receive(conversationStore, incoming("first"));
+
+        assertThatThrownBy(() -> receive(conversationStore, incoming("pending"))).isInstanceOf(QueueFullException.class);
+        MessageWorkClaim workingClaim = conversationStore.claimNext("worker", Duration.ofSeconds(30)).orElseThrow();
+        assertThatThrownBy(() -> receive(conversationStore, incoming("working"))).isInstanceOf(QueueFullException.class);
+        assertThat(conversationStore.scheduleRetry(workingClaim, Duration.ZERO)).isTrue();
+        assertThatThrownBy(() -> receive(conversationStore, incoming("retry"))).isInstanceOf(QueueFullException.class);
+        MessageWorkClaim retryClaim = conversationStore.claimNext("worker", Duration.ofSeconds(30)).orElseThrow();
+        conversationStore.append(retryClaim, new ConversationStore.MessageBatch(List.of(new ConversationStore.AssistantData("done")),
+                ConversationStore.JobUpdate.COMPLETE), Instant.parse("2026-09-06T00:00:01Z"));
+
+        assertThat(receive(conversationStore, incoming("after-terminal")).messageJobId().value()).isNotBlank();
+    }
+
+    @Test
+    void retains_existing_unfinished_jobs_when_a_reconstructed_store_has_a_lower_limit() {
+        Clock clock = Clock.fixed(Instant.parse("2026-09-06T00:00:00Z"), ZoneOffset.UTC);
+        ConversationStore roomierStore = new PostgresConversationStore(dataSource(), clock, new ObjectMapper(), 2);
+        MessageReceipt first = receive(roomierStore, incoming("first"));
+        receive(roomierStore, incoming("second"));
+        ConversationStore tightenedStore = new PostgresConversationStore(dataSource(), clock, new ObjectMapper(), 1);
+
+        assertThat(receive(tightenedStore, incoming("first")).messageJobId()).isEqualTo(first.messageJobId());
+        assertThatThrownBy(() -> receive(tightenedStore, incoming("third"))).isInstanceOf(QueueFullException.class);
+        assertThat(count(new JdbcTemplate(dataSource()), "select count(*) from message_job")).isEqualTo(2);
+    }
+
+    @Test
+    void keeps_an_unbound_reply_ignored_when_capacity_is_full() {
+        PostgresMessageSubmission intake = intake(1);
+        assertThat(intake.receive(rootIntake("T1", "C1", "1.000001")).outcome()).isEqualTo(SlackEventOutcome.ACCEPTED);
+
+        SlackIntakeResult result = intake.receive(replyIntake("event-unbound-full", "T1", "C1", "2.000001", "2.000002", "U2", "reply"));
+
+        assertThat(result.outcome()).isEqualTo(SlackEventOutcome.IGNORED);
+        JdbcTemplate jdbcTemplate = new JdbcTemplate(dataSource());
+        assertThat(count(jdbcTemplate, "select count(*) from slack_delivery where kind = 'BUSY' ")).isZero();
+    }
+
+    @Test
+    void promotes_a_previously_ignored_top_level_source_to_one_busy_outcome_when_capacity_is_full() {
+        PostgresMessageSubmission intake = intake(1);
+        MessageSubmission ignored = new MessageSubmission("event-ignored-top-level", "T1", "C1", "2.000001", "2.000001",
+                SlackIntakeClassification.BLANK, Optional.empty());
+        assertThat(intake.receive(ignored).outcome()).isEqualTo(SlackEventOutcome.IGNORED);
+        assertThat(intake.receive(rootIntake("T1", "C1", "1.000001")).outcome()).isEqualTo(SlackEventOutcome.ACCEPTED);
+
+        SlackIntakeResult promoted = intake.receive(rootIntake("T1", "C1", "2.000001"));
+
+        assertThat(promoted.outcome()).isEqualTo(SlackEventOutcome.BUSY);
+        JdbcTemplate jdbcTemplate = new JdbcTemplate(dataSource());
+        assertThat(count(jdbcTemplate, "select count(*) from message_job")).isEqualTo(1);
+        assertThat(count(jdbcTemplate, "select count(*) from slack_message_receipt where message_ts = '2.000001' and classification = 'BUSY'"))
+                .isEqualTo(1);
+        assertThat(count(jdbcTemplate, "select count(*) from slack_delivery where message_ts = '2.000001' and kind = 'BUSY'"))
+                .isEqualTo(1);
     }
 
     @Test
@@ -250,7 +435,7 @@ class PostgresMessageSubmissionPostgresIT {
         PostgresMessageSubmission intake = intake();
         JdbcTemplate jdbcTemplate = new JdbcTemplate(dataSource());
         MessageSubmission ignored = new MessageSubmission("event-ignored-first", "T1", "C1", "1.000001", "1.000001",
-                SlackIntakeClassification.UNSUPPORTED_CONTENT, java.util.Optional.empty());
+                SlackIntakeClassification.UNSUPPORTED_CONTENT, Optional.empty());
         MessageSubmission accepted = rootIntake("T1", "C1", "1.000001");
 
         SlackEventOutcome ignoredOutcome = intake.receive(ignored).outcome();
@@ -294,7 +479,7 @@ class PostgresMessageSubmissionPostgresIT {
         JdbcTemplate jdbcTemplate = new JdbcTemplate(dataSource());
         MessageSubmission accepted = rootIntake("T1", "C1", "1.000001");
         MessageSubmission ignored = new MessageSubmission("event-ignored-race", "T1", "C1", "1.000001", "1.000001",
-                SlackIntakeClassification.UNSUPPORTED_CONTENT, java.util.Optional.empty());
+                SlackIntakeClassification.UNSUPPORTED_CONTENT, Optional.empty());
 
         ExecutorService executor = Executors.newFixedThreadPool(2);
         try {
@@ -435,7 +620,7 @@ class PostgresMessageSubmissionPostgresIT {
         JdbcTemplate jdbcTemplate = new JdbcTemplate(dataSource());
 
         SlackEventOutcome outcome = intake.receive(new MessageSubmission("event-ignored", "T1", "C1", "1.000001", "1.000001",
-                SlackIntakeClassification.BLANK, java.util.Optional.empty())).outcome();
+                SlackIntakeClassification.BLANK, Optional.empty())).outcome();
 
         assertThat(outcome).isEqualTo(SlackEventOutcome.IGNORED);
         assertThat(count(jdbcTemplate, "select count(*) from slack_event_receipt where classification = 'BLANK'")).isEqualTo(1);
@@ -502,7 +687,7 @@ class PostgresMessageSubmissionPostgresIT {
                     Consumer<ModelUsage> usageObserver) {
                 modelCalls.incrementAndGet();
                 reservation.reserve();
-                return new ModelCallResult(new ModelReply.Text("done"), java.util.Optional.empty());
+                return new ModelCallResult(new ModelReply.Text("done"), Optional.empty());
             }
         };
         ToolCatalog toolCatalog = () -> new ToolSnapshot(List.of());
@@ -541,12 +726,19 @@ class PostgresMessageSubmissionPostgresIT {
     }
 
     private PostgresMessageSubmission intake() {
-        DriverManagerDataSource dataSource = dataSource();
+        return intake(100);
+    }
+
+    private PostgresMessageSubmission intake(int maximumUnfinishedJobs) {
         Clock clock = Clock.fixed(Instant.parse("2026-09-06T00:00:00Z"), ZoneOffset.UTC);
-        ConversationStore conversationStore = new PostgresConversationStore(dataSource, clock, new ObjectMapper());
+        ConversationStore conversationStore = new PostgresConversationStore(dataSource(), clock, new ObjectMapper(), maximumUnfinishedJobs);
+        return intake(conversationStore, clock, maximumUnfinishedJobs);
+    }
+
+    private PostgresMessageSubmission intake(ConversationStore conversationStore, Clock clock, int maximumUnfinishedJobs) {
         MessageIntakePort messageIntakePort = new MessageService(conversationStore, TestConfiguredModels.withDefault("test"),
                 new NoOpConversationTelemetry());
-        return new PostgresMessageSubmission(dataSource, messageIntakePort, clock);
+        return new PostgresMessageSubmission(dataSource(), messageIntakePort, clock, maximumUnfinishedJobs);
     }
 
     private SlackBoltSocketClient socketClient() {
@@ -624,7 +816,16 @@ class PostgresMessageSubmissionPostgresIT {
                 "slack/" + teamId + "/" + channelId + "/" + messageTs,
                 messageText);
         return new MessageSubmission(eventId, teamId, channelId, rootThreadTs, messageTs,
-                SlackIntakeClassification.ACCEPTED, java.util.Optional.of(message));
+                SlackIntakeClassification.ACCEPTED, Optional.of(message));
+    }
+
+    private static MessageReceipt receive(ConversationStore store, IncomingMessage message) {
+        ConversationModels models = TestConfiguredModels.withDefault("test");
+        return store.receive(message, models.defaultSelection(), models);
+    }
+
+    private static IncomingMessage incoming(String sourceId) {
+        return new IncomingMessage(sourceId, "alice", "http-source-" + sourceId, "message");
     }
 
     private static int count(JdbcTemplate jdbcTemplate, String query) {
@@ -633,7 +834,7 @@ class PostgresMessageSubmissionPostgresIT {
     }
 
     private DriverManagerDataSource dataSource() {
-        return new DriverManagerDataSource(POSTGRES.getJdbcUrl(), POSTGRES.getUsername(), POSTGRES.getPassword());
+        return dataSource;
     }
 
     private Flyway flyway() {

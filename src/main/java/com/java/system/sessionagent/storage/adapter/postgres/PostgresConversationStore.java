@@ -28,6 +28,7 @@ import com.java.system.sessionagent.conversation.domain.ToolRequest;
 import com.java.system.sessionagent.tool.domain.ToolName;
 import com.java.system.sessionagent.conversation.domain.UserMessage;
 import com.java.system.sessionagent.conversation.port.in.MessageConflictException;
+import com.java.system.sessionagent.conversation.port.in.QueueFullException;
 import com.java.system.sessionagent.conversation.port.out.ConversationStore;
 import com.java.system.sessionagent.conversation.port.out.ModelSelectionLookup;
 import com.java.system.sessionagent.conversation.port.out.ConversationStoreFailure;
@@ -73,13 +74,27 @@ public final class PostgresConversationStore implements ConversationStore {
     private final TransactionTemplate historyTransactionTemplate;
     private final Clock clock;
     private final ObjectMapper objectMapper;
+    private final int maximumUnfinishedJobs;
 
     public PostgresConversationStore(DataSource dataSource, Clock clock, ObjectMapper objectMapper) {
-        this(PostgresMybatisMapperFactory.create(dataSource), dataSource, clock, objectMapper);
+        this(PostgresMybatisMapperFactory.create(dataSource), dataSource, clock, objectMapper, 100);
+    }
+
+    public PostgresConversationStore(DataSource dataSource, Clock clock, ObjectMapper objectMapper, int maximumUnfinishedJobs) {
+        this(PostgresMybatisMapperFactory.create(dataSource), dataSource, clock, objectMapper, maximumUnfinishedJobs);
     }
 
     public PostgresConversationStore(
             PostgresConversationMapper mapper, DataSource dataSource, Clock clock, ObjectMapper objectMapper) {
+        this(mapper, dataSource, clock, objectMapper, 100);
+    }
+
+    public PostgresConversationStore(
+            PostgresConversationMapper mapper,
+            DataSource dataSource,
+            Clock clock,
+            ObjectMapper objectMapper,
+            int maximumUnfinishedJobs) {
         DataSource requiredDataSource = Objects.requireNonNull(dataSource, "Data source must not be null");
         this.mapper = Objects.requireNonNull(mapper, "Conversation mapper must not be null");
         DataSourceTransactionManager transactionManager = new DataSourceTransactionManager(requiredDataSource);
@@ -91,6 +106,8 @@ public final class PostgresConversationStore implements ConversationStore {
         this.historyTransactionTemplate.setReadOnly(true);
         this.clock = Objects.requireNonNull(clock, "Clock must not be null");
         this.objectMapper = Objects.requireNonNull(objectMapper, "Object mapper must not be null");
+        Assert.isTrue(maximumUnfinishedJobs > 0, "Maximum unfinished jobs must be positive");
+        this.maximumUnfinishedJobs = maximumUnfinishedJobs;
     }
 
     @Override
@@ -105,7 +122,7 @@ public final class PostgresConversationStore implements ConversationStore {
             MessageReceipt receipt = transactionTemplate.execute(status -> receiveInTransaction(requiredIncomingMessage,
                     requiredDefaultSelection, requiredSelectionLookup));
             return Objects.requireNonNull(receipt, "Message receipt must not be null");
-        } catch (ConversationStoreFailure exception) {
+        } catch (ConversationStoreFailure | QueueFullException exception) {
             throw exception;
         } catch (RuntimeException exception) {
             throw translate(exception);
@@ -117,6 +134,7 @@ public final class PostgresConversationStore implements ConversationStore {
             ModelSelection defaultSelection,
             ModelSelectionLookup selectionLookup) {
         String sourceType = incomingMessage.source().storageValue();
+        mapper.lockIntakeCapacity();
         lockSourceIdentity(sourceType, incomingMessage.sourceMessageId());
         String contentHash = contentHash(incomingMessage.participantId(), incomingMessage.message());
         Optional<StoredSourceMessage> existing = findSourceMessage(sourceType, incomingMessage.sourceMessageId());
@@ -126,6 +144,9 @@ public final class PostgresConversationStore implements ConversationStore {
                 return new MessageReceipt(new SessionId(stored.sessionId().toString()), new MessageJobId(stored.messageJobId().toString()));
             }
             throw new MessageConflictException();
+        }
+        if (mapper.countUnfinishedJobs() >= maximumUnfinishedJobs) {
+            throw new QueueFullException();
         }
         StoredSession session = lockOrCreateSession(sourceType, incomingMessage.sessionKey(), defaultSelection);
         ModelSelection selection = selectionLookup.findSelection(session.selectedModel())

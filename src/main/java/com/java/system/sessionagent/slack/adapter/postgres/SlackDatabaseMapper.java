@@ -19,6 +19,12 @@ import java.util.UUID;
 @Mapper
 public interface SlackDatabaseMapper extends BaseMapper<SlackDatabaseMapper.DeliveryEntity> {
 
+    @Select("select pg_advisory_xact_lock(731_937_205)")
+    String lockIntakeCapacity();
+
+    @Select("select count(*) from message_job where status in ('PENDING', 'WORKING', 'RETRY')")
+    long countUnfinishedJobs();
+
     @Insert("""
             insert into slack_thread_binding(team_id, channel_id, root_thread_ts, session_id, created_at)
             values (#{teamId}, #{channelId}, #{rootThreadTs}, #{sessionId,jdbcType=OTHER}, #{createdAt})
@@ -52,8 +58,9 @@ public interface SlackDatabaseMapper extends BaseMapper<SlackDatabaseMapper.Deli
                 message_job_id = excluded.message_job_id
             where slack_message_receipt.top_level
                 and slack_message_receipt.classification <> 'ACCEPTED'
+                and slack_message_receipt.classification <> 'BUSY'
                 and excluded.top_level
-                and excluded.classification = 'ACCEPTED'
+                and excluded.classification in ('ACCEPTED', 'BUSY')
             """)
     int insertLogicalReceipt(
             @Param("teamId") String teamId,
@@ -109,17 +116,31 @@ public interface SlackDatabaseMapper extends BaseMapper<SlackDatabaseMapper.Deli
 
     @Select(value = """
             with candidate as (
-                select delivery_id
-                from slack_delivery
-                where attempt_count < #{maximumAttempts} and ((status in ('PENDING', 'RETRY') and next_attempt_at <= clock_timestamp())
-                   or (status = 'WORKING' and locked_until <= clock_timestamp()))
-                order by next_attempt_at, created_at, delivery_id
+                select candidate_delivery.delivery_id
+                from slack_delivery candidate_delivery
+                where candidate_delivery.attempt_count < #{maximumAttempts}
+                  and ((candidate_delivery.status in ('PENDING', 'RETRY') and candidate_delivery.next_attempt_at <= clock_timestamp())
+                   or (candidate_delivery.status = 'WORKING' and candidate_delivery.locked_until <= clock_timestamp()))
+                  and (candidate_delivery.kind <> 'ANSWER' or not exists (
+                      select 1
+                      from slack_delivery queued
+                      where queued.kind = 'QUEUED'
+                        and queued.message_job_id = candidate_delivery.message_job_id
+                        and queued.status not in ('SENT', 'FAILED')))
+                  and (candidate_delivery.kind <> 'ANSWER' or not exists (
+                      select 1
+                      from slack_delivery earlier_answer
+                      where earlier_answer.kind = 'ANSWER'
+                        and earlier_answer.terminal_session_id = candidate_delivery.terminal_session_id
+                        and earlier_answer.terminal_sequence < candidate_delivery.terminal_sequence
+                        and earlier_answer.status not in ('SENT', 'FAILED')))
+                order by candidate_delivery.next_attempt_at, candidate_delivery.created_at, candidate_delivery.delivery_id
                 for update skip locked limit 1)
             update slack_delivery delivery set status = 'WORKING', worker_id = #{workerId},
                 locked_until = clock_timestamp() + (#{leaseMilliseconds} * interval '1 millisecond'),
                 claim_number = delivery.claim_number + 1, attempt_count = delivery.attempt_count + 1
             from candidate where delivery.delivery_id = candidate.delivery_id
-            returning delivery.delivery_id, delivery.terminal_session_id as session_id, delivery.message_job_id, delivery.claim_number,
+            returning delivery.delivery_id, delivery.kind, delivery.terminal_session_id as session_id, delivery.message_job_id, delivery.claim_number,
                 delivery.attempt_count, delivery.worker_id, delivery.locked_until, delivery.channel_id,
                 delivery.root_thread_ts, delivery.terminal_text
             """, affectData = true)
@@ -173,7 +194,7 @@ public interface SlackDatabaseMapper extends BaseMapper<SlackDatabaseMapper.Deli
     int terminalizeExpiredExhaustedDeliveries(@Param("maximumAttempts") int maximumAttempts);
 
     @Select("""
-            select delivery_id, status, attempt_count, failure_category, slack_message_ts, next_attempt_at
+            select delivery_id, kind, status, attempt_count, failure_category, slack_message_ts, next_attempt_at, message_job_id
             from slack_delivery
             where delivery_id = #{deliveryId}
             """)
@@ -181,7 +202,29 @@ public interface SlackDatabaseMapper extends BaseMapper<SlackDatabaseMapper.Deli
     List<DeliveryViewRow> findDelivery(@Param("deliveryId") UUID deliveryId);
 
     @Select("""
-            select job.message_job_id, terminal.session_id, terminal.sequence, binding.channel_id, binding.root_thread_ts,
+            select delivery_id, kind, status, attempt_count, failure_category, slack_message_ts, next_attempt_at, message_job_id
+            from slack_delivery where team_id = #{teamId} and channel_id = #{channelId} and message_ts = #{messageTs}
+            order by created_at, delivery_id
+            """)
+    @Options(flushCache = Options.FlushCachePolicy.FALSE, useCache = false)
+    List<DeliveryViewRow> findDeliveriesBySource(
+            @Param("teamId") String teamId, @Param("channelId") String channelId, @Param("messageTs") String messageTs);
+
+    @Insert("""
+            insert into slack_delivery(delivery_id, kind, message_job_id, team_id, channel_id, root_thread_ts, message_ts, terminal_text,
+                status, attempt_count, next_attempt_at, claim_number, created_at)
+            values (#{deliveryId}, #{kind}, #{messageJobId,jdbcType=OTHER}, #{teamId}, #{channelId}, #{rootThreadTs}, #{messageTs}, #{text},
+                'PENDING', 0, clock_timestamp(), 0, clock_timestamp())
+            on conflict (team_id, channel_id, message_ts, kind) do nothing
+            """)
+    int insertNoticeDelivery(
+            @Param("deliveryId") UUID deliveryId, @Param("kind") String kind, @Param("messageJobId") UUID messageJobId,
+            @Param("teamId") String teamId, @Param("channelId") String channelId, @Param("rootThreadTs") String rootThreadTs,
+            @Param("messageTs") String messageTs, @Param("text") String text);
+
+    @Select("""
+            select job.message_job_id, terminal.session_id, terminal.sequence, receipt.team_id, binding.channel_id, binding.root_thread_ts,
+                receipt.message_ts,
                 case terminal.role when 'ASSISTANT' then assistant.message else runtime.message end as terminal_text
             from message_job job
             join slack_message_receipt receipt on receipt.message_job_id = job.message_job_id
@@ -200,9 +243,10 @@ public interface SlackDatabaseMapper extends BaseMapper<SlackDatabaseMapper.Deli
     List<NewDeliveryRow> discoverDeliveries();
 
     @Insert("""
-            insert into slack_delivery(delivery_id, terminal_session_id, terminal_sequence, message_job_id, channel_id,
-                root_thread_ts, terminal_text, status, attempt_count, next_attempt_at, claim_number, created_at)
-            values (#{deliveryId}, #{sessionId}, #{sequence}, #{messageJobId}, #{channelId}, #{rootThreadTs}, #{terminalText},
+            insert into slack_delivery(delivery_id, kind, terminal_session_id, terminal_sequence, message_job_id, team_id, channel_id,
+                root_thread_ts, message_ts, terminal_text, status, attempt_count, next_attempt_at, claim_number, created_at)
+            values (#{deliveryId}, 'ANSWER', #{sessionId}, #{sequence}, #{messageJobId}, #{teamId}, #{channelId}, #{rootThreadTs},
+                #{messageTs}, #{terminalText},
                 'PENDING', 0, clock_timestamp(), 0, clock_timestamp())
             on conflict (terminal_session_id, terminal_sequence) do nothing
             """)
@@ -211,8 +255,10 @@ public interface SlackDatabaseMapper extends BaseMapper<SlackDatabaseMapper.Deli
             @Param("sessionId") UUID sessionId,
             @Param("sequence") long sequence,
             @Param("messageJobId") UUID messageJobId,
+            @Param("teamId") String teamId,
             @Param("channelId") String channelId,
             @Param("rootThreadTs") String rootThreadTs,
+            @Param("messageTs") String messageTs,
             @Param("terminalText") String terminalText);
 
     @Select("""
@@ -238,6 +284,7 @@ public interface SlackDatabaseMapper extends BaseMapper<SlackDatabaseMapper.Deli
 
         @TableId(value = "delivery_id", type = IdType.INPUT)
         private UUID deliveryId;
+        private String kind;
         private UUID terminalSessionId;
         private long terminalSequence;
         private UUID messageJobId;
@@ -258,6 +305,10 @@ public interface SlackDatabaseMapper extends BaseMapper<SlackDatabaseMapper.Deli
         public UUID getDeliveryId() {
             return deliveryId;
         }
+
+        public String getKind() { return kind; }
+
+        public void setKind(String kind) { this.kind = kind; }
 
         public void setDeliveryId(UUID deliveryId) {
             this.deliveryId = deliveryId;
@@ -405,6 +456,7 @@ public interface SlackDatabaseMapper extends BaseMapper<SlackDatabaseMapper.Deli
 
     record DeliveryClaimRow(
             UUID deliveryId,
+            String kind,
             UUID sessionId,
             UUID messageJobId,
             long claimNumber,
@@ -418,19 +470,23 @@ public interface SlackDatabaseMapper extends BaseMapper<SlackDatabaseMapper.Deli
 
     record DeliveryViewRow(
             UUID deliveryId,
+            String kind,
             String status,
             int attemptCount,
             String failureCategory,
             String slackMessageTs,
-            OffsetDateTime nextAttemptAt) {
+            OffsetDateTime nextAttemptAt,
+            UUID messageJobId) {
     }
 
     record NewDeliveryRow(
             UUID messageJobId,
             UUID sessionId,
             long sequence,
+            String teamId,
             String channelId,
             String rootThreadTs,
+            String messageTs,
             String terminalText) {
     }
 

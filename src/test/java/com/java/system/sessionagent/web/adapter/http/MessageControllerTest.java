@@ -18,9 +18,15 @@ import com.java.system.sessionagent.conversation.domain.UserMessage;
 import com.java.system.sessionagent.conversation.port.in.ConversationQueryPort;
 import com.java.system.sessionagent.conversation.port.in.ExternalSessionReferenceQueryPort;
 import com.java.system.sessionagent.conversation.port.in.MessageIntakePort;
+import com.java.system.sessionagent.conversation.port.in.QueueFullException;
 import com.java.system.sessionagent.conversation.port.in.SessionModelPort;
 import com.java.system.sessionagent.conversation.port.in.MessageJobView;
 import com.java.system.sessionagent.conversation.port.in.SessionDetailView;
+import com.java.system.sessionagent.slack.port.out.SlackDeliveryStore;
+import com.java.system.sessionagent.slack.domain.SlackDeliveryFailureCategory;
+import com.java.system.sessionagent.slack.domain.SlackDeliveryKind;
+import com.java.system.sessionagent.slack.domain.SlackDeliveryStatus;
+import com.java.system.sessionagent.slack.domain.SlackDeliveryView;
 import com.java.system.sessionagent.conversation.domain.ContextEstimate;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -38,6 +44,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.Map;
 import java.util.stream.Stream;
+import java.util.UUID;
 
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
@@ -188,6 +195,58 @@ class MessageControllerTest {
     }
 
     @Test
+    void returns_the_safe_delivery_status_for_one_slack_logical_source() throws Exception {
+        SlackDeliveryStore deliveries = mock(SlackDeliveryStore.class);
+        Instant nextAttemptAt = Instant.parse("2026-09-09T01:02:03Z");
+        when(deliveries.findBySource("T1", "C1", "1.000001")).thenReturn(List.of(
+                new SlackDeliveryView(UUID.fromString("5f0d9fb7-cd73-4a09-8f37-08bd3cbd2738"), SlackDeliveryKind.QUEUED,
+                        SlackDeliveryStatus.PENDING, 0, Optional.empty(), Optional.empty(), nextAttemptAt,
+                        Optional.of(UUID.fromString(JOB_ID))),
+                new SlackDeliveryView(UUID.fromString("d3f80738-bd51-4614-ac4e-58bc0e559ee1"), SlackDeliveryKind.BUSY,
+                        SlackDeliveryStatus.FAILED, 1, Optional.of(SlackDeliveryFailureCategory.PERMANENT), Optional.empty(),
+                        nextAttemptAt, Optional.empty())));
+        MockMvc mvc = mvc(mock(MessageIntakePort.class), mock(ConversationQueryPort.class),
+                mock(ExternalSessionReferenceQueryPort.class), mock(SessionModelPort.class), deliveries);
+
+        mvc.perform(get("/internal/slack-deliveries").queryParam("teamId", "T1").queryParam("channelId", "C1")
+                        .queryParam("messageTs", "1.000001"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$[0].deliveryId").value("5f0d9fb7-cd73-4a09-8f37-08bd3cbd2738"))
+                .andExpect(jsonPath("$[0].kind").value("QUEUED"))
+                .andExpect(jsonPath("$[0].status").value("PENDING"))
+                .andExpect(jsonPath("$[0].attemptCount").value(0))
+                .andExpect(jsonPath("$[0].failureCategory").isEmpty())
+                .andExpect(jsonPath("$[0].nextAttemptAt").value("2026-09-09T01:02:03Z"))
+                .andExpect(jsonPath("$[0].jobId").value(JOB_ID))
+                .andExpect(jsonPath("$[1].failureCategory").value("PERMANENT"))
+                .andExpect(jsonPath("$[1].jobId").isEmpty())
+                .andExpect(jsonPath("$..terminalText").doesNotExist())
+                .andExpect(jsonPath("$..providerFailure").doesNotExist())
+                .andExpect(jsonPath("$..totalParts").doesNotExist());
+    }
+
+    @Test
+    void rejects_missing_or_repeated_slack_delivery_source_parameters() throws Exception {
+        MockMvc mvc = mvc(mock(MessageIntakePort.class), mock(ConversationQueryPort.class));
+
+        mvc.perform(get("/internal/slack-deliveries").queryParam("teamId", "T1").queryParam("channelId", "C1"))
+                .andExpect(status().isBadRequest()).andExpect(jsonPath("$.code").value("bad_request"));
+        mvc.perform(get("/internal/slack-deliveries").queryParam("teamId", "T1", "T2").queryParam("channelId", "C1")
+                        .queryParam("messageTs", "1.000001"))
+                .andExpect(status().isBadRequest()).andExpect(jsonPath("$.code").value("bad_request"));
+    }
+
+    @Test
+    void maps_capacity_rejection_to_queue_full() throws Exception {
+        MessageIntakePort intake = mock(MessageIntakePort.class);
+        when(intake.receive(new IncomingMessage("thread", "alice", "source", "hello"))).thenThrow(new QueueFullException());
+
+        mvc(intake, mock(ConversationQueryPort.class)).perform(post("/internal/messages").contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"sessionKey\":\"thread\",\"participantId\":\"alice\",\"sourceMessageId\":\"source\",\"message\":\"hello\"}"))
+                .andExpect(status().isTooManyRequests()).andExpect(jsonPath("$.code").value("queue_full"));
+    }
+
+    @Test
     void selects_a_configured_model_for_future_messages() throws Exception {
         SessionModelPort sessionModels = mock(SessionModelPort.class);
         when(sessionModels.select(new SessionId(SESSION_ID), "openai-primary"))
@@ -330,9 +389,18 @@ class MessageControllerTest {
             ConversationQueryPort queries,
             ExternalSessionReferenceQueryPort referenceQueries,
             SessionModelPort sessionModels) {
+        return mvc(intake, queries, referenceQueries, sessionModels, mock(SlackDeliveryStore.class));
+    }
+
+    private static MockMvc mvc(
+            MessageIntakePort intake,
+            ConversationQueryPort queries,
+            ExternalSessionReferenceQueryPort referenceQueries,
+            SessionModelPort sessionModels,
+            SlackDeliveryStore slackDeliveryStore) {
         JsonMapper.Builder builder = JsonMapper.builder();
         new RuntimeConfiguration().strictJsonMapper().customize(builder);
-        return MockMvcBuilders.standaloneSetup(new MessageController(intake, queries, referenceQueries, sessionModels))
+        return MockMvcBuilders.standaloneSetup(new MessageController(intake, queries, referenceQueries, sessionModels, slackDeliveryStore))
                 .setMessageConverters(new JacksonJsonHttpMessageConverter(builder))
                 .setControllerAdvice(new WebErrorHandler()).build();
     }

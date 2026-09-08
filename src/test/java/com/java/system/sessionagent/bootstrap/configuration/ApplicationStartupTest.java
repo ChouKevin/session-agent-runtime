@@ -90,6 +90,19 @@ class ApplicationStartupTest {
     }
 
     @Test
+    void binds_the_unfinished_job_limit_with_a_default_and_rejects_nonpositive_values() {
+        contextRunner.run(context -> {
+            RuntimeProperties properties = context.getBean(RuntimeProperties.class);
+
+            assertThat(properties.worker().maxUnfinishedJobs()).isEqualTo(100);
+        });
+        contextRunner.withPropertyValues("session-agent.worker.max-unfinished-jobs=17")
+                .run(context -> assertThat(context.getBean(RuntimeProperties.class).worker().maxUnfinishedJobs()).isEqualTo(17));
+        contextRunner.withPropertyValues("session-agent.worker.max-unfinished-jobs=0")
+                .run(context -> assertThat(context).hasFailed());
+    }
+
+    @Test
     void configures_google_timeout_and_disables_both_spring_ai_and_sdk_retries() {
         contextRunner.run(context -> {
             ConfiguredModels configuredModels = context.getBean(ConfiguredModels.class);

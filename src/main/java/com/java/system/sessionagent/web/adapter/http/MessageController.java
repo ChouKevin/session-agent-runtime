@@ -7,6 +7,7 @@ import com.java.system.sessionagent.conversation.port.in.ExternalSessionReferenc
 import com.java.system.sessionagent.conversation.port.in.MessageIntakePort;
 import com.java.system.sessionagent.conversation.port.in.SessionModelPort;
 import com.java.system.sessionagent.conversation.domain.SessionId;
+import com.java.system.sessionagent.slack.port.out.SlackDeliveryStore;
 import jakarta.validation.Valid;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -35,20 +36,24 @@ public final class MessageController {
     private final ConversationQueryPort conversationQueryPort;
     private final ExternalSessionReferenceQueryPort externalSessionReferenceQueryPort;
     private final SessionModelPort sessionModelPort;
+    private final SlackDeliveryStore slackDeliveryStore;
 
     public MessageController(
             MessageIntakePort messageIntakePort,
             ConversationQueryPort conversationQueryPort,
             ExternalSessionReferenceQueryPort externalSessionReferenceQueryPort,
-            SessionModelPort sessionModelPort) {
+            SessionModelPort sessionModelPort,
+            SlackDeliveryStore slackDeliveryStore) {
         Assert.notNull(messageIntakePort, "Message intake port must not be null");
         Assert.notNull(conversationQueryPort, "Conversation query port must not be null");
         Assert.notNull(externalSessionReferenceQueryPort, "External session reference query port must not be null");
         Assert.notNull(sessionModelPort, "Session model port must not be null");
+        Assert.notNull(slackDeliveryStore, "Slack delivery store must not be null");
         this.messageIntakePort = messageIntakePort;
         this.conversationQueryPort = conversationQueryPort;
         this.externalSessionReferenceQueryPort = externalSessionReferenceQueryPort;
         this.sessionModelPort = sessionModelPort;
+        this.slackDeliveryStore = slackDeliveryStore;
     }
 
     @PutMapping("/sessions/{sessionId}/model")
@@ -72,6 +77,16 @@ public final class MessageController {
                 request.sourceMessageId(), request.message()));
         return ResponseEntity.status(HttpStatus.ACCEPTED)
                 .body(new MessageResponses.SendMessageResponse(receipt.sessionId().value(), receipt.messageJobId().value()));
+    }
+
+    @GetMapping("/slack-deliveries")
+    public List<MessageResponses.SlackDeliveryResponse> slackDeliveries(
+            @RequestParam MultiValueMap<String, String> queryParameters) {
+        String teamId = singleQueryValue(queryParameters, "teamId").orElseThrow(WebErrorHandler.BadRequestException::new);
+        String channelId = singleQueryValue(queryParameters, "channelId").orElseThrow(WebErrorHandler.BadRequestException::new);
+        String messageTs = singleQueryValue(queryParameters, "messageTs").orElseThrow(WebErrorHandler.BadRequestException::new);
+        return slackDeliveryStore.findBySource(teamId, channelId, messageTs).stream()
+                .map(MessageResponses.SlackDeliveryResponse::from).toList();
     }
 
     @GetMapping("/message-jobs/{messageJobId}")

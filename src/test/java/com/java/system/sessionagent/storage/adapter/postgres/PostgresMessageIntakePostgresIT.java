@@ -62,6 +62,20 @@ class PostgresMessageIntakePostgresIT {
                 .containsExactly(1L, 2L, 3L);
         assertThat(new JdbcTemplate(dataSource()).queryForObject("select count(*) from message_job", Integer.class)).isEqualTo(3);
     }
+
+    @Test void rejects_a_new_source_when_one_hundred_jobs_are_unfinished() {
+        ConversationStore store = new PostgresConversationStore(dataSource(), Clock.fixed(Instant.parse("2026-08-31T10:00:01Z"), ZoneOffset.UTC), new ObjectMapper());
+
+        for (int index = 0; index < 100; index++) {
+            receive(store, new IncomingMessage("thread-" + index, "alice", "source-" + index, "message"));
+        }
+
+        assertThatThrownBy(() -> receive(store, new IncomingMessage("overflow", "alice", "overflow", "message")))
+                .hasMessage("Unfinished job capacity is full");
+        assertThat(new JdbcTemplate(dataSource()).queryForObject("select count(*) from message_job", Integer.class)).isEqualTo(100);
+        assertThat(new JdbcTemplate(dataSource()).queryForObject("select count(*) from conversation_session where session_key = 'overflow'", Integer.class))
+                .isZero();
+    }
     private <T> List<T> concurrently(Callable<T> action) throws Exception {
         CountDownLatch ready = new CountDownLatch(2);
         CountDownLatch start = new CountDownLatch(1);

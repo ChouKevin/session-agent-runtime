@@ -3,20 +3,36 @@ package com.java.system.sessionagent.slack.domain;
 import org.springframework.util.Assert;
 
 import java.time.Instant;
+import java.util.Optional;
 import java.util.UUID;
 
 public record SlackDeliveryClaim(
         UUID deliveryId,
-        UUID sessionId,
-        UUID messageJobId,
+        SlackDeliveryKind kind,
+        Optional<UUID> sessionId,
+        Optional<UUID> messageJobId,
         long claimNumber,
         int attemptCount,
         String workerId,
         Instant lockedUntil,
         SlackPostRequest postRequest) {
 
+    public SlackDeliveryClaim(
+            UUID deliveryId,
+            UUID sessionId,
+            UUID messageJobId,
+            long claimNumber,
+            int attemptCount,
+            String workerId,
+            Instant lockedUntil,
+            SlackPostRequest postRequest) {
+        this(deliveryId, SlackDeliveryKind.ANSWER, Optional.of(sessionId), Optional.of(messageJobId), claimNumber,
+                attemptCount, workerId, lockedUntil, postRequest);
+    }
+
     public SlackDeliveryClaim {
         Assert.notNull(deliveryId, "Slack delivery ID must not be null");
+        Assert.notNull(kind, "Slack delivery kind must not be null");
         Assert.notNull(sessionId, "Slack delivery session ID must not be null");
         Assert.notNull(messageJobId, "Slack delivery message job ID must not be null");
         Assert.isTrue(claimNumber > 0, "Slack delivery claim number must be positive");

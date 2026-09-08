@@ -3,6 +3,7 @@ package com.java.system.sessionagent.slack.adapter.postgres;
 import com.java.system.sessionagent.slack.domain.SlackDeliveryClaim;
 import com.java.system.sessionagent.slack.domain.SlackDeliveryFailureCategory;
 import com.java.system.sessionagent.slack.domain.SlackDeliveryStatus;
+import com.java.system.sessionagent.slack.domain.SlackDeliveryKind;
 import com.java.system.sessionagent.slack.domain.SlackDeliveryView;
 import com.java.system.sessionagent.slack.domain.SlackPostRequest;
 import com.java.system.sessionagent.slack.port.out.SlackDeliveryStore;
@@ -47,7 +48,8 @@ public final class SlackPostgresDeliveryStore implements SlackDeliveryStore {
         SlackDeliveryClaim claim = transactionTemplate.execute(status -> {
             terminalizeExpiredExhaustedDeliveries(maximumAttempts);
             return mapper.claimNext(maximumAttempts, workerId, positiveLeaseMilliseconds(requiredLeaseDuration)).stream()
-                .map(row -> new SlackDeliveryClaim(row.deliveryId(), row.sessionId(), row.messageJobId(), row.claimNumber(),
+                .map(row -> new SlackDeliveryClaim(row.deliveryId(), SlackDeliveryKind.valueOf(row.kind()),
+                        Optional.ofNullable(row.sessionId()), Optional.ofNullable(row.messageJobId()), row.claimNumber(),
                         row.attemptCount(), row.workerId(), row.lockedUntil().toInstant(),
                         new SlackPostRequest(row.channelId(), row.rootThreadTs(), row.terminalText())))
                 .findFirst().orElse(null); // cs-allow TransactionTemplate permits nullable no-claim result
@@ -82,18 +84,28 @@ public final class SlackPostgresDeliveryStore implements SlackDeliveryStore {
     @Override
     public Optional<SlackDeliveryView> read(UUID deliveryId) {
         UUID requiredDeliveryId = Objects.requireNonNull(deliveryId, "Slack delivery ID must not be null");
-        SlackDatabaseMapper.DeliveryEntity delivery = mapper.selectById(requiredDeliveryId);
-        return Optional.ofNullable(delivery).map(value -> new SlackDeliveryView(value.getDeliveryId(),
-                SlackDeliveryStatus.valueOf(value.getStatus()), value.getAttemptCount(),
-                Optional.ofNullable(value.getFailureCategory()).map(SlackDeliveryFailureCategory::valueOf),
-                Optional.ofNullable(value.getSlackMessageTs()), value.getNextAttemptAt().toInstant()));
+        return mapper.findDelivery(requiredDeliveryId).stream().findFirst().map(this::view);
+    }
+
+    @Override
+    public List<SlackDeliveryView> findBySource(String teamId, String channelId, String messageTs) {
+        Assert.hasText(teamId, "Slack team ID must not be blank");
+        Assert.hasText(channelId, "Slack channel ID must not be blank");
+        Assert.hasText(messageTs, "Slack message timestamp must not be blank");
+        return mapper.findDeliveriesBySource(teamId, channelId, messageTs).stream().map(this::view).toList();
+    }
+
+    private SlackDeliveryView view(SlackDatabaseMapper.DeliveryViewRow row) {
+        return new SlackDeliveryView(row.deliveryId(), SlackDeliveryKind.valueOf(row.kind()), SlackDeliveryStatus.valueOf(row.status()),
+                row.attemptCount(), Optional.ofNullable(row.failureCategory()).map(SlackDeliveryFailureCategory::valueOf),
+                Optional.ofNullable(row.slackMessageTs()), row.nextAttemptAt().toInstant(), Optional.ofNullable(row.messageJobId()));
     }
 
     private void discoverInTransaction() {
         List<SlackDatabaseMapper.NewDeliveryRow> deliveries = mapper.discoverDeliveries();
         for (SlackDatabaseMapper.NewDeliveryRow delivery : deliveries) {
             mapper.insertDelivery(UUID.randomUUID(), delivery.sessionId(), delivery.sequence(), delivery.messageJobId(),
-                    delivery.channelId(), delivery.rootThreadTs(), delivery.terminalText());
+                    delivery.teamId(), delivery.channelId(), delivery.rootThreadTs(), delivery.messageTs(), delivery.terminalText());
         }
     }
 
