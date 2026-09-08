@@ -23,6 +23,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -57,6 +59,19 @@ class RuntimeConfigurationTest {
 
         assertThat(workerProperties.renewalInterval()).isEqualTo(Duration.ofSeconds(10));
         assertThat(retryPolicy.maximumBackoff()).isEqualTo(Duration.ofSeconds(60));
+    }
+
+    @Test
+    void creates_daemon_worker_threads() throws Exception {
+        RuntimeConfiguration configuration = new RuntimeConfiguration();
+        ExecutorService workerExecutor = configuration.workerExecutor(new WorkerProperties());
+        try {
+            Future<Boolean> daemon = workerExecutor.submit(() -> Thread.currentThread().isDaemon());
+
+            assertThat(daemon.get()).isTrue();
+        } finally {
+            workerExecutor.shutdownNow();
+        }
     }
 
     @Test

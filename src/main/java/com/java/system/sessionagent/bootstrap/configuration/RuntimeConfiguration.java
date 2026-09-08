@@ -509,7 +509,11 @@ public class RuntimeConfiguration {
 
     @Bean(destroyMethod = "shutdown")
     ExecutorService workerExecutor(WorkerProperties workerProperties) {
-        return Executors.newFixedThreadPool(workerProperties.concurrency());
+        return Executors.newFixedThreadPool(workerProperties.concurrency(), runnable -> {
+            Thread worker = new Thread(runnable, "session-agent-worker");
+            worker.setDaemon(true);
+            return worker;
+        });
     }
 
     @Bean

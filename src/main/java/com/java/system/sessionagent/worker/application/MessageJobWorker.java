@@ -15,21 +15,24 @@ import org.springframework.context.SmartLifecycle;
 import org.springframework.util.Assert;
 
 import java.time.Clock;
-import java.util.HashMap;
+import java.time.Duration;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 public final class MessageJobWorker implements SmartLifecycle {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(MessageJobWorker.class);
+    private static final Duration SHUTDOWN_TIMEOUT = Duration.ofSeconds(5);
     private final ConversationStore conversationStore;
     private final MessageJobPort messageJobPort;
     private final WorkerProperties properties;
@@ -37,7 +40,8 @@ public final class MessageJobWorker implements SmartLifecycle {
     private final ExecutorService workerExecutor;
     private final String workerId;
     private final ConversationTelemetry telemetry;
-    private final Map<SessionId, Object> occupiedSessions = new HashMap<>();
+    private final Map<SessionId, ActiveClaim> occupiedSessions = new ConcurrentHashMap<>();
+    private final Object lifecycleMonitor = new Object();
     private final AtomicBoolean running = new AtomicBoolean();
 
     public MessageJobWorker(
@@ -48,7 +52,7 @@ public final class MessageJobWorker implements SmartLifecycle {
             ScheduledExecutorService scheduler,
             String workerId) {
         this(conversationStore, messageJobPort, properties, clock, scheduler,
-                Executors.newFixedThreadPool(properties.concurrency()), workerId, new NoOpConversationTelemetry());
+                newWorkerExecutor(properties.concurrency()), workerId, new NoOpConversationTelemetry());
     }
 
     public MessageJobWorker(
@@ -60,7 +64,7 @@ public final class MessageJobWorker implements SmartLifecycle {
             String workerId,
             ConversationTelemetry telemetry) {
         this(conversationStore, messageJobPort, properties, clock, scheduler,
-                Executors.newFixedThreadPool(properties.concurrency()), workerId, telemetry);
+                newWorkerExecutor(properties.concurrency()), workerId, telemetry);
     }
 
     public MessageJobWorker(
@@ -89,26 +93,32 @@ public final class MessageJobWorker implements SmartLifecycle {
 
     @Override
     public void start() {
-        if (!running.compareAndSet(false, true)) {
-            return;
-        }
-        for (int index = 0; index < properties.concurrency(); index++) {
-            workerExecutor.execute(this::runLoop);
+        synchronized (lifecycleMonitor) {
+            if (!running.compareAndSet(false, true)) {
+                return;
+            }
+            for (int index = 0; index < properties.concurrency(); index++) {
+                workerExecutor.execute(this::runLoop);
+            }
         }
     }
 
     @Override
     public void stop() {
-        synchronized (occupiedSessions) {
-            running.set(false);
-        }
-        workerExecutor.shutdown();
+        beginShutdown();
+        awaitWorkerTermination();
     }
 
     @Override
     public void stop(Runnable callback) {
-        stop();
-        callback.run();
+        Objects.requireNonNull(callback, "Shutdown callback must not be null");
+        beginShutdown();
+        Thread handoff = new Thread(() -> {
+            awaitWorkerTermination();
+            callback.run();
+        }, "session-agent-worker-shutdown");
+        handoff.setDaemon(true);
+        handoff.start();
     }
 
     @Override
@@ -119,6 +129,27 @@ public final class MessageJobWorker implements SmartLifecycle {
     @Override
     public boolean isAutoStartup() {
         return true;
+    }
+
+    private void beginShutdown() {
+        synchronized (lifecycleMonitor) {
+            running.set(false);
+            for (ActiveClaim activeClaim : occupiedSessions.values()) {
+                activeClaim.revoke();
+            }
+        }
+        workerExecutor.shutdown();
+    }
+
+    private void awaitWorkerTermination() {
+        try {
+            if (!workerExecutor.awaitTermination(SHUTDOWN_TIMEOUT.toNanos(), TimeUnit.NANOSECONDS)) {
+                workerExecutor.shutdownNow();
+            }
+        } catch (InterruptedException exception) {
+            workerExecutor.shutdownNow();
+            Thread.currentThread().interrupt();
+        }
     }
 
     private void runLoop() {
@@ -156,15 +187,20 @@ public final class MessageJobWorker implements SmartLifecycle {
                     .addKeyValue("messageJobId", currentClaim.messageJobId().value())
                     .addKeyValue("sessionId", currentClaim.sessionId().value())
                     .addKeyValue("component", "MESSAGE_JOB_WORKER").log("runtime_lifecycle");
-            AtomicBoolean stillOwned = new AtomicBoolean(true);
             long renewalNanos = properties.renewalInterval().toNanos();
             ScheduledFuture<?> renewal = scheduler.scheduleAtFixedRate(
-                    () -> renew(currentClaim, stillOwned),
+                    () -> renew(currentClaim, activeClaim.stillOwned()),
                     renewalNanos,
                     renewalNanos,
                     TimeUnit.NANOSECONDS);
+            if (!activeClaim.installRenewal(renewal)) {
+                return true;
+            }
             try {
-                WorkGuard guard = workGuard(currentClaim, stillOwned);
+                if (!activeClaim.stillOwned().get()) {
+                    return true;
+                }
+                WorkGuard guard = workGuard(currentClaim, activeClaim.stillOwned());
                 MessageJobProcessingResult result = Objects.requireNonNull(
                         messageJobPort.process(currentClaim, guard), "Message job processing result must not be null");
                 logProcessingResult(currentClaim, result);
@@ -177,7 +213,7 @@ public final class MessageJobWorker implements SmartLifecycle {
                         .addKeyValue("failureCategory", "UNEXPECTED").log("runtime_lifecycle");
                 throw exception;
             } finally {
-                renewal.cancel(false);
+                activeClaim.cancelRenewal();
             }
         } finally {
             release(activeClaim);
@@ -185,33 +221,35 @@ public final class MessageJobWorker implements SmartLifecycle {
     }
 
     private Optional<ActiveClaim> claimAndRegister(boolean requireRunning) {
-        synchronized (occupiedSessions) {
+        if (requireRunning && !running.get()) {
+            return Optional.empty();
+        }
+        Optional<MessageWorkClaim> claimed = conversationStore.claimNext(
+                workerId, properties.claimDuration(), Set.copyOf(occupiedSessions.keySet()));
+        if (claimed.isEmpty()) {
+            return Optional.empty();
+        }
+        MessageWorkClaim claim = claimed.orElseThrow();
+        synchronized (lifecycleMonitor) {
             if (requireRunning && !running.get()) {
                 return Optional.empty();
             }
-            Optional<MessageWorkClaim> claimed = conversationStore.claimNext(
-                    workerId, properties.claimDuration(), Set.copyOf(occupiedSessions.keySet()));
-            if (claimed.isEmpty()) {
-                return Optional.empty();
-            }
-            MessageWorkClaim claim = claimed.orElseThrow();
-            if (occupiedSessions.containsKey(claim.sessionId())) {
+            ActiveClaim activeClaim = new ActiveClaim(claim, new AtomicBoolean(true), new AtomicReference<>());
+            ActiveClaim existingClaim = occupiedSessions.putIfAbsent(claim.sessionId(), activeClaim);
+            if (Objects.nonNull(existingClaim)) {
                 LOGGER.atWarn().addKeyValue("event", "message_job_claim_rejected")
                         .addKeyValue("messageJobId", claim.messageJobId().value())
                         .addKeyValue("sessionId", claim.sessionId().value())
                         .addKeyValue("outcome", "SESSION_OCCUPIED").log("runtime_lifecycle");
                 return Optional.empty();
             }
-            Object localOwner = new Object();
-            occupiedSessions.put(claim.sessionId(), localOwner);
-            return Optional.of(new ActiveClaim(claim, localOwner));
+            return Optional.of(activeClaim);
         }
     }
 
     private void release(ActiveClaim activeClaim) {
-        synchronized (occupiedSessions) {
-            occupiedSessions.remove(activeClaim.claim().sessionId(), activeClaim.localOwner());
-        }
+        activeClaim.cancelRenewal();
+        occupiedSessions.remove(activeClaim.claim().sessionId(), activeClaim);
     }
 
     private void logProcessingResult(MessageWorkClaim claim, MessageJobProcessingResult result) {
@@ -277,10 +315,11 @@ public final class MessageJobWorker implements SmartLifecycle {
                 }
                 try {
                     boolean confirmed = conversationStore.extendClaim(claim, properties.claimDuration());
-                    if (!confirmed) {
+                    if (!confirmed || !stillOwned.get()) {
                         stillOwned.set(false);
+                        return false;
                     }
-                    return confirmed;
+                    return true;
                 } catch (RuntimeException exception) {
                     stillOwned.set(false);
                     return false;
@@ -289,6 +328,39 @@ public final class MessageJobWorker implements SmartLifecycle {
         };
     }
 
-    private record ActiveClaim(MessageWorkClaim claim, Object localOwner) {
+    private static ExecutorService newWorkerExecutor(int concurrency) {
+        return Executors.newFixedThreadPool(concurrency, runnable -> {
+            Thread worker = new Thread(runnable, "session-agent-worker");
+            worker.setDaemon(true);
+            return worker;
+        });
+    }
+
+    private record ActiveClaim(
+            MessageWorkClaim claim,
+            AtomicBoolean stillOwned,
+            AtomicReference<ScheduledFuture<?>> renewal) {
+
+        private boolean installRenewal(ScheduledFuture<?> scheduledRenewal) {
+            renewal.set(scheduledRenewal);
+            if (!stillOwned.get()) {
+                renewal.compareAndSet(scheduledRenewal, null);
+                scheduledRenewal.cancel(false);
+                return false;
+            }
+            return true;
+        }
+
+        private void cancelRenewal() {
+            ScheduledFuture<?> scheduledRenewal = renewal.getAndSet(null);
+            if (Objects.nonNull(scheduledRenewal)) {
+                scheduledRenewal.cancel(false);
+            }
+        }
+
+        private void revoke() {
+            stillOwned.set(false);
+            cancelRenewal();
+        }
     }
 }

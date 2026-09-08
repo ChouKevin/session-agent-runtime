@@ -9,6 +9,7 @@ import com.java.system.sessionagent.conversation.domain.ModelSelection;
 import com.java.system.sessionagent.conversation.domain.SessionId;
 import com.java.system.sessionagent.conversation.port.in.MessageJobPort;
 import com.java.system.sessionagent.conversation.port.in.MessageJobProcessingResult;
+import com.java.system.sessionagent.conversation.port.in.WorkGuard;
 import com.java.system.sessionagent.conversation.port.out.ConversationStore;
 import com.java.system.sessionagent.conversation.port.out.NoOpConversationTelemetry;
 import com.java.system.sessionagent.worker.configuration.WorkerProperties;
@@ -177,6 +178,7 @@ class MessageJobWorkerTest {
         CountDownLatch releaseInitialWork = new CountDownLatch(1);
         CountDownLatch recoveredStarted = new CountDownLatch(1);
         CountDownLatch releaseRecoveredWork = new CountDownLatch(1);
+        CountDownLatch shutdownCallback = new CountDownLatch(1);
         AtomicInteger activeWorkflows = new AtomicInteger();
         AtomicInteger maximumActiveWorkflows = new AtomicInteger();
         AtomicInteger processed = new AtomicInteger();
@@ -227,8 +229,9 @@ class MessageJobWorkerTest {
             assertThat(recoveredStarted.await(5, TimeUnit.SECONDS)).isTrue();
             assertThat(recoveredClaimIssued).isTrue();
 
-            worker.stop();
+            worker.stop(shutdownCallback::countDown);
             releaseRecoveredWork.countDown();
+            assertThat(shutdownCallback.await(5, TimeUnit.SECONDS)).isTrue();
             assertThat(workerExecutor.awaitTermination(5, TimeUnit.SECONDS)).isTrue();
             assertThat(processed).hasValue(5);
             assertThat(worker.isRunning()).isFalse();
@@ -237,6 +240,106 @@ class MessageJobWorkerTest {
             releaseRecoveredWork.countDown();
             worker.stop();
             scheduler.shutdownNow();
+            workerExecutor.shutdownNow();
+        }
+    }
+
+    @Test
+    void hands_off_a_blocked_workflow_after_bounded_shutdown_without_claiming_more_work() throws Exception {
+        MessageWorkClaim activeClaim = claim("active", "session");
+        AtomicInteger claims = new AtomicInteger();
+        ConversationStore store = mock(ConversationStore.class);
+        when(store.claimNext(any(String.class), any(Duration.class), org.mockito.ArgumentMatchers.<Set<SessionId>>any()))
+                .thenAnswer(invocation -> claims.getAndIncrement() == 0 ? Optional.of(activeClaim) : Optional.empty());
+        CountDownLatch activeStarted = new CountDownLatch(1);
+        CountDownLatch releaseActive = new CountDownLatch(1);
+        CountDownLatch shutdownCallback = new CountDownLatch(1);
+        AtomicReference<WorkGuard> activeGuard = new AtomicReference<>();
+        MessageJobPort jobs = (claim, guard) -> {
+            activeGuard.set(guard);
+            activeStarted.countDown();
+            boolean released = false;
+            while (!released) {
+                try {
+                    released = releaseActive.await(25, TimeUnit.MILLISECONDS);
+                } catch (InterruptedException exception) {
+                    // Simulates an external call that ignores interruption until it returns.
+                }
+            }
+            return MessageJobProcessingResult.COMPLETED;
+        };
+        ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
+        ExecutorService workerExecutor = Executors.newFixedThreadPool(1);
+        WorkerProperties properties = new WorkerProperties(Duration.ofSeconds(1), Duration.ofMillis(100), Duration.ofMillis(10), 1);
+        MessageJobWorker worker = new MessageJobWorker(store, jobs, properties, Clock.fixed(Instant.EPOCH, ZoneOffset.UTC),
+                scheduler, workerExecutor, "worker", new NoOpConversationTelemetry());
+        try {
+            worker.start();
+            assertThat(activeStarted.await(5, TimeUnit.SECONDS)).isTrue();
+
+            worker.stop(shutdownCallback::countDown);
+
+            assertThat(shutdownCallback.await(250, TimeUnit.MILLISECONDS)).isFalse();
+            assertThat(activeGuard.get()).isNotNull();
+            assertThat(activeGuard.get().stillOwned()).isFalse();
+            assertThat(shutdownCallback.await(7, TimeUnit.SECONDS)).isTrue();
+            assertThat(claims).hasValue(1);
+            assertThat(workerExecutor.isTerminated()).isFalse();
+
+            releaseActive.countDown();
+            assertThat(workerExecutor.awaitTermination(5, TimeUnit.SECONDS)).isTrue();
+        } finally {
+            releaseActive.countDown();
+            worker.stop();
+            scheduler.shutdownNow();
+            workerExecutor.shutdownNow();
+        }
+    }
+
+    @Test
+    void does_not_grant_ownership_when_shutdown_handoff_races_confirmation() throws Exception {
+        MessageWorkClaim claim = claim("active", "session");
+        ConversationStore store = mock(ConversationStore.class);
+        when(store.claimNext(any(String.class), any(Duration.class), org.mockito.ArgumentMatchers.<Set<SessionId>>any()))
+                .thenReturn(Optional.of(claim));
+        CountDownLatch confirmationStarted = new CountDownLatch(1);
+        CountDownLatch releaseConfirmation = new CountDownLatch(1);
+        when(store.extendClaim(claim, Duration.ofSeconds(30))).thenAnswer(invocation -> {
+            confirmationStarted.countDown();
+            try {
+                releaseConfirmation.await();
+            } catch (InterruptedException exception) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException(exception);
+            }
+            return true;
+        });
+        ScheduledExecutorService scheduler = mock(ScheduledExecutorService.class);
+        ScheduledFuture<?> renewal = mock(ScheduledFuture.class);
+        org.mockito.Mockito.doReturn(renewal).when(scheduler).scheduleAtFixedRate(any(Runnable.class),
+                org.mockito.ArgumentMatchers.anyLong(), org.mockito.ArgumentMatchers.anyLong(), any());
+        AtomicBoolean confirmation = new AtomicBoolean(true);
+        MessageJobPort jobs = (messageClaim, guard) -> {
+            confirmation.set(guard.confirmOwnership());
+            return MessageJobProcessingResult.COMPLETED;
+        };
+        ExecutorService workerExecutor = Executors.newSingleThreadExecutor();
+        ExecutorService pollingExecutor = Executors.newSingleThreadExecutor();
+        MessageJobWorker worker = new MessageJobWorker(store, jobs, new WorkerProperties(), Clock.fixed(Instant.EPOCH, ZoneOffset.UTC),
+                scheduler, workerExecutor, "worker", new NoOpConversationTelemetry());
+        try {
+            Future<Boolean> poll = pollingExecutor.submit(worker::poll);
+            assertThat(confirmationStarted.await(5, TimeUnit.SECONDS)).isTrue();
+
+            worker.stop();
+            releaseConfirmation.countDown();
+
+            assertThat(poll.get(5, TimeUnit.SECONDS)).isTrue();
+            assertThat(confirmation).isFalse();
+        } finally {
+            releaseConfirmation.countDown();
+            worker.stop();
+            pollingExecutor.shutdownNow();
             workerExecutor.shutdownNow();
         }
     }
