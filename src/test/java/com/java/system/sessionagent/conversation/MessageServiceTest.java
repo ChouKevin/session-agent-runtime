@@ -7,11 +7,16 @@ import com.java.system.sessionagent.conversation.domain.MessageReceipt;
 import com.java.system.sessionagent.conversation.domain.SessionId;
 import com.java.system.sessionagent.conversation.port.in.MessageConflictException;
 import com.java.system.sessionagent.conversation.port.out.ConversationStore;
+import com.java.system.sessionagent.conversation.port.out.ModelSelectionLookup;
+import com.java.system.sessionagent.conversation.domain.ModelSelection;
+import com.java.system.sessionagent.conversation.port.out.NoOpConversationTelemetry;
 import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.mock;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.when;
 
 class MessageServiceTest {
@@ -21,18 +26,21 @@ class MessageServiceTest {
         ConversationStore store = mock(ConversationStore.class);
         IncomingMessage incoming = new IncomingMessage("thread", "alice", "source", "hello");
         MessageReceipt receipt = new MessageReceipt(new SessionId("session"), new MessageJobId("job"));
-        when(store.receive(incoming)).thenReturn(receipt);
+        when(store.receive(eq(incoming), any(ModelSelection.class), any(ModelSelectionLookup.class))).thenReturn(receipt);
 
-        assertThat(new MessageService(store).receive(incoming)).isEqualTo(receipt);
+        assertThat(new MessageService(store, TestConfiguredModels.withDefault("test"), new NoOpConversationTelemetry()).receive(incoming))
+                .isEqualTo(receipt);
     }
 
     @Test
     void preserves_the_closed_message_conflict_at_the_intake_boundary() {
         ConversationStore store = mock(ConversationStore.class);
         IncomingMessage incoming = new IncomingMessage("thread", "alice", "source", "hello");
-        when(store.receive(incoming)).thenThrow(new MessageConflictException());
+        when(store.receive(eq(incoming), any(ModelSelection.class), any(ModelSelectionLookup.class)))
+                .thenThrow(new MessageConflictException());
 
-        assertThatThrownBy(() -> new MessageService(store).receive(incoming))
+        assertThatThrownBy(() -> new MessageService(store, TestConfiguredModels.withDefault("test"), new NoOpConversationTelemetry())
+                .receive(incoming))
                 .isInstanceOf(MessageConflictException.class);
     }
 }

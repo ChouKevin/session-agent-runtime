@@ -20,4 +20,8 @@ public final class MessageRequests {
     @JsonIgnoreProperties(ignoreUnknown = false)
     public record SessionLookupRequest(@NotBlank String permalink) {
     }
+
+    @JsonIgnoreProperties(ignoreUnknown = false)
+    public record SessionModelRequest(@NotBlank @Size(max = 64) String model) {
+    }
 }

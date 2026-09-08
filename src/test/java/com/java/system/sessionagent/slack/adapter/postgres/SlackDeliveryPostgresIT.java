@@ -20,6 +20,7 @@ import ch.qos.logback.core.read.ListAppender;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.java.system.sessionagent.conversation.application.MessageService;
 import com.java.system.sessionagent.conversation.application.JobProcessor;
+import com.java.system.sessionagent.conversation.TestConfiguredModels;
 import com.java.system.sessionagent.conversation.domain.IncomingMessage;
 import com.java.system.sessionagent.conversation.domain.IncomingMessageSource;
 import com.java.system.sessionagent.conversation.domain.ModelCallResult;
@@ -35,6 +36,7 @@ import com.java.system.sessionagent.conversation.port.in.MessageIntakePort;
 import com.java.system.sessionagent.conversation.port.out.ConversationModel;
 import com.java.system.sessionagent.conversation.port.out.ConversationStore;
 import com.java.system.sessionagent.conversation.port.out.ModelCallReservation;
+import com.java.system.sessionagent.conversation.port.out.NoOpConversationTelemetry;
 import com.java.system.sessionagent.storage.adapter.postgres.PostgresConversationStore;
 import com.java.system.sessionagent.tool.port.ToolCatalog;
 import com.java.system.sessionagent.tool.port.ToolSnapshot;
@@ -166,7 +168,8 @@ class SlackDeliveryPostgresIT {
     void correlates_new_and_duplicate_slack_intake_through_model_processing_and_terminal_delivery() {
         PostgresConversationStore conversationStore = new PostgresConversationStore(dataSource(), Clock.fixed(NOW, ZoneOffset.UTC),
                 new ObjectMapper());
-        MessageIntakePort messageIntake = new MessageService(conversationStore);
+        MessageIntakePort messageIntake = new MessageService(conversationStore, TestConfiguredModels.withDefault("test"),
+                new NoOpConversationTelemetry());
         MessageHandler adapter = new MessageHandler("UBOT",
                 new PostgresMessageSubmission(dataSource(), messageIntake, Clock.fixed(NOW, ZoneOffset.UTC)));
         ListAppender<ILoggingEvent> intakeLogs = capture(MessageHandler.class);
@@ -269,7 +272,8 @@ class SlackDeliveryPostgresIT {
     private MessageReceipt completeSlackJobWithTerminalRuntime() {
         PostgresConversationStore conversationStore = new PostgresConversationStore(dataSource(), Clock.fixed(NOW, ZoneOffset.UTC),
                 new ObjectMapper());
-        MessageIntakePort messageIntake = new MessageService(conversationStore);
+        MessageIntakePort messageIntake = new MessageService(conversationStore, TestConfiguredModels.withDefault("test"),
+                new NoOpConversationTelemetry());
         PostgresMessageSubmission slackIntake = new PostgresMessageSubmission(dataSource(), messageIntake, Clock.fixed(NOW, ZoneOffset.UTC));
         IncomingMessage message = new IncomingMessage(IncomingMessageSource.SLACK, "slack:T1:C1:1.000001", "U1", "1.000001", "request");
         MessageSubmission intake = new MessageSubmission("event-1", "T1", "C1", "1.000001", "1.000001",

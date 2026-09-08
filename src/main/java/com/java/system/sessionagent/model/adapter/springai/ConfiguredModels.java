@@ -1,13 +1,15 @@
 package com.java.system.sessionagent.model.adapter.springai;
 
 import com.java.system.sessionagent.conversation.port.out.ConversationModel;
+import com.java.system.sessionagent.conversation.port.out.ConversationModels;
+import com.java.system.sessionagent.conversation.domain.ModelSelection;
 import org.springframework.util.Assert;
 
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
-public final class ConfiguredModels implements AutoCloseable {
+public final class ConfiguredModels implements ConversationModels, AutoCloseable {
     private final Map<String, ConfiguredModelBinding> bindings;
     private final String defaultModel;
     private final List<AutoCloseable> ownedResources;
@@ -27,6 +29,27 @@ public final class ConfiguredModels implements AutoCloseable {
     public ConfiguredModelBinding defaultBinding() { return bindings.get(defaultModel); }
 
     public ConversationModel defaultConversationModel() { return defaultBinding().conversationModel(); }
+
+    @Override
+    public ModelSelection defaultSelection() {
+        return selection(defaultBinding());
+    }
+
+    @Override
+    public java.util.Optional<ModelSelection> findSelection(String model) {
+        return java.util.Optional.ofNullable(bindings.get(model)).map(this::selection);
+    }
+
+    @Override
+    public java.util.Optional<ConversationModel> resolve(ModelSelection selection) {
+        return java.util.Optional.ofNullable(bindings.get(selection.model()))
+                .filter(binding -> binding.fingerprint().equals(selection.fingerprint()))
+                .map(ConfiguredModelBinding::conversationModel);
+    }
+
+    private ModelSelection selection(ConfiguredModelBinding binding) {
+        return new ModelSelection(binding.model(), binding.fingerprint());
+    }
 
     @Override
     public void close() throws Exception {

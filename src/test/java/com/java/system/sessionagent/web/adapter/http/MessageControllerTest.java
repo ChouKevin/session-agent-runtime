@@ -18,6 +18,7 @@ import com.java.system.sessionagent.conversation.domain.UserMessage;
 import com.java.system.sessionagent.conversation.port.in.ConversationQueryPort;
 import com.java.system.sessionagent.conversation.port.in.ExternalSessionReferenceQueryPort;
 import com.java.system.sessionagent.conversation.port.in.MessageIntakePort;
+import com.java.system.sessionagent.conversation.port.in.SessionModelPort;
 import com.java.system.sessionagent.conversation.port.in.MessageJobView;
 import com.java.system.sessionagent.conversation.port.in.SessionDetailView;
 import com.java.system.sessionagent.conversation.domain.ContextEstimate;
@@ -40,9 +41,12 @@ import java.util.stream.Stream;
 
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.clearInvocations;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -183,6 +187,46 @@ class MessageControllerTest {
                 .andExpect(jsonPath("$.messageJobId").value(JOB_ID));
     }
 
+    @Test
+    void selects_a_configured_model_for_future_messages() throws Exception {
+        SessionModelPort sessionModels = mock(SessionModelPort.class);
+        when(sessionModels.select(new SessionId(SESSION_ID), "openai-primary"))
+                .thenReturn(Optional.of(new SessionModelPort.SessionModelView(new SessionId(SESSION_ID), "openai-primary")));
+        MockMvc mvc = mvc(mock(MessageIntakePort.class), mock(ConversationQueryPort.class),
+                mock(ExternalSessionReferenceQueryPort.class), sessionModels);
+
+        mvc.perform(put("/internal/sessions/{sessionId}/model", SESSION_ID)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"model\":\"openai-primary\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.sessionId").value(SESSION_ID))
+                .andExpect(jsonPath("$.model").value("openai-primary"))
+                .andExpect(jsonPath("$.effectiveFor").value("NEW_MESSAGES"));
+    }
+
+    @Test
+    void rejects_an_unknown_or_invalid_session_model_without_selecting_it() throws Exception {
+        SessionModelPort sessionModels = mock(SessionModelPort.class);
+        when(sessionModels.select(new SessionId(SESSION_ID), "missing-model"))
+                .thenThrow(new IllegalArgumentException("Configured model is not available"));
+        MockMvc mvc = mvc(mock(MessageIntakePort.class), mock(ConversationQueryPort.class),
+                mock(ExternalSessionReferenceQueryPort.class), sessionModels);
+
+        mvc.perform(put("/internal/sessions/{sessionId}/model", SESSION_ID)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"model\":\"missing-model\"}"))
+                .andExpect(status().isBadRequest());
+
+        clearInvocations(sessionModels);
+
+        mvc.perform(put("/internal/sessions/{sessionId}/model", SESSION_ID)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"model\":\"openai-primary\",\"unexpected\":true}"))
+                .andExpect(status().isBadRequest());
+
+        verifyNoInteractions(sessionModels);
+    }
+
     @ParameterizedTest
     @ValueSource(strings = {
             "https://acme.slack.com/archives/C01ABCDEF/p1712345678123456",
@@ -278,9 +322,17 @@ class MessageControllerTest {
             MessageIntakePort intake,
             ConversationQueryPort queries,
             ExternalSessionReferenceQueryPort referenceQueries) {
+        return mvc(intake, queries, referenceQueries, mock(SessionModelPort.class));
+    }
+
+    private static MockMvc mvc(
+            MessageIntakePort intake,
+            ConversationQueryPort queries,
+            ExternalSessionReferenceQueryPort referenceQueries,
+            SessionModelPort sessionModels) {
         JsonMapper.Builder builder = JsonMapper.builder();
         new RuntimeConfiguration().strictJsonMapper().customize(builder);
-        return MockMvcBuilders.standaloneSetup(new MessageController(intake, queries, referenceQueries))
+        return MockMvcBuilders.standaloneSetup(new MessageController(intake, queries, referenceQueries, sessionModels))
                 .setMessageConverters(new JacksonJsonHttpMessageConverter(builder))
                 .setControllerAdvice(new WebErrorHandler()).build();
     }

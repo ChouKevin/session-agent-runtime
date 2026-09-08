@@ -4,6 +4,9 @@ import com.java.system.sessionagent.conversation.domain.IncomingMessage;
 import com.java.system.sessionagent.conversation.domain.MessageReceipt;
 import com.java.system.sessionagent.conversation.domain.MessageWorkClaim;
 import com.java.system.sessionagent.conversation.domain.ModelRouteId;
+import com.java.system.sessionagent.conversation.domain.ModelDescriptor;
+import com.java.system.sessionagent.conversation.domain.ModelSelection;
+import com.java.system.sessionagent.conversation.domain.SessionId;
 import com.java.system.sessionagent.conversation.port.out.ConversationStore;
 import com.java.system.sessionagent.conversation.port.out.ModelRouteMismatchException;
 import com.java.system.sessionagent.conversation.port.out.StaleWorkClaimException;
@@ -21,6 +24,8 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
 import java.util.List;
 import java.util.Optional;
 import java.util.OptionalInt;
@@ -139,6 +144,129 @@ class PostgresMessageJobPostgresIT {
 
         assertThatThrownBy(() -> store.bindModelRoute(claim, new ModelRouteId("codex-primary")))
                 .isExactlyInstanceOf(ModelRouteMismatchException.class);
+    }
+
+    @Test
+    void binds_the_current_session_selection_at_intake_without_rewriting_existing_or_duplicate_jobs() {
+        ConversationStore store = store();
+        ModelSelection first = new ModelSelection("google-primary", "v1:google-a");
+        ModelSelection second = new ModelSelection("openai-primary", "v1:openai-b");
+
+        MessageReceipt original = store.receive(new IncomingMessage("thread", "alice", "first", "one"), first,
+                model -> selection(model, first, second));
+        MessageWorkClaim originalClaim = store.claimNext("worker", Duration.ofSeconds(30)).orElseThrow();
+        assertThat(originalClaim.modelSelection()).isEqualTo(first);
+        assertThat(store.scheduleRetry(originalClaim, Duration.ZERO)).isTrue();
+
+        assertThat(store.selectModel(original.sessionId(), first)).contains(first);
+        assertThat(jdbcTemplate.queryForObject("select count(*) from message_job", Integer.class)).isEqualTo(1);
+        assertThat(store.selectModel(original.sessionId(), second)).contains(second);
+        MessageReceipt duplicate = store.receive(new IncomingMessage("thread", "alice", "first", "one"), first,
+                model -> selection(model, first, second));
+        MessageReceipt afterSwitch = store.receive(new IncomingMessage("thread", "alice", "second", "two"), first,
+                model -> selection(model, first, second));
+        MessageReceipt otherSession = store.receive(new IncomingMessage("other-thread", "alice", "other", "three"), first,
+                model -> selection(model, first, second));
+
+        assertThat(duplicate).isEqualTo(original);
+        assertThat(jobSelection(original)).isEqualTo(first);
+        assertThat(jobSelection(afterSwitch)).isEqualTo(second);
+        assertThat(jobSelection(otherSession)).isEqualTo(first);
+    }
+
+    @Test
+    void uses_the_selection_committed_before_intake_when_intake_precedes_a_switch() {
+        ConversationStore store = store();
+        ModelSelection first = new ModelSelection("google-primary", "v1:google-a");
+        ModelSelection second = new ModelSelection("openai-primary", "v1:openai-b");
+
+        MessageReceipt beforeSwitch = store.receive(new IncomingMessage("thread", "alice", "first", "one"), first,
+                model -> selection(model, first, second));
+        assertThat(store.selectModel(beforeSwitch.sessionId(), second)).contains(second);
+        MessageReceipt afterSwitch = store.receive(new IncomingMessage("thread", "alice", "second", "two"), first,
+                model -> selection(model, first, second));
+
+        assertThat(jobSelection(beforeSwitch)).isEqualTo(first);
+        assertThat(jobSelection(afterSwitch)).isEqualTo(second);
+    }
+
+    @Test
+    void serializes_a_latch_released_session_switch_and_intake_without_a_partial_job_binding() throws Exception {
+        ConversationStore store = store();
+        ModelSelection first = new ModelSelection("google-primary", "v1:google-a");
+        ModelSelection second = new ModelSelection("openai-primary", "v1:openai-b");
+        MessageReceipt initial = store.receive(new IncomingMessage("thread", "alice", "initial", "one"), first,
+                model -> selection(model, first, second));
+        CountDownLatch ready = new CountDownLatch(2);
+        CountDownLatch release = new CountDownLatch(1);
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try (Connection connection = dataSource().getConnection();
+                PreparedStatement lock = connection.prepareStatement(
+                        "select session_id from conversation_session where session_id = ? for update")) {
+            connection.setAutoCommit(false);
+            lock.setObject(1, UUID.fromString(initial.sessionId().value()));
+            lock.executeQuery();
+            Future<Optional<ModelSelection>> switchResult = executor.submit(() -> {
+                ready.countDown();
+                release.await();
+                return store.selectModel(initial.sessionId(), second);
+            });
+            Future<MessageReceipt> intakeResult = executor.submit(() -> {
+                ready.countDown();
+                release.await();
+                return store.receive(new IncomingMessage("thread", "alice", "concurrent", "two"), first,
+                        model -> selection(model, first, second));
+            });
+            ready.await();
+            release.countDown();
+            connection.commit();
+
+            MessageReceipt concurrent = intakeResult.get();
+            assertThat(switchResult.get()).contains(second);
+            assertThat(jobSelection(concurrent)).isIn(first, second);
+            assertThat(jdbcTemplate.queryForObject("select selected_model from conversation_session where session_id = ?", String.class,
+                    UUID.fromString(initial.sessionId().value()))).isEqualTo(second.model());
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    void keeps_exact_usage_checkpoints_separate_when_only_the_configured_fingerprint_changes() {
+        ConversationStore store = store();
+        ModelSelection original = new ModelSelection("openai-primary", "v1:configuration-a");
+        ModelSelection changed = new ModelSelection("openai-primary", "v2:configuration-b");
+        ModelDescriptor descriptor = new ModelDescriptor(new ModelRouteId("openai-primary"), "gpt-5-mini", 32_000);
+        String shape = "a".repeat(64);
+        MessageReceipt receipt = store.receive(new IncomingMessage("thread", "alice", "source", "hello"), original,
+                model -> Optional.of(original));
+        MessageWorkClaim claim = store.claimNext("worker", Duration.ofSeconds(30)).orElseThrow();
+
+        store.append(claim, new ConversationStore.MessageBatch(List.of(new ConversationStore.AssistantData("done")),
+                ConversationStore.JobUpdate.COMPLETE, Optional.empty(), Optional.of(
+                        new ConversationStore.UsageCheckpointData(original, descriptor, 1, 20, 10, 30, shape, 0))), NOW);
+
+        assertThat(store.loadUsageCheckpoint(receipt.sessionId(), original, descriptor, shape, 0)).isPresent();
+        assertThat(store.loadUsageCheckpoint(receipt.sessionId(), changed, descriptor, shape, 0)).isEmpty();
+    }
+
+    private ModelSelection jobSelection(MessageReceipt receipt) {
+        return jdbcTemplate.queryForObject("select model_key, model_fingerprint from message_job where message_job_id = ?",
+                (resultSet, row) -> new ModelSelection(resultSet.getString("model_key"), resultSet.getString("model_fingerprint")),
+                UUID.fromString(receipt.messageJobId().value()));
+    }
+
+    private static java.util.Optional<ModelSelection> selection(
+            String model,
+            ModelSelection first,
+            ModelSelection second) {
+        if (first.model().equals(model)) {
+            return java.util.Optional.of(first);
+        }
+        if (second.model().equals(model)) {
+            return java.util.Optional.of(second);
+        }
+        return java.util.Optional.empty();
     }
 
     private <T> List<T> concurrently(Callable<T> action) throws Exception {

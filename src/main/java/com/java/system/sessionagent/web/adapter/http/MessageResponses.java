@@ -25,6 +25,9 @@ public final class MessageResponses {
     public record SessionLookupResponse(String sessionId, String sessionDetailPath) {
     }
 
+    public record SessionModelResponse(String sessionId, String model, String effectiveFor) {
+    }
+
     @JsonInclude(JsonInclude.Include.NON_NULL)
     public record SessionDetailResponse(
             String sessionId,

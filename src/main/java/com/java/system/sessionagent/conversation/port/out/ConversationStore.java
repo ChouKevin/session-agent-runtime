@@ -10,6 +10,7 @@ import com.java.system.sessionagent.conversation.domain.ModelDescriptor;
 import com.java.system.sessionagent.conversation.domain.ContextUsageCheckpoint;
 import com.java.system.sessionagent.conversation.domain.ContextCompaction;
 import com.java.system.sessionagent.conversation.domain.ModelRouteId;
+import com.java.system.sessionagent.conversation.domain.ModelSelection;
 import com.java.system.sessionagent.conversation.domain.SessionId;
 import com.java.system.sessionagent.conversation.domain.SessionMessage;
 import com.java.system.sessionagent.conversation.domain.SessionSequence;
@@ -29,6 +30,21 @@ import java.util.OptionalInt;
 public interface ConversationStore {
 
     MessageReceipt receive(IncomingMessage incomingMessage);
+
+    default MessageReceipt receive(IncomingMessage incomingMessage, ModelSelection defaultSelection) {
+        return receive(incomingMessage);
+    }
+
+    default MessageReceipt receive(
+            IncomingMessage incomingMessage,
+            ModelSelection defaultSelection,
+            ModelSelectionLookup selectionLookup) {
+        return receive(incomingMessage, defaultSelection);
+    }
+
+    default Optional<ModelSelection> selectModel(SessionId sessionId, ModelSelection selection) {
+        return Optional.empty();
+    }
 
     Optional<MessageWorkClaim> claimNext(String workerId, Duration leaseDuration);
 
@@ -57,6 +73,15 @@ public interface ConversationStore {
 
     default Optional<ContextUsageCheckpoint> loadUsageCheckpoint(
             SessionId sessionId, ModelDescriptor model, String requestShapeFingerprint, long compactGeneration) {
+        return Optional.empty();
+    }
+
+    default Optional<ContextUsageCheckpoint> loadUsageCheckpoint(
+            SessionId sessionId,
+            ModelSelection selection,
+            ModelDescriptor model,
+            String requestShapeFingerprint,
+            long compactGeneration) {
         return Optional.empty();
     }
 
@@ -92,11 +117,16 @@ public interface ConversationStore {
             int modelCallCount) {
     }
 
-    record SessionProjection(SessionId sessionId, Instant createdAt, Optional<MessageJobProjection> currentJob) {
+    record SessionProjection(SessionId sessionId, Instant createdAt, Optional<MessageJobProjection> currentJob, String selectedModel) {
         public SessionProjection {
             Assert.notNull(sessionId, "Session ID must not be null");
             Assert.notNull(createdAt, "Session creation time must not be null");
             Assert.notNull(currentJob, "Current message job must not be null");
+            Assert.hasText(selectedModel, "Selected model must not be blank");
+        }
+
+        public SessionProjection(SessionId sessionId, Instant createdAt, Optional<MessageJobProjection> currentJob) {
+            this(sessionId, createdAt, currentJob, "test");
         }
     }
 
@@ -155,9 +185,10 @@ public interface ConversationStore {
         }
     }
 
-    record UsageCheckpointData(ModelDescriptor model, int modelCallOrdinal, long promptTokens, long completionTokens,
+    record UsageCheckpointData(ModelSelection selection, ModelDescriptor model, int modelCallOrdinal, long promptTokens, long completionTokens,
                                long totalTokens, String requestShapeFingerprint, long compactGeneration) {
         public UsageCheckpointData {
+            Assert.notNull(selection, "Usage checkpoint model selection must not be null");
             Assert.notNull(model, "Usage checkpoint model must not be null");
             Assert.isTrue(modelCallOrdinal > 0, "Usage checkpoint model call ordinal must be positive");
             Assert.isTrue(promptTokens >= 0 && completionTokens >= 0 && totalTokens >= 0,

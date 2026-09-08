@@ -7,6 +7,7 @@ import java.time.Instant;
 public record MessageWorkClaim(
         MessageJobId messageJobId,
         SessionId sessionId,
+        ModelSelection modelSelection,
         String workerId,
         long claimNumber,
         Instant claimedAt,
@@ -15,10 +16,21 @@ public record MessageWorkClaim(
     public MessageWorkClaim {
         Assert.notNull(messageJobId, "Message job ID must not be null");
         Assert.notNull(sessionId, "Session ID must not be null");
+        Assert.notNull(modelSelection, "Model selection must not be null");
         Assert.hasText(workerId, "Worker ID must not be blank");
         Assert.isTrue(claimNumber > 0, "Claim number must be positive");
         Assert.notNull(claimedAt, "Claim time must not be null");
         Assert.notNull(lockedUntil, "Lock expiry must not be null");
         Assert.isTrue(lockedUntil.isAfter(claimedAt), "Lock expiry must be after claim time");
+    }
+
+    public MessageWorkClaim(
+            MessageJobId messageJobId,
+            SessionId sessionId,
+            String workerId,
+            long claimNumber,
+            Instant claimedAt,
+            Instant lockedUntil) {
+        this(messageJobId, sessionId, new ModelSelection("test", "v1:test"), workerId, claimNumber, claimedAt, lockedUntil);
     }
 }

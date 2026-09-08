@@ -31,18 +31,19 @@ public interface PostgresConversationMapper extends BaseMapper<PostgresConversat
     String lockSourceIdentity(@Param("firstLockKey") int firstLockKey, @Param("secondLockKey") int secondLockKey);
 
     @Insert("""
-            insert into conversation_session(session_id, source_type, session_key, created_at)
-            values (#{sessionId}, #{sourceType}, #{sessionKey}, #{createdAt})
+            insert into conversation_session(session_id, source_type, session_key, selected_model, created_at)
+            values (#{sessionId}, #{sourceType}, #{sessionKey}, #{selectedModel}, #{createdAt})
             on conflict (source_type, session_key) do nothing
             """)
     int insertSessionIfAbsent(
             @Param("sessionId") UUID sessionId,
             @Param("sourceType") String sourceType,
             @Param("sessionKey") String sessionKey,
+            @Param("selectedModel") String selectedModel,
             @Param("createdAt") OffsetDateTime createdAt);
 
     @Select("""
-            select session_id
+            select session_id, selected_model
             from conversation_session
             where source_type = #{sourceType} and session_key = #{sessionKey}
             for update
@@ -51,6 +52,13 @@ public interface PostgresConversationMapper extends BaseMapper<PostgresConversat
     List<SessionRow> lockSession(
             @Param("sourceType") String sourceType,
             @Param("sessionKey") String sessionKey);
+
+    @Select("select session_id, selected_model from conversation_session where session_id = #{sessionId} for update")
+    @Options(flushCache = Options.FlushCachePolicy.FALSE, useCache = false)
+    List<SessionRow> lockSessionById(@Param("sessionId") UUID sessionId);
+
+    @Update("update conversation_session set selected_model = #{selectedModel} where session_id = #{sessionId}")
+    int selectModel(@Param("sessionId") UUID sessionId, @Param("selectedModel") String selectedModel);
 
     @Select(value = """
             update conversation_session set next_sequence = next_sequence + 1
@@ -106,13 +114,15 @@ public interface PostgresConversationMapper extends BaseMapper<PostgresConversat
             @Param("message") String message);
 
     @Insert("""
-            insert into message_job(message_job_id, session_id, user_message_sequence, status, available_at, created_at)
-            values (#{jobId}, #{sessionId}, #{sequence}, 'PENDING', clock_timestamp(), #{createdAt})
+            insert into message_job(message_job_id, session_id, user_message_sequence, model_key, model_fingerprint, status, available_at, created_at)
+            values (#{jobId}, #{sessionId}, #{sequence}, #{modelKey}, #{modelFingerprint}, 'PENDING', clock_timestamp(), #{createdAt})
             """)
     int insertMessageJob(
             @Param("jobId") UUID jobId,
             @Param("sessionId") UUID sessionId,
             @Param("sequence") long sequence,
+            @Param("modelKey") String modelKey,
+            @Param("modelFingerprint") String modelFingerprint,
             @Param("createdAt") OffsetDateTime createdAt);
 
     @Select(value = """
@@ -136,7 +146,7 @@ public interface PostgresConversationMapper extends BaseMapper<PostgresConversat
             update message_job job set status = 'WORKING', worker_id = #{workerId},
                 locked_until = clock_timestamp() + (#{leaseMilliseconds} * interval '1 millisecond'), claim_number = job.claim_number + 1
             from candidate where job.message_job_id = candidate.message_job_id and job.session_id = candidate.session_id
-            returning job.message_job_id, job.session_id, job.worker_id, job.claim_number, job.locked_until,
+            returning job.message_job_id, job.session_id, job.model_key, job.model_fingerprint, job.worker_id, job.claim_number, job.locked_until,
                 clock_timestamp() as claimed_at
             """, affectData = true)
     @Options(flushCache = Options.FlushCachePolicy.TRUE, useCache = false)
@@ -268,13 +278,16 @@ public interface PostgresConversationMapper extends BaseMapper<PostgresConversat
 
     @Select("""
             select response_sequence, model_call_ordinal, prompt_tokens, completion_tokens, total_tokens, created_at
-            from context_usage_checkpoint where session_id = #{sessionId} and model_route_id = #{modelRouteId} and model_id = #{modelId}
+            from context_usage_checkpoint where session_id = #{sessionId} and model_key = #{modelKey}
+              and model_fingerprint = #{modelFingerprint} and model_route_id = #{modelRouteId} and model_id = #{modelId}
               and request_shape_fingerprint = #{requestShapeFingerprint} and compact_generation = #{compactGeneration}
             order by response_sequence desc limit 1
             """)
     @Options(flushCache = Options.FlushCachePolicy.FALSE, useCache = false)
     List<UsageCheckpointRow> loadUsageCheckpoint(
             @Param("sessionId") UUID sessionId,
+            @Param("modelKey") String modelKey,
+            @Param("modelFingerprint") String modelFingerprint,
             @Param("modelRouteId") String modelRouteId,
             @Param("modelId") String modelId,
             @Param("requestShapeFingerprint") String requestShapeFingerprint,
@@ -382,9 +395,9 @@ public interface PostgresConversationMapper extends BaseMapper<PostgresConversat
             @Param("message") String message);
 
     @Insert("""
-            insert into context_usage_checkpoint(session_id, response_sequence, model_route_id, model_id, model_call_ordinal,
+            insert into context_usage_checkpoint(session_id, response_sequence, model_route_id, model_id, model_key, model_fingerprint, model_call_ordinal,
                 prompt_tokens, completion_tokens, total_tokens, request_shape_fingerprint, compact_generation, created_at)
-            values (#{sessionId}, #{responseSequence}, #{modelRouteId}, #{modelId}, #{modelCallOrdinal}, #{promptTokens},
+            values (#{sessionId}, #{responseSequence}, #{modelRouteId}, #{modelId}, #{modelKey}, #{modelFingerprint}, #{modelCallOrdinal}, #{promptTokens},
                 #{completionTokens}, #{totalTokens}, #{requestShapeFingerprint}, #{compactGeneration}, #{createdAt})
             """)
     int insertUsageCheckpoint(
@@ -392,6 +405,8 @@ public interface PostgresConversationMapper extends BaseMapper<PostgresConversat
             @Param("responseSequence") long responseSequence,
             @Param("modelRouteId") String modelRouteId,
             @Param("modelId") String modelId,
+            @Param("modelKey") String modelKey,
+            @Param("modelFingerprint") String modelFingerprint,
             @Param("modelCallOrdinal") int modelCallOrdinal,
             @Param("promptTokens") long promptTokens,
             @Param("completionTokens") long completionTokens,
@@ -452,7 +467,7 @@ public interface PostgresConversationMapper extends BaseMapper<PostgresConversat
             @Param("claimNumber") long claimNumber);
 
     @Select("""
-            select session.session_id, session.created_at, job.message_job_id, job.status, job.retry_count, job.model_calls
+            select session.session_id, session.created_at, session.selected_model, job.message_job_id, job.status, job.retry_count, job.model_calls
             from conversation_session session
             left join lateral (
                 select message_job_id, session_id, status, retry_count, model_calls
@@ -587,7 +602,7 @@ public interface PostgresConversationMapper extends BaseMapper<PostgresConversat
         }
     }
 
-    record SessionRow(UUID sessionId) {
+    record SessionRow(UUID sessionId, String selectedModel) {
     }
 
     record SourceMessageRow(UUID sessionId, String contentHash, UUID messageJobId) {
@@ -596,6 +611,8 @@ public interface PostgresConversationMapper extends BaseMapper<PostgresConversat
     record WorkClaimRow(
             UUID messageJobId,
             UUID sessionId,
+            String modelKey,
+            String modelFingerprint,
             String workerId,
             long claimNumber,
             OffsetDateTime claimedAt,
@@ -694,6 +711,7 @@ public interface PostgresConversationMapper extends BaseMapper<PostgresConversat
     record SessionProjectionRow(
             UUID sessionId,
             OffsetDateTime createdAt,
+            String selectedModel,
             UUID messageJobId,
             String status,
             Integer retryCount,

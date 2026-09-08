@@ -10,9 +10,11 @@ import com.java.system.sessionagent.conversation.domain.ModelCallResult;
 import com.java.system.sessionagent.conversation.domain.ModelContinuation;
 import com.java.system.sessionagent.conversation.domain.ModelReply;
 import com.java.system.sessionagent.conversation.domain.ModelRouteId;
+import com.java.system.sessionagent.conversation.domain.ModelSelection;
 import com.java.system.sessionagent.conversation.domain.SessionSequence;
 import com.java.system.sessionagent.conversation.port.in.MessageJobProcessingResult;
 import com.java.system.sessionagent.conversation.port.out.ConversationModel;
+import com.java.system.sessionagent.conversation.port.out.ConversationModels;
 import com.java.system.sessionagent.conversation.port.out.ConversationStore;
 import com.java.system.sessionagent.conversation.port.out.ConversationStoreFailure;
 import com.java.system.sessionagent.conversation.port.out.ModelCallFailure;
@@ -157,6 +159,41 @@ class MessageJobRecoveryTest {
         verify(store).append(eq(claim), batch.capture(), any(Instant.class));
         verify(store, Mockito.never()).loadHistory(any());
         verify(model, Mockito.never()).respond(any(), any(), any());
+        assertThat(batch.getValue()).isEqualTo(new ConversationStore.MessageBatch(List.of(
+                new ConversationStore.RuntimeData("MODEL_UNAVAILABLE", "Runtime model is unavailable.")),
+                ConversationStore.JobUpdate.COMPLETE));
+    }
+
+    @Test
+    void completes_model_unavailable_without_provider_or_tool_calls_when_the_persisted_fingerprint_is_no_longer_configured() {
+        ConversationStore store = mock(ConversationStore.class);
+        MessageWorkClaim claim = claim();
+        ConversationModels models = new ConversationModels() {
+            @Override
+            public ModelSelection defaultSelection() {
+                return new ModelSelection("test", "v2:current");
+            }
+
+            @Override
+            public Optional<ModelSelection> findSelection(String model) {
+                return Optional.empty();
+            }
+
+            @Override
+            public Optional<ConversationModel> resolve(ModelSelection selection) {
+                return Optional.empty();
+            }
+        };
+        ToolCatalog catalog = () -> { throw new AssertionError("Tool snapshot must not be opened"); };
+        JobProcessor processor = new JobProcessor(store, models, catalog, java.time.Clock.systemUTC(), 2,
+                new com.java.system.sessionagent.conversation.application.MessageJobRetryPolicy(3, Duration.ofSeconds(60)),
+                new com.java.system.sessionagent.conversation.port.out.NoOpConversationTelemetry());
+
+        processor.process(claim, () -> true);
+
+        ArgumentCaptor<ConversationStore.MessageBatch> batch = ArgumentCaptor.forClass(ConversationStore.MessageBatch.class);
+        verify(store).append(eq(claim), batch.capture(), any(Instant.class));
+        verify(store, Mockito.never()).loadHistory(any());
         assertThat(batch.getValue()).isEqualTo(new ConversationStore.MessageBatch(List.of(
                 new ConversationStore.RuntimeData("MODEL_UNAVAILABLE", "Runtime model is unavailable.")),
                 ConversationStore.JobUpdate.COMPLETE));

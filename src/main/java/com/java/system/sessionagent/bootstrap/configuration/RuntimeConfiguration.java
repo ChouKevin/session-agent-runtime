@@ -3,12 +3,14 @@ package com.java.system.sessionagent.bootstrap.configuration;
 import com.baomidou.mybatisplus.autoconfigure.ConfigurationCustomizer;
 import com.google.genai.errors.ApiException;
 import com.java.system.sessionagent.conversation.application.MessageService;
+import com.java.system.sessionagent.conversation.application.SessionModelService;
 import com.java.system.sessionagent.conversation.application.ConversationQueryService;
 import com.java.system.sessionagent.conversation.application.MessageJobRetryPolicy;
 import com.java.system.sessionagent.conversation.application.JobProcessor;
 import com.java.system.sessionagent.conversation.port.in.ConversationQueryPort;
 import com.java.system.sessionagent.conversation.port.in.ExternalSessionReferenceQueryPort;
 import com.java.system.sessionagent.conversation.port.in.MessageIntakePort;
+import com.java.system.sessionagent.conversation.port.in.SessionModelPort;
 import com.java.system.sessionagent.conversation.port.out.ConversationModel;
 import com.java.system.sessionagent.conversation.port.out.ConversationStore;
 import com.java.system.sessionagent.conversation.port.out.ConversationTelemetry;
@@ -377,8 +379,16 @@ public class RuntimeConfiguration {
     }
 
     @Bean
-    MessageIntakePort messageIntakePort(ConversationStore conversationStore, ConversationTelemetry conversationTelemetry) {
-        return new MessageService(conversationStore, conversationTelemetry);
+    MessageIntakePort messageIntakePort(
+            ConversationStore conversationStore,
+            ConfiguredModels configuredModels,
+            ConversationTelemetry conversationTelemetry) {
+        return new MessageService(conversationStore, configuredModels, conversationTelemetry);
+    }
+
+    @Bean
+    SessionModelPort sessionModelPort(ConversationStore conversationStore, ConfiguredModels configuredModels) {
+        return new SessionModelService(conversationStore, configuredModels);
     }
 
     @Bean
@@ -440,9 +450,9 @@ public class RuntimeConfiguration {
     @Bean
     ConversationQueryPort conversationQueryPort(
             ConversationStore conversationStore,
-            ConversationModel conversationModel,
+            ConfiguredModels configuredModels,
             ToolCatalog toolCatalog) {
-        return new ConversationQueryService(conversationStore, conversationModel, toolCatalog, new ContextUsageEstimator());
+        return new ConversationQueryService(conversationStore, configuredModels, toolCatalog, new ContextUsageEstimator());
     }
 
     @Bean
@@ -466,13 +476,13 @@ public class RuntimeConfiguration {
     @Bean
     JobProcessor messageJobService(
             ConversationStore conversationStore,
-            ConversationModel conversationModel,
+            ConfiguredModels configuredModels,
             ToolCatalog toolCatalog,
             Clock runtimeClock,
             RuntimeProperties properties,
             MessageJobRetryPolicy messageJobRetryPolicy,
             ConversationTelemetry conversationTelemetry) {
-        return new JobProcessor(conversationStore, conversationModel, toolCatalog, runtimeClock,
+        return new JobProcessor(conversationStore, configuredModels, toolCatalog, runtimeClock,
                 properties.model().maxModelCallsPerMessage(), messageJobRetryPolicy, conversationTelemetry);
     }
 

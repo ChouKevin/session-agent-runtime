@@ -5,6 +5,8 @@ import com.java.system.sessionagent.conversation.domain.MessageReceipt;
 import com.java.system.sessionagent.conversation.port.in.ConversationQueryPort;
 import com.java.system.sessionagent.conversation.port.in.ExternalSessionReferenceQueryPort;
 import com.java.system.sessionagent.conversation.port.in.MessageIntakePort;
+import com.java.system.sessionagent.conversation.port.in.SessionModelPort;
+import com.java.system.sessionagent.conversation.domain.SessionId;
 import jakarta.validation.Valid;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -14,6 +16,7 @@ import org.springframework.util.StringUtils;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
@@ -31,17 +34,35 @@ public final class MessageController {
     private final MessageIntakePort messageIntakePort;
     private final ConversationQueryPort conversationQueryPort;
     private final ExternalSessionReferenceQueryPort externalSessionReferenceQueryPort;
+    private final SessionModelPort sessionModelPort;
 
     public MessageController(
             MessageIntakePort messageIntakePort,
             ConversationQueryPort conversationQueryPort,
-            ExternalSessionReferenceQueryPort externalSessionReferenceQueryPort) {
+            ExternalSessionReferenceQueryPort externalSessionReferenceQueryPort,
+            SessionModelPort sessionModelPort) {
         Assert.notNull(messageIntakePort, "Message intake port must not be null");
         Assert.notNull(conversationQueryPort, "Conversation query port must not be null");
         Assert.notNull(externalSessionReferenceQueryPort, "External session reference query port must not be null");
+        Assert.notNull(sessionModelPort, "Session model port must not be null");
         this.messageIntakePort = messageIntakePort;
         this.conversationQueryPort = conversationQueryPort;
         this.externalSessionReferenceQueryPort = externalSessionReferenceQueryPort;
+        this.sessionModelPort = sessionModelPort;
+    }
+
+    @PutMapping("/sessions/{sessionId}/model")
+    public MessageResponses.SessionModelResponse selectModel(
+            @PathVariable String sessionId,
+            @Valid @RequestBody MessageRequests.SessionModelRequest request) {
+        requireUuid(sessionId);
+        try {
+            return sessionModelPort.select(new SessionId(sessionId), request.model())
+                    .map(view -> new MessageResponses.SessionModelResponse(view.sessionId().value(), view.model(), "NEW_MESSAGES"))
+                    .orElseThrow(WebErrorHandler.NotFoundException::new);
+        } catch (IllegalArgumentException exception) {
+            throw new WebErrorHandler.BadRequestException();
+        }
     }
 
     @PostMapping("/messages")

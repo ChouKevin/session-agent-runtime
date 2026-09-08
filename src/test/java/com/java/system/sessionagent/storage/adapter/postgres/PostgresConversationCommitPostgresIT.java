@@ -16,6 +16,7 @@ import com.java.system.sessionagent.conversation.domain.AssistantToolCallsMessag
 import com.java.system.sessionagent.conversation.domain.ContextUsageEstimator;
 import com.java.system.sessionagent.conversation.domain.ContextUsageProjection;
 import com.java.system.sessionagent.conversation.domain.ModelRequest;
+import com.java.system.sessionagent.conversation.domain.ModelSelection;
 import com.java.system.sessionagent.conversation.domain.ModelUsage;
 import com.java.system.sessionagent.conversation.domain.SessionMessage;
 import com.java.system.sessionagent.conversation.domain.SessionSequence;
@@ -306,7 +307,8 @@ class PostgresConversationCommitPostgresIT {
         assertThat(history).extracting(message -> message.sequence().value()).containsExactly(1L, 2L);
         assertThat(history.get(1)).isInstanceOfSatisfying(AssistantMessage.class,
                 assistant -> assertThat(assistant.message()).isEqualTo("done"));
-        assertThat(restartedStore.loadUsageCheckpoint(receipt.sessionId(), descriptor, fingerprint, 0))
+        ModelSelection selection = new ModelSelection("default", "v1:legacy");
+        assertThat(restartedStore.loadUsageCheckpoint(receipt.sessionId(), selection, descriptor, fingerprint, 0))
                 .hasValueSatisfying(checkpoint -> {
                     assertThat(checkpoint.responseBoundary().value()).isEqualTo(2L);
                     assertThat(checkpoint.modelCallOrdinal()).isEqualTo(1);
@@ -418,7 +420,7 @@ class PostgresConversationCommitPostgresIT {
                 new ConversationStore.ToolObservationData(new ToolCallId("call-1"), "mcp_lookup", Map.of("isError", false, "result", Map.of())),
                 new ConversationStore.ToolObservationData(new ToolCallId("call-2"), "mcp_entries", Map.of("isError", false, "result", Map.of()))),
                 ConversationStore.JobUpdate.KEEP_WORKING, java.util.Optional.of(continuation), java.util.Optional.of(
-                        new ConversationStore.UsageCheckpointData(descriptor, 1, 50, 20, 70,
+                        new ConversationStore.UsageCheckpointData(claim.modelSelection(), descriptor, 1, 50, 20, 70,
                                 "a".repeat(64), 0))), NOW)).isInstanceOf(RuntimeException.class);
 
         assertThat(jdbcTemplate.queryForObject("select count(*) from session_message", Integer.class)).isEqualTo(1);

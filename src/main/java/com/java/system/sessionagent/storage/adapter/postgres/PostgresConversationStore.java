@@ -17,6 +17,7 @@ import com.java.system.sessionagent.conversation.domain.ContextCompaction;
 import com.java.system.sessionagent.conversation.domain.ContextSummary;
 import com.java.system.sessionagent.conversation.domain.ModelDescriptor;
 import com.java.system.sessionagent.conversation.domain.ModelRouteId;
+import com.java.system.sessionagent.conversation.domain.ModelSelection;
 import com.java.system.sessionagent.conversation.domain.RuntimeMessage;
 import com.java.system.sessionagent.conversation.domain.SessionId;
 import com.java.system.sessionagent.conversation.domain.SessionMessage;
@@ -28,6 +29,7 @@ import com.java.system.sessionagent.tool.domain.ToolName;
 import com.java.system.sessionagent.conversation.domain.UserMessage;
 import com.java.system.sessionagent.conversation.port.in.MessageConflictException;
 import com.java.system.sessionagent.conversation.port.out.ConversationStore;
+import com.java.system.sessionagent.conversation.port.out.ModelSelectionLookup;
 import com.java.system.sessionagent.conversation.port.out.ConversationStoreFailure;
 import com.java.system.sessionagent.conversation.port.out.ModelRouteMismatchException;
 import com.java.system.sessionagent.conversation.port.out.StaleWorkClaimException;
@@ -92,9 +94,21 @@ public final class PostgresConversationStore implements ConversationStore {
 
     @Override
     public MessageReceipt receive(IncomingMessage incomingMessage) {
+        ModelSelection legacySelection = new ModelSelection("default", "v1:legacy");
+        return receive(incomingMessage, legacySelection, model -> Optional.of(legacySelection));
+    }
+
+    @Override
+    public MessageReceipt receive(
+            IncomingMessage incomingMessage,
+            ModelSelection defaultSelection,
+            ModelSelectionLookup selectionLookup) {
         IncomingMessage requiredIncomingMessage = Objects.requireNonNull(incomingMessage, "Incoming message must not be null");
+        ModelSelection requiredDefaultSelection = Objects.requireNonNull(defaultSelection, "Default model selection must not be null");
+        ModelSelectionLookup requiredSelectionLookup = Objects.requireNonNull(selectionLookup, "Model selection lookup must not be null");
         try {
-            MessageReceipt receipt = transactionTemplate.execute(status -> receiveInTransaction(requiredIncomingMessage));
+            MessageReceipt receipt = transactionTemplate.execute(status -> receiveInTransaction(requiredIncomingMessage,
+                    requiredDefaultSelection, requiredSelectionLookup));
             return Objects.requireNonNull(receipt, "Message receipt must not be null");
         } catch (ConversationStoreFailure exception) {
             throw exception;
@@ -103,7 +117,10 @@ public final class PostgresConversationStore implements ConversationStore {
         }
     }
 
-    private MessageReceipt receiveInTransaction(IncomingMessage incomingMessage) {
+    private MessageReceipt receiveInTransaction(
+            IncomingMessage incomingMessage,
+            ModelSelection defaultSelection,
+            ModelSelectionLookup selectionLookup) {
         String sourceType = incomingMessage.source().storageValue();
         lockSourceIdentity(sourceType, incomingMessage.sourceMessageId());
         String contentHash = contentHash(incomingMessage.participantId(), incomingMessage.message());
@@ -115,14 +132,17 @@ public final class PostgresConversationStore implements ConversationStore {
             }
             throw new MessageConflictException();
         }
-        StoredSession session = lockOrCreateSession(sourceType, incomingMessage.sessionKey());
+        StoredSession session = lockOrCreateSession(sourceType, incomingMessage.sessionKey(), defaultSelection);
+        ModelSelection selection = selectionLookup.findSelection(session.selectedModel())
+                .orElseThrow(() -> ConversationStoreFailure.contract(
+                        new IllegalStateException("Selected configured model is unavailable")));
         long sequence = allocateSequence(session.sessionId());
         UUID jobId = UUID.randomUUID();
         Instant now = clock.instant();
         insertSourceMessage(sourceType, incomingMessage.sourceMessageId(), session.sessionId(), sequence, contentHash, now);
         insertUserSessionMessage(session.sessionId(), sequence, now);
         insertUserMessage(incomingMessage, session.sessionId(), sequence);
-        insertMessageJob(jobId, session.sessionId(), sequence, now);
+        insertMessageJob(jobId, session.sessionId(), sequence, selection, now);
         return new MessageReceipt(new SessionId(session.sessionId().toString()), new MessageJobId(jobId.toString()));
     }
 
@@ -133,11 +153,11 @@ public final class PostgresConversationStore implements ConversationStore {
         mapper.lockSourceIdentity(firstLockKey, secondLockKey);
     }
 
-    private StoredSession lockOrCreateSession(String sourceType, String sessionKey) {
+    private StoredSession lockOrCreateSession(String sourceType, String sessionKey, ModelSelection defaultSelection) {
         UUID generatedSessionId = UUID.randomUUID();
-        mapper.insertSessionIfAbsent(generatedSessionId, sourceType, sessionKey, timestamp(clock.instant()));
+        mapper.insertSessionIfAbsent(generatedSessionId, sourceType, sessionKey, defaultSelection.model(), timestamp(clock.instant()));
         return mapper.lockSession(sourceType, sessionKey).stream()
-                .map(row -> new StoredSession(row.sessionId()))
+                .map(row -> new StoredSession(row.sessionId(), row.selectedModel()))
                 .findFirst().orElseThrow(() -> ConversationStoreFailure.contract(
                         new IllegalStateException("Conversation session was not created")));
     }
@@ -166,8 +186,8 @@ public final class PostgresConversationStore implements ConversationStore {
                 message.sourceMessageId(), message.message());
     }
 
-    private void insertMessageJob(UUID jobId, UUID sessionId, long sequence, Instant createdAt) {
-        mapper.insertMessageJob(jobId, sessionId, sequence, timestamp(createdAt));
+    private void insertMessageJob(UUID jobId, UUID sessionId, long sequence, ModelSelection selection, Instant createdAt) {
+        mapper.insertMessageJob(jobId, sessionId, sequence, selection.model(), selection.fingerprint(), timestamp(createdAt));
     }
 
     @Override
@@ -180,9 +200,25 @@ public final class PostgresConversationStore implements ConversationStore {
                     workerId, positiveLeaseMilliseconds(requiredLeaseDuration)).stream()
                     .map(row -> new MessageWorkClaim(
                             new MessageJobId(row.messageJobId().toString()), new SessionId(row.sessionId().toString()),
-                            row.workerId(), row.claimNumber(), row.claimedAt().toInstant(), row.lockedUntil().toInstant()))
+                            new ModelSelection(row.modelKey(), row.modelFingerprint()), row.workerId(), row.claimNumber(),
+                            row.claimedAt().toInstant(), row.lockedUntil().toInstant()))
                     .findFirst());
             return Objects.requireNonNull(claim, "Claim result must not be null");
+        } catch (RuntimeException exception) {
+            throw translate(exception);
+        }
+    }
+
+    @Override
+    public Optional<ModelSelection> selectModel(SessionId sessionId, ModelSelection selection) {
+        SessionId requiredSessionId = Objects.requireNonNull(sessionId, "Session ID must not be null");
+        ModelSelection requiredSelection = Objects.requireNonNull(selection, "Model selection must not be null");
+        try {
+            return transactionTemplate.execute(status -> mapper.lockSessionById(UUID.fromString(requiredSessionId.value())).stream()
+                    .findFirst().map(session -> {
+                        mapper.selectModel(session.sessionId(), requiredSelection.model());
+                        return requiredSelection;
+                    }));
         } catch (RuntimeException exception) {
             throw translate(exception);
         }
@@ -270,13 +306,19 @@ public final class PostgresConversationStore implements ConversationStore {
 
     @Override
     public Optional<ContextUsageCheckpoint> loadUsageCheckpoint(
-            SessionId sessionId, ModelDescriptor model, String requestShapeFingerprint, long compactGeneration) {
+            SessionId sessionId,
+            ModelSelection selection,
+            ModelDescriptor model,
+            String requestShapeFingerprint,
+            long compactGeneration) {
         SessionId requiredSessionId = Objects.requireNonNull(sessionId, "Session ID must not be null");
+        ModelSelection requiredSelection = Objects.requireNonNull(selection, "Model selection must not be null");
         ModelDescriptor requiredModel = Objects.requireNonNull(model, "Model descriptor must not be null");
         Assert.hasText(requestShapeFingerprint, "Request shape fingerprint must not be blank");
         Assert.isTrue(compactGeneration >= 0, "Compact generation must not be negative");
         try {
-            return mapper.loadUsageCheckpoint(UUID.fromString(requiredSessionId.value()), requiredModel.routeId().value(),
+            return mapper.loadUsageCheckpoint(UUID.fromString(requiredSessionId.value()), requiredSelection.model(),
+                    requiredSelection.fingerprint(), requiredModel.routeId().value(),
                     requiredModel.modelId(), requestShapeFingerprint, compactGeneration).stream().findFirst()
                     .map(row -> new ContextUsageCheckpoint(requiredModel, row.modelCallOrdinal(),
                             new SessionSequence(row.responseSequence()), row.promptTokens(), row.completionTokens(),
@@ -426,7 +468,8 @@ public final class PostgresConversationStore implements ConversationStore {
                 ConversationStore.UsageCheckpointData checkpoint = requiredBatch.usageCheckpoint().orElseThrow();
                 SessionSequence boundary = responseSequence.orElseThrow();
                 mapper.insertUsageCheckpoint(sessionId, boundary.value(), checkpoint.model().routeId().value(),
-                        checkpoint.model().modelId(), checkpoint.modelCallOrdinal(), checkpoint.promptTokens(),
+                        checkpoint.model().modelId(), checkpoint.selection().model(), checkpoint.selection().fingerprint(),
+                        checkpoint.modelCallOrdinal(), checkpoint.promptTokens(),
                         checkpoint.completionTokens(), checkpoint.totalTokens(), checkpoint.requestShapeFingerprint(),
                         checkpoint.compactGeneration(), timestamp(requiredCreatedAt));
             }
@@ -564,7 +607,8 @@ public final class PostgresConversationStore implements ConversationStore {
                             new SessionId(row.sessionId().toString()), JobStatus.valueOf(row.status()), row.retryCount(),
                             row.modelCalls()));
                 }
-                return new SessionProjection(new SessionId(row.sessionId().toString()), row.createdAt().toInstant(), currentJob);
+                return new SessionProjection(new SessionId(row.sessionId().toString()), row.createdAt().toInstant(), currentJob,
+                        row.selectedModel());
             });
         } catch (RuntimeException exception) {
             throw translate(exception);
@@ -664,7 +708,7 @@ public final class PostgresConversationStore implements ConversationStore {
         return false;
     }
 
-    private record StoredSession(UUID sessionId) {
+    private record StoredSession(UUID sessionId, String selectedModel) {
     }
 
     private record StoredSourceMessage(UUID sessionId, String contentHash, UUID messageJobId) {

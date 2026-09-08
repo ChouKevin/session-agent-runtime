@@ -19,6 +19,7 @@ import ch.qos.logback.core.AppenderBase;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.java.system.sessionagent.conversation.application.MessageService;
 import com.java.system.sessionagent.conversation.application.JobProcessor;
+import com.java.system.sessionagent.conversation.TestConfiguredModels;
 import com.java.system.sessionagent.conversation.domain.IncomingMessage;
 import com.java.system.sessionagent.conversation.domain.IncomingMessageSource;
 import com.java.system.sessionagent.conversation.domain.ModelCallResult;
@@ -35,6 +36,7 @@ import com.java.system.sessionagent.conversation.port.in.MessageIntakePort;
 import com.java.system.sessionagent.conversation.port.out.ConversationModel;
 import com.java.system.sessionagent.conversation.port.out.ConversationStore;
 import com.java.system.sessionagent.conversation.port.out.ModelCallReservation;
+import com.java.system.sessionagent.conversation.port.out.NoOpConversationTelemetry;
 import com.java.system.sessionagent.storage.adapter.postgres.PostgresConversationStore;
 import com.java.system.sessionagent.tool.port.ToolCatalog;
 import com.java.system.sessionagent.tool.port.ToolSnapshot;
@@ -272,7 +274,8 @@ class PostgresMessageSubmissionPostgresIT {
     void commits_a_staged_accepted_root_before_an_overlapping_ignored_representation() throws Exception {
         DriverManagerDataSource raceDataSource = dataSource();
         Clock clock = Clock.fixed(Instant.parse("2026-09-06T00:00:00Z"), ZoneOffset.UTC);
-        MessageIntakePort delegate = new MessageService(new PostgresConversationStore(raceDataSource, clock, new ObjectMapper()));
+        MessageIntakePort delegate = new MessageService(new PostgresConversationStore(raceDataSource, clock, new ObjectMapper()),
+                TestConfiguredModels.withDefault("test"), new NoOpConversationTelemetry());
         CountDownLatch acceptedMessageStaged = new CountDownLatch(1);
         CountDownLatch allowAcceptedReceipt = new CountDownLatch(1);
         MessageIntakePort stagedAcceptedIntake = message -> {
@@ -539,7 +542,8 @@ class PostgresMessageSubmissionPostgresIT {
         DriverManagerDataSource dataSource = dataSource();
         Clock clock = Clock.fixed(Instant.parse("2026-09-06T00:00:00Z"), ZoneOffset.UTC);
         ConversationStore conversationStore = new PostgresConversationStore(dataSource, clock, new ObjectMapper());
-        MessageIntakePort messageIntakePort = new MessageService(conversationStore);
+        MessageIntakePort messageIntakePort = new MessageService(conversationStore, TestConfiguredModels.withDefault("test"),
+                new NoOpConversationTelemetry());
         return new PostgresMessageSubmission(dataSource, messageIntakePort, clock);
     }
 

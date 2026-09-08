@@ -11,6 +11,7 @@ import com.java.system.sessionagent.conversation.domain.ContextUsageProjection;
 import com.java.system.sessionagent.conversation.domain.ModelDescriptor;
 import com.java.system.sessionagent.conversation.domain.ModelContinuation;
 import com.java.system.sessionagent.conversation.domain.ModelRouteId;
+import com.java.system.sessionagent.conversation.domain.ModelSelection;
 import com.java.system.sessionagent.conversation.domain.ModelRequest;
 import com.java.system.sessionagent.conversation.domain.ModelUsage;
 import com.java.system.sessionagent.conversation.domain.SessionMessage;
@@ -20,6 +21,7 @@ import com.java.system.sessionagent.conversation.port.in.MessageJobPort;
 import com.java.system.sessionagent.conversation.port.in.MessageJobProcessingResult;
 import com.java.system.sessionagent.conversation.port.in.WorkGuard;
 import com.java.system.sessionagent.conversation.port.out.ConversationModel;
+import com.java.system.sessionagent.conversation.port.out.ConversationModels;
 import com.java.system.sessionagent.conversation.port.out.ConversationStore;
 import com.java.system.sessionagent.conversation.port.out.ConversationStoreFailure;
 import com.java.system.sessionagent.conversation.port.out.ConversationTelemetry;
@@ -55,7 +57,7 @@ public final class JobProcessor implements MessageJobPort {
     private static final String INVALID_CONVERSATION_HISTORY = "INVALID_CONVERSATION_HISTORY";
 
     private final ConversationStore conversationStore;
-    private final ConversationModel conversationModel;
+    private final ConversationModels conversationModels;
     private final ToolCatalog toolCatalog;
     private final Clock clock;
     private final int maxModelCalls;
@@ -68,7 +70,7 @@ public final class JobProcessor implements MessageJobPort {
             ConversationModel conversationModel,
             ToolCatalog toolCatalog,
             Clock clock) {
-        this(conversationStore, conversationModel, toolCatalog, clock, Integer.MAX_VALUE,
+        this(conversationStore, fixedModels(conversationModel), toolCatalog, clock, Integer.MAX_VALUE,
                 new MessageJobRetryPolicy(3, Duration.ofSeconds(60)), new NoOpConversationTelemetry());
     }
 
@@ -79,7 +81,7 @@ public final class JobProcessor implements MessageJobPort {
             Clock clock,
             MessageJobRetryPolicy retryPolicy,
             ConversationTelemetry telemetry) {
-        this(conversationStore, conversationModel, toolCatalog, clock, Integer.MAX_VALUE, retryPolicy, telemetry);
+        this(conversationStore, fixedModels(conversationModel), toolCatalog, clock, Integer.MAX_VALUE, retryPolicy, telemetry);
     }
 
     public JobProcessor(
@@ -90,14 +92,45 @@ public final class JobProcessor implements MessageJobPort {
             int maxModelCalls,
             MessageJobRetryPolicy retryPolicy,
             ConversationTelemetry telemetry) {
+        this(conversationStore, fixedModels(conversationModel), toolCatalog, clock, maxModelCalls, retryPolicy, telemetry);
+    }
+
+    public JobProcessor(
+            ConversationStore conversationStore,
+            ConversationModels conversationModels,
+            ToolCatalog toolCatalog,
+            Clock clock,
+            int maxModelCalls,
+            MessageJobRetryPolicy retryPolicy,
+            ConversationTelemetry telemetry) {
         this.conversationStore = Objects.requireNonNull(conversationStore, "Conversation store must not be null");
-        this.conversationModel = Objects.requireNonNull(conversationModel, "Conversation model must not be null");
+        this.conversationModels = Objects.requireNonNull(conversationModels, "Conversation models must not be null");
         this.toolCatalog = Objects.requireNonNull(toolCatalog, "Tool catalog must not be null");
         this.clock = Objects.requireNonNull(clock, "Clock must not be null");
         Assert.isTrue(maxModelCalls > 0, "Maximum model calls must be positive");
         this.maxModelCalls = maxModelCalls;
         this.retryPolicy = Objects.requireNonNull(retryPolicy, "Message job retry policy must not be null");
         this.telemetry = Objects.requireNonNull(telemetry, "Conversation telemetry must not be null");
+    }
+
+    private static ConversationModels fixedModels(ConversationModel conversationModel) {
+        ConversationModel requiredModel = Objects.requireNonNull(conversationModel, "Conversation model must not be null");
+        return new ConversationModels() {
+            @Override
+            public ModelSelection defaultSelection() {
+                return new ModelSelection(requiredModel.routeId().value(), "v1:fixed");
+            }
+
+            @Override
+            public Optional<ModelSelection> findSelection(String model) {
+                return Optional.of(new ModelSelection(model, "v1:fixed"));
+            }
+
+            @Override
+            public Optional<ConversationModel> resolve(ModelSelection selection) {
+                return Optional.of(requiredModel);
+            }
+        };
     }
 
     @Override
@@ -116,6 +149,12 @@ public final class JobProcessor implements MessageJobPort {
     }
 
     private void processClaim(MessageWorkClaim claim, WorkGuard guard, ProcessingResultTracker resultTracker) {
+        Optional<ConversationModel> resolvedModel = conversationModels.resolve(claim.modelSelection());
+        if (resolvedModel.isEmpty()) {
+            appendRuntime(claim, guard, List.of(runtime(MODEL_UNAVAILABLE)), ConversationStore.JobUpdate.COMPLETE, resultTracker);
+            return;
+        }
+        ConversationModel conversationModel = resolvedModel.orElseThrow();
         ModelDescriptor modelDescriptor = conversationModel.descriptor();
         ModelRouteId routeId = conversationModel.routeId();
         if (Objects.isNull(modelDescriptor) && !Objects.isNull(routeId)) {
@@ -141,9 +180,9 @@ public final class JobProcessor implements MessageJobPort {
             }
             try (ToolSnapshot tools = toolCatalog.snapshot()) {
                 ReservationState reservation = new ReservationState();
-                ContextState context = contextState(claim, history, continuations, tools, activeModelDescriptor);
+                ContextState context = contextState(claim, history, continuations, tools, activeModelDescriptor, conversationModel);
                 if (context.requiresCompaction()) {
-                    if (!compact(claim, guard, reservation, context, ContextCompaction.Reason.THRESHOLD, resultTracker)) {
+                    if (!compact(claim, guard, reservation, context, ContextCompaction.Reason.THRESHOLD, resultTracker, conversationModel)) {
                         return;
                     }
                     continue;
@@ -171,7 +210,7 @@ public final class JobProcessor implements MessageJobPort {
                         return;
                     }
                     if (failure.kind() == ModelCallFailure.Kind.CONTEXT_TOO_LARGE
-                            && recoverOverflow(claim, guard, reservation, context, elapsedSince(requestStartedAt), resultTracker)) {
+                            && recoverOverflow(claim, guard, reservation, context, elapsedSince(requestStartedAt), resultTracker, conversationModel)) {
                         continue;
                     }
                     if (handleModelFailure(claim, guard, reservation, failure,
@@ -192,7 +231,7 @@ public final class JobProcessor implements MessageJobPort {
                 logModelResponse(claim, activeModelDescriptor, ordinal, reply, result.usage(), elapsedSince(requestStartedAt));
                 if (reply instanceof ModelReply.Text text) {
                     appendResponse(claim, guard, List.of(new ConversationStore.AssistantData(text.message())),
-                            ConversationStore.JobUpdate.COMPLETE, Optional.empty(), checkpoint(result, activeModelDescriptor, ordinal,
+                            ConversationStore.JobUpdate.COMPLETE, Optional.empty(), checkpoint(result, claim.modelSelection(), activeModelDescriptor, ordinal,
                                     requestShapeFingerprint, context.compaction().map(value -> value.generation()).orElse(0L)), resultTracker);
                     return;
                 }
@@ -207,7 +246,7 @@ public final class JobProcessor implements MessageJobPort {
                     return;
                 }
                 if (!appendResponse(claim, guard, messages, ConversationStore.JobUpdate.KEEP_WORKING, continuation,
-                        checkpoint(result, activeModelDescriptor, ordinal, requestShapeFingerprint,
+                        checkpoint(result, claim.modelSelection(), activeModelDescriptor, ordinal, requestShapeFingerprint,
                                 context.compaction().map(value -> value.generation()).orElse(0L)), resultTracker)) {
                     return;
                 }
@@ -215,12 +254,16 @@ public final class JobProcessor implements MessageJobPort {
         }
     }
 
-    private Optional<ConversationStore.UsageCheckpointData> checkpoint(ModelCallResult result, ModelDescriptor descriptor, int ordinal,
+    private Optional<ConversationStore.UsageCheckpointData> checkpoint(
+            ModelCallResult result,
+            ModelSelection selection,
+            ModelDescriptor descriptor,
+            int ordinal,
             String requestShapeFingerprint, long compactGeneration) {
         if (!result.usage().available() || Objects.isNull(descriptor) || !org.springframework.util.StringUtils.hasText(requestShapeFingerprint)) {
             return Optional.empty();
         }
-        return Optional.of(new ConversationStore.UsageCheckpointData(descriptor, ordinal, result.usage().promptTokens(),
+        return Optional.of(new ConversationStore.UsageCheckpointData(selection, descriptor, ordinal, result.usage().promptTokens(),
                 result.usage().completionTokens(), result.usage().totalTokens(), requestShapeFingerprint, compactGeneration));
     }
 
@@ -229,7 +272,8 @@ public final class JobProcessor implements MessageJobPort {
             List<SessionMessage> history,
             Map<SessionSequence, ModelContinuation> continuations,
             ToolSnapshot tools,
-            ModelDescriptor descriptor) {
+            ModelDescriptor descriptor,
+            ConversationModel conversationModel) {
         if (Objects.isNull(descriptor) || "unspecified".equals(descriptor.modelId())
                 || !org.springframework.util.StringUtils.hasText(conversationModel.systemPrompt())) {
             return new ContextState(new ModelRequest(history, continuations, tools), "", Optional.empty(), 0, false, Optional.empty());
@@ -243,7 +287,7 @@ public final class JobProcessor implements MessageJobPort {
                 visibleHistory, generation, summary);
         String fingerprint = contextUsageEstimator.requestShapeFingerprint(projection);
         long estimate = contextUsageEstimator.estimate(projection,
-                conversationStore.loadUsageCheckpoint(claim.sessionId(), descriptor, fingerprint, generation)).tokens();
+                conversationStore.loadUsageCheckpoint(claim.sessionId(), claim.modelSelection(), descriptor, fingerprint, generation)).tokens();
         long threshold = fourFifths(descriptor.contextWindowTokens());
         if (estimate >= threshold) {
             logCompaction(claim, "compact_threshold_reached", "THRESHOLD_REACHED", estimate, descriptor.contextWindowTokens());
@@ -258,14 +302,15 @@ public final class JobProcessor implements MessageJobPort {
             ReservationState reservation,
             ContextState context,
             Duration duration,
-            ProcessingResultTracker resultTracker) {
+            ProcessingResultTracker resultTracker,
+            ConversationModel conversationModel) {
         logModelFailure(claim, reservation.ordinal(), ModelCallFailure.Kind.CONTEXT_TOO_LARGE, duration);
         if (conversationStore.hasOverflowCompaction(claim.messageJobId())) {
             appendRuntime(claim, guard, List.of(runtime(CONTEXT_TOO_LARGE)),
                     ConversationStore.JobUpdate.COMPLETE, resultTracker);
             return false;
         }
-        return compact(claim, guard, new ReservationState(), context, ContextCompaction.Reason.OVERFLOW, resultTracker);
+        return compact(claim, guard, new ReservationState(), context, ContextCompaction.Reason.OVERFLOW, resultTracker, conversationModel);
     }
 
     private boolean compact(
@@ -274,7 +319,8 @@ public final class JobProcessor implements MessageJobPort {
             ReservationState reservation,
             ContextState context,
             ContextCompaction.Reason reason,
-            ProcessingResultTracker resultTracker) {
+            ProcessingResultTracker resultTracker,
+            ConversationModel conversationModel) {
         if (context.projection().isEmpty()) {
             logCompaction(claim, "compact_failure", "NO_PROJECTION", context.estimateTokens(), 0L);
             appendRuntime(claim, guard, List.of(runtime(CONTEXT_TOO_LARGE)),
@@ -282,7 +328,7 @@ public final class JobProcessor implements MessageJobPort {
             return false;
         }
         ContextUsageProjection projection = context.projection().orElseThrow();
-        Optional<CompactionBoundary> boundary = selectBoundary(claim, context, projection.model());
+        Optional<CompactionBoundary> boundary = selectBoundary(claim, context, projection.model(), conversationModel);
         if (boundary.isEmpty()) {
             logCompaction(claim, "compact_failure", "NO_BOUNDARY", context.estimateTokens(), projection.model().contextWindowTokens());
             appendRuntime(claim, guard, List.of(runtime(CONTEXT_TOO_LARGE)),
@@ -356,7 +402,11 @@ public final class JobProcessor implements MessageJobPort {
         return false;
     }
 
-    private Optional<CompactionBoundary> selectBoundary(MessageWorkClaim claim, ContextState context, ModelDescriptor descriptor) {
+    private Optional<CompactionBoundary> selectBoundary(
+            MessageWorkClaim claim,
+            ContextState context,
+            ModelDescriptor descriptor,
+            ConversationModel conversationModel) {
         List<SessionMessage> full = conversationStore.loadHistory(claim.sessionId());
         int start = context.compaction().map(compaction -> indexAfter(full, compaction.coveredThrough())).orElse(0);
         for (int index = full.size() - 1; index >= start; index--) {
