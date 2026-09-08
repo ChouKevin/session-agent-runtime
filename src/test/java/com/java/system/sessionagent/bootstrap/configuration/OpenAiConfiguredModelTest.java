@@ -10,12 +10,15 @@ import com.java.system.sessionagent.conversation.domain.ModelRequest;
 import com.java.system.sessionagent.conversation.domain.MessageJobId;
 import com.java.system.sessionagent.conversation.domain.MessageRole;
 import com.java.system.sessionagent.conversation.domain.ModelRouteId;
+import com.java.system.sessionagent.conversation.domain.ModelUsage;
 import com.java.system.sessionagent.conversation.domain.SessionId;
 import com.java.system.sessionagent.conversation.domain.SessionSequence;
 import com.java.system.sessionagent.conversation.domain.ToolCallId;
 import com.java.system.sessionagent.conversation.domain.ToolObservation;
 import com.java.system.sessionagent.conversation.domain.ToolRequest;
 import com.java.system.sessionagent.conversation.domain.UserMessage;
+import com.java.system.sessionagent.bootstrap.adapter.metrics.MicrometerConversationTelemetry;
+import com.java.system.sessionagent.conversation.port.out.ConversationTelemetry;
 import com.java.system.sessionagent.conversation.port.out.NoOpConversationTelemetry;
 import com.java.system.sessionagent.conversation.port.out.ModelCallFailure;
 import com.java.system.sessionagent.model.adapter.springai.SystemPrompt;
@@ -26,7 +29,11 @@ import com.java.system.sessionagent.tool.port.ToolDefinition;
 import com.java.system.sessionagent.tool.port.ToolSnapshot;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
@@ -36,13 +43,64 @@ import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.stream.Stream;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class OpenAiConfiguredModelTest {
+    @ParameterizedTest(name = "OpenAI cached input {0}")
+    @MethodSource("openAiCacheUsageCases")
+    void maps_openai_provider_cache_usage_to_common_telemetry(
+            String scenario,
+            String cacheDetails,
+            String expectedState,
+            OptionalLong expectedCachedInputTokens) throws Exception {
+        SimpleMeterRegistry registry = new SimpleMeterRegistry();
+        AtomicInteger reservations = new AtomicInteger();
+        AtomicInteger providerRequests = new AtomicInteger();
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/v1/chat/completions", exchange -> respond(exchange, new AtomicReference<>(),
+                new AtomicReference<>(), providerRequests, openAiCacheUsageResponse(cacheDetails)));
+        server.start();
+        try (ConfiguredModels models = configuredModels(server, new MicrometerConversationTelemetry(registry))) {
+            ModelCallResult result = models.defaultConversationModel().respond(
+                    new ModelRequest(List.of(), new ToolSnapshot(List.of())), reservations::incrementAndGet);
+
+            assertThat(result.usage()).as(scenario)
+                    .isEqualTo(new ModelUsage(8, 2, 10, true, expectedCachedInputTokens));
+            assertThat(reservations).hasValue(1);
+            assertThat(providerRequests).hasValue(1);
+            assertThat(registry.get("session_agent.model.cache_usage").tag("state", expectedState)
+                    .counter().count()).isEqualTo(1);
+            assertThat(registry.get("session_agent.model.tokens").tag("kind", "prompt").counter().count())
+                    .isEqualTo(8);
+            assertThat(registry.get("session_agent.model.tokens").tag("kind", "completion").counter().count())
+                    .isEqualTo(2);
+            assertThat(registry.get("session_agent.model.tokens").tag("kind", "total").counter().count())
+                    .isEqualTo(10);
+            if (expectedCachedInputTokens.isPresent()) {
+                assertThat(registry.get("session_agent.model.tokens").tag("kind", "cached_input").counter().count())
+                        .isEqualTo(expectedCachedInputTokens.getAsLong());
+            } else {
+                assertThat(registry.find("session_agent.model.tokens").tags("kind", "cached_input").counter())
+                        .isNull();
+            }
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    private static Stream<Arguments> openAiCacheUsageCases() {
+        return Stream.of(
+                Arguments.of("hit", ",\"prompt_tokens_details\":{\"cached_tokens\":4}", "HIT", OptionalLong.of(4)),
+                Arguments.of("zero", ",\"prompt_tokens_details\":{\"cached_tokens\":0}", "ZERO", OptionalLong.of(0)),
+                Arguments.of("absent", "", "UNKNOWN", OptionalLong.empty()));
+    }
+
     @Test
     void maps_a_configured_openai_text_response_to_the_provider_neutral_port() throws Exception {
         AtomicReference<String> requestPath = new AtomicReference<>();
@@ -277,21 +335,34 @@ class OpenAiConfiguredModelTest {
     }
 
     private static ConfiguredModels configuredModels(HttpServer server) {
-        return configuredModels(server, Duration.ofSeconds(2), null, null);
+        return configuredModels(server, Duration.ofSeconds(2), null, null, new NoOpConversationTelemetry());
     }
 
     private static ConfiguredModels configuredModels(HttpServer server, Duration timeout) {
-        return configuredModels(server, timeout, null, null);
+        return configuredModels(server, timeout, null, null, new NoOpConversationTelemetry());
     }
 
     private static ConfiguredModels configuredModels(HttpServer server, Duration timeout, Double temperature, Double topP) {
+        return configuredModels(server, timeout, temperature, topP, new NoOpConversationTelemetry());
+    }
+
+    private static ConfiguredModels configuredModels(HttpServer server, ConversationTelemetry telemetry) {
+        return configuredModels(server, Duration.ofSeconds(2), null, null, telemetry);
+    }
+
+    private static ConfiguredModels configuredModels(
+            HttpServer server,
+            Duration timeout,
+            Double temperature,
+            Double topP,
+            ConversationTelemetry telemetry) {
         RuntimeProperties.ModelProfile profile = new RuntimeProperties.ModelProfile("openai", "gpt-5-mini", "test-key",
                 200_000, 1_234, temperature, topP, timeout, null,
                 "http://127.0.0.1:" + server.getAddress().getPort() + "/v1");
         RuntimeProperties properties = new RuntimeProperties(new RuntimeProperties.Model(12, "openai-primary",
                 Map.of("openai-primary", profile)), new RuntimeProperties.Worker(
                 Duration.ofSeconds(1), Duration.ofSeconds(30), 3, Duration.ofSeconds(60)));
-        return new RuntimeConfiguration().configuredModels(new SystemPrompt(), new NoOpConversationTelemetry(),
+        return new RuntimeConfiguration().configuredModels(new SystemPrompt(), telemetry,
                 new ObjectMapper(), properties);
     }
 
@@ -314,6 +385,14 @@ class OpenAiConfiguredModelTest {
                 "choices":[{"index":0,"message":{"role":"assistant","content":"%s"},"finish_reason":"stop"}],
                 "usage":{"prompt_tokens":8,"completion_tokens":2,"total_tokens":10}}
                 """.formatted(text);
+    }
+
+    private static String openAiCacheUsageResponse(String cacheDetails) {
+        return """
+                {"id":"chatcmpl-cache","object":"chat.completion","created":0,"model":"gpt-5-mini",
+                "choices":[{"index":0,"message":{"role":"assistant","content":"Cached response."},"finish_reason":"stop"}],
+                "usage":{"prompt_tokens":8,"completion_tokens":2,"total_tokens":10%s}}
+                """.formatted(cacheDetails);
     }
 
     private static void respond(
