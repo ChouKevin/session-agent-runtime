@@ -18,7 +18,8 @@ class RuntimeConfigurationTest {
         String configuration = new ClassPathResource("application.yml").getContentAsString(StandardCharsets.UTF_8);
 
         assertThat(configuration).contains("server:\n  address: 127.0.0.1", "connections: {}",
-                "max-model-calls-per-message: ${SESSION_AGENT_MAX_MODEL_CALLS_PER_MESSAGE:12}");
+                "max-model-calls-per-message: ${SESSION_AGENT_MAX_MODEL_CALLS_PER_MESSAGE:12}",
+                "optional:classpath:models.yml");
         assertThat(configuration).doesNotContain("semantic:", "SEMANTIC_");
     }
 

@@ -1,0 +1,18 @@
+session-agent:
+  model:
+    default-model: google-primary
+    models:
+      google-primary:
+        provider: google-genai
+        model-id: ${GOOGLE_GENAI_MODEL:gemini-3.1-flash-lite}
+        api-key: ${GOOGLE_API_KEY:}
+        context-window-tokens: 1048576
+        max-output-tokens: 8192
+# OpenAI deployments enable a separate entry through deployment configuration.
+# openai-primary:
+#   provider: openai
+#   model-id: gpt-5-mini
+#   api-key: ${OPENAI_API_KEY:}
+#   context-window-tokens: 400000
+#   max-output-tokens: 16384
+#   base-url: https://api.openai.com/v1

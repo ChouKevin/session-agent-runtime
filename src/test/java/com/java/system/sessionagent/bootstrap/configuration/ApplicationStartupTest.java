@@ -4,13 +4,13 @@ import com.baomidou.mybatisplus.autoconfigure.MybatisPlusAutoConfiguration;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.java.system.sessionagent.conversation.domain.ModelDescriptor;
 import com.java.system.sessionagent.conversation.domain.ModelRouteId;
+import com.java.system.sessionagent.conversation.port.out.ConversationModel;
 import com.java.system.sessionagent.conversation.port.out.ConversationStore;
 import com.java.system.sessionagent.mcp.adapter.sdk.McpConnectionManager;
 import com.java.system.sessionagent.slack.application.SlackSocketLifecycle;
 import com.java.system.sessionagent.slack.domain.SlackLifecycleState;
 import com.java.system.sessionagent.slack.port.out.SlackSocketClient;
 import com.java.system.sessionagent.slack.port.out.SlackSocketConnectionListener;
-import com.java.system.sessionagent.model.adapter.springai.SpringAiConversationModel;
 import com.java.system.sessionagent.tool.port.ToolCatalog;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.springframework.ai.google.genai.GoogleGenAiChatOptions;
@@ -36,7 +36,13 @@ class ApplicationStartupTest {
             .withUserConfiguration(RuntimeConfiguration.class, McpConfiguration.class, TestDependencies.class)
             .withPropertyValues(
                     "spring.datasource.url=jdbc:postgresql://localhost:5432/session_agent",
-                    "spring.datasource.password=test-datasource-password");
+                    "spring.datasource.password=test-datasource-password",
+                    "session-agent.model.default-model=google-primary",
+                    "session-agent.model.models.google-primary.provider=google-genai",
+                    "session-agent.model.models.google-primary.model-id=gemini-3.1-flash-lite",
+                    "session-agent.model.models.google-primary.api-key=test-google-key",
+                    "session-agent.model.models.google-primary.context-window-tokens=1048576",
+                    "session-agent.model.models.google-primary.max-output-tokens=8192");
 
     @Test
     void starts_with_zero_mcp_connections() {
@@ -45,7 +51,7 @@ class ApplicationStartupTest {
             assertThat(context).hasSingleBean(McpConnectionManager.class);
             assertThat(context).hasSingleBean(ToolCatalog.class);
             assertThat(context).hasSingleBean(ConversationStore.class);
-            assertThat(context.getBean(SpringAiConversationModel.class).routeId().value()).isEqualTo("google-genai");
+            assertThat(context.getBean(ConversationModel.class).routeId().value()).isEqualTo("google-primary");
         });
     }
 
@@ -58,22 +64,22 @@ class ApplicationStartupTest {
     }
 
     @Test
-    void binds_the_configured_model_route_without_inferring_it_from_the_provider() {
-        contextRunner.withPropertyValues("session-agent.model.route-id=gemini-primary")
-                .run(context -> assertThat(context.getBean(SpringAiConversationModel.class).routeId().value())
-                        .isEqualTo("gemini-primary"));
+    void binds_the_configured_model_key_without_inferring_it_from_the_provider() {
+        contextRunner.withPropertyValues("session-agent.model.default-model=google-primary")
+                .run(context -> assertThat(context.getBean(ConversationModel.class).routeId().value())
+                        .isEqualTo("google-primary"));
     }
 
     @Test
     void resolves_the_configured_google_catalog_capacity_and_rejects_unknown_models_without_an_override() {
         contextRunner.run(context -> {
             assertThat(context).hasNotFailed();
-            assertThat(context.getBean(SpringAiConversationModel.class).descriptor())
+            assertThat(context.getBean(ConversationModel.class).descriptor())
                     .isEqualTo(new ModelDescriptor(
-                            new ModelRouteId("google-genai"),
+                            new ModelRouteId("google-primary"),
                             "gemini-3.1-flash-lite", 1_048_576));
         });
-        contextRunner.withPropertyValues("spring.ai.google.genai.chat.options.model=unknown-model")
+        contextRunner.withPropertyValues("session-agent.model.models.google-primary.context-window-tokens=0")
                 .run(context -> assertThat(context).hasFailed());
     }
 

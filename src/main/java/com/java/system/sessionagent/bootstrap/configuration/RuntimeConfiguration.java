@@ -13,7 +13,10 @@ import com.java.system.sessionagent.conversation.port.out.ConversationStore;
 import com.java.system.sessionagent.conversation.port.out.ConversationTelemetry;
 import com.java.system.sessionagent.bootstrap.adapter.metrics.MicrometerConversationTelemetry;
 import com.java.system.sessionagent.model.adapter.springai.SpringAiConversationModel;
+import com.java.system.sessionagent.model.adapter.springai.DiscardingContinuationHandler;
 import com.java.system.sessionagent.model.adapter.springai.GoogleGenAiThoughtSignatureHandler;
+import com.java.system.sessionagent.model.adapter.springai.ConfiguredModelBinding;
+import com.java.system.sessionagent.model.adapter.springai.ConfiguredModels;
 import com.java.system.sessionagent.conversation.domain.ModelRouteId;
 import com.java.system.sessionagent.conversation.domain.ModelDescriptor;
 import com.java.system.sessionagent.conversation.domain.ContextUsageEstimator;
@@ -49,8 +52,10 @@ import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.MapperFeature;
 import com.fasterxml.jackson.databind.type.LogicalType;
 import org.springframework.ai.chat.model.ChatModel;
-import org.springframework.ai.chat.prompt.ChatOptions;
 import org.springframework.ai.google.genai.GoogleGenAiChatOptions;
+import org.springframework.ai.google.genai.GoogleGenAiChatModel;
+import org.springframework.ai.openai.OpenAiChatModel;
+import org.springframework.ai.openai.OpenAiChatOptions;
 import org.apache.ibatis.session.LocalCacheScope;
 import org.springframework.boot.jackson.autoconfigure.JsonMapperBuilderCustomizer;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
@@ -64,6 +69,13 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import javax.sql.DataSource;
 import java.time.Clock;
 import java.time.Duration;
+import java.security.MessageDigest;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.HexFormat;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.Executors;
@@ -119,30 +131,99 @@ public class RuntimeConfiguration {
     }
 
     @Bean
-    SpringAiConversationModel conversationModel(
-            ChatModel chatModel,
+    ConfiguredModels configuredModels(
             SystemPrompt promptResource,
             ConversationTelemetry conversationTelemetry,
             ObjectMapper objectMapper,
             RuntimeProperties runtimeProperties) {
-        ModelRouteId routeId = new ModelRouteId(runtimeProperties.model().routeId());
-        return new SpringAiConversationModel(chatModel, promptResource, conversationTelemetry, objectMapper,
-                new GoogleGenAiThoughtSignatureHandler(routeId, objectMapper),
-                googleGenAiDescriptor(chatModel, routeId, runtimeProperties.model().contextWindowTokens()));
+        Map<String, ConfiguredModelBinding> bindings = new LinkedHashMap<>();
+        List<AutoCloseable> resources = new ArrayList<>();
+        for (Map.Entry<String, RuntimeProperties.ModelProfile> entry : runtimeProperties.model().models().entrySet()) {
+            String key = entry.getKey();
+            RuntimeProperties.ModelProfile profile = entry.getValue();
+            ModelRouteId routeId = new ModelRouteId(key);
+            ChatModel chatModel = chatModel(profile, resources);
+            SpringAiConversationModel conversationModel = new SpringAiConversationModel(chatModel, promptResource,
+                    conversationTelemetry, objectMapper, continuationHandler(profile.provider(), routeId, objectMapper),
+                    new ModelDescriptor(routeId, profile.modelId(), profile.contextWindowTokens()));
+            bindings.put(key, new ConfiguredModelBinding(key, fingerprint(profile), conversationModel));
+        }
+        return new ConfiguredModels(bindings, runtimeProperties.model().defaultModel(), resources);
     }
 
-    private static ModelDescriptor googleGenAiDescriptor(
-            ChatModel chatModel,
+    @Bean
+    ConversationModel conversationModel(ConfiguredModels configuredModels) {
+        return configuredModels.defaultConversationModel();
+    }
+
+    private static ChatModel chatModel(RuntimeProperties.ModelProfile profile, List<AutoCloseable> resources) {
+        if ("google-genai".equals(profile.provider())) {
+            GoogleGenAiChatOptions.Builder options = GoogleGenAiChatOptions.builder()
+                    .model(profile.modelId())
+                    .maxOutputTokens(profile.maxOutputTokens())
+                    .includeThoughts(false);
+            if (profile.temperature() != null) { // cs-allow provider option is optional
+                options.temperature(profile.temperature());
+            }
+            if (profile.topP() != null) { // cs-allow provider option is optional
+                options.topP(profile.topP());
+            }
+            GoogleGenAiChatModel model = GoogleGenAiChatModel.builder()
+                    .genAiClient(com.google.genai.Client.builder().apiKey(profile.apiKey()).build())
+                    .options(options.build())
+                    .retryTemplate(new org.springframework.core.retry.RetryTemplate(
+                            org.springframework.core.retry.RetryPolicy.withMaxRetries(0)))
+                    .build();
+            resources.add(model::destroy);
+            return model;
+        }
+        if ("openai".equals(profile.provider())) {
+            OpenAiChatOptions.Builder options = OpenAiChatOptions.builder()
+                    .apiKey(profile.apiKey())
+                    .baseUrl(profile.baseUrl())
+                    .model(profile.modelId())
+                    .maxCompletionTokens(profile.maxOutputTokens())
+                    .maxRetries(0)
+                    .store(false)
+                    .strict(false);
+            if (profile.timeout() != null) { // cs-allow provider option is optional
+                options.timeout(profile.timeout());
+            }
+            if (profile.temperature() != null) { // cs-allow provider option is optional
+                options.temperature(profile.temperature());
+            }
+            if (profile.topP() != null) { // cs-allow provider option is optional
+                options.topP(profile.topP());
+            }
+            if (profile.reasoningEffort() != null) { // cs-allow provider option is optional
+                options.reasoningEffort(profile.reasoningEffort());
+            }
+            return OpenAiChatModel.builder().options(options.build()).build();
+        }
+        throw new IllegalArgumentException("Unsupported configured model provider");
+    }
+
+    private static com.java.system.sessionagent.model.adapter.springai.SpringAiContinuationHandler continuationHandler(
+            String provider,
             ModelRouteId routeId,
-            Integer contextWindowOverride) {
-        ChatOptions options = chatModel.getOptions();
-        String modelId = options instanceof GoogleGenAiChatOptions googleOptions
-                ? googleOptions.getModel() : "gemini-3.1-flash-lite";
-        org.springframework.util.Assert.hasText(modelId, "Google GenAI model ID must not be blank");
-        long catalogWindow = "gemini-3.1-flash-lite".equals(modelId) ? 1_048_576L : 0L;
-        long effectiveWindow = Objects.isNull(contextWindowOverride) ? catalogWindow : contextWindowOverride.longValue();
-        org.springframework.util.Assert.isTrue(effectiveWindow > 0, "Model context window capacity must be configured");
-        return new ModelDescriptor(routeId, modelId, effectiveWindow);
+            ObjectMapper objectMapper) {
+        if ("google-genai".equals(provider)) {
+            return new GoogleGenAiThoughtSignatureHandler(routeId, objectMapper);
+        }
+        return new DiscardingContinuationHandler(routeId);
+    }
+
+    private static String fingerprint(RuntimeProperties.ModelProfile profile) {
+        String normalized = String.join("\n", profile.provider(), profile.modelId(),
+                String.valueOf(profile.baseUrl()), String.valueOf(profile.contextWindowTokens()),
+                String.valueOf(profile.maxOutputTokens()), String.valueOf(profile.temperature()), String.valueOf(profile.topP()),
+                String.valueOf(profile.timeout()), String.valueOf(profile.reasoningEffort()));
+        try {
+            return "v1:" + HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
+                    .digest(normalized.getBytes(StandardCharsets.UTF_8)));
+        } catch (java.security.NoSuchAlgorithmException exception) {
+            throw new IllegalStateException("SHA-256 must be available", exception);
+        }
     }
 
     @Bean
@@ -261,7 +342,7 @@ public class RuntimeConfiguration {
     @Bean
     JobProcessor messageJobService(
             ConversationStore conversationStore,
-            SpringAiConversationModel conversationModel,
+            ConversationModel conversationModel,
             ToolCatalog toolCatalog,
             Clock runtimeClock,
             RuntimeProperties properties,
