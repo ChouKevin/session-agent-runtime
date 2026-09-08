@@ -22,6 +22,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.java.system.sessionagent.conversation.application.MessageService;
 import com.java.system.sessionagent.conversation.application.JobProcessor;
 import com.java.system.sessionagent.conversation.application.MessageJobRetryPolicy;
+import com.java.system.sessionagent.conversation.port.out.ConversationModels;
 import com.java.system.sessionagent.conversation.TestConfiguredModels;
 import com.java.system.sessionagent.conversation.domain.IncomingMessage;
 import com.java.system.sessionagent.conversation.domain.IncomingMessageSource;
@@ -50,6 +51,7 @@ import org.junit.jupiter.api.TestInstance;
 import org.slf4j.LoggerFactory;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.testcontainers.postgresql.PostgreSQLContainer;
 
 import java.time.Clock;
@@ -206,6 +208,80 @@ class SlackDeliveryPostgresIT {
             assertThat(delivery.failureCategory()).isEmpty();
             assertThat(delivery.nextAttemptAt()).isNotNull();
         });
+    }
+
+    @Test
+    void rejects_conflicting_busy_notice_for_a_source_while_permitting_its_answer() {
+        completeSlackJobWithTerminalRuntime();
+        SlackPostgresDeliveryStore deliveryStore = new SlackPostgresDeliveryStore(dataSource());
+        deliveryStore.discover();
+
+        assertThatThrownBy(() -> jdbcTemplate.update("""
+                insert into slack_delivery(delivery_id, kind, team_id, channel_id, root_thread_ts, message_ts, terminal_text,
+                    status, attempt_count, next_attempt_at, claim_number, created_at)
+                values (?, 'BUSY', 'T1', 'C1', '1.000001', '1.000001', '目前忙碌中。',
+                    'PENDING', 0, clock_timestamp(), 0, clock_timestamp())
+                """, UUID.randomUUID())).isInstanceOf(DataIntegrityViolationException.class);
+
+        assertThat(deliveryStore.findBySource("T1", "C1", "1.000001"))
+                .extracting(delivery -> delivery.kind().name())
+                .containsExactly("QUEUED", "ANSWER");
+    }
+
+    @Test
+    void migrates_a_v2_answer_delivery_with_its_accepted_source_and_progress_preserved() {
+        flyway().clean();
+        Flyway.configure().dataSource(dataSource()).cleanDisabled(false).target("2").load().migrate();
+        jdbcTemplate = new JdbcTemplate(dataSource());
+        PostgresConversationStore conversationStore = new PostgresConversationStore(dataSource(), Clock.fixed(NOW, ZoneOffset.UTC),
+                new ObjectMapper());
+        ConversationModels models = TestConfiguredModels.withDefault("test");
+        IncomingMessage message = new IncomingMessage(IncomingMessageSource.SLACK, "v2-session", "U1", "v2-source",
+                "v2 request");
+        MessageReceipt receipt = conversationStore.receive(message, models.defaultSelection(), models);
+        completeNextWithTerminalRuntime(conversationStore);
+        UUID sessionId = UUID.fromString(receipt.sessionId().value());
+        UUID messageJobId = UUID.fromString(receipt.messageJobId().value());
+        Long terminalSequence = jdbcTemplate.queryForObject("""
+                select sequence from session_message
+                where session_id = ? and message_job_id = ? and role = 'RUNTIME'
+                """, Long.class, sessionId, messageJobId);
+        UUID deliveryId = UUID.randomUUID();
+
+        jdbcTemplate.update("""
+                insert into slack_message_receipt(team_id, channel_id, message_ts, top_level, classification, session_id,
+                    message_job_id, created_at)
+                values ('Tv2', 'Cv2', '9.000001', true, 'ACCEPTED', ?, ?, clock_timestamp())
+                """, sessionId, messageJobId);
+        jdbcTemplate.update("""
+                insert into slack_delivery(delivery_id, terminal_session_id, terminal_sequence, message_job_id, channel_id,
+                    root_thread_ts, terminal_text, status, attempt_count, next_attempt_at, claim_number, slack_message_ts,
+                    created_at, sent_at)
+                values (?, ?, ?, ?, 'Cv2', '9.000001', 'v2 terminal text', 'SENT', 3, clock_timestamp(), 3,
+                    '10.000001', clock_timestamp(), clock_timestamp())
+                """, deliveryId, sessionId, terminalSequence, messageJobId);
+
+        flyway().migrate();
+
+        Map<String, Object> delivery = jdbcTemplate.queryForMap("""
+                select kind, team_id, channel_id, root_thread_ts, message_ts, terminal_session_id, terminal_sequence,
+                    message_job_id, terminal_text, status, attempt_count, claim_number, slack_message_ts
+                from slack_delivery where delivery_id = ?
+                """, deliveryId);
+        assertThat(delivery).containsEntry("kind", "ANSWER").containsEntry("team_id", "Tv2")
+                .containsEntry("channel_id", "Cv2").containsEntry("root_thread_ts", "9.000001")
+                .containsEntry("message_ts", "9.000001").containsEntry("terminal_session_id", sessionId)
+                .containsEntry("terminal_sequence", terminalSequence).containsEntry("message_job_id", messageJobId)
+                .containsEntry("terminal_text", "v2 terminal text").containsEntry("status", "SENT")
+                .containsEntry("attempt_count", 3).containsEntry("claim_number", 3L)
+                .containsEntry("slack_message_ts", "10.000001");
+        assertThat(jdbcTemplate.queryForObject("""
+                select count(*) from slack_delivery delivery
+                join slack_message_receipt receipt on receipt.team_id = delivery.team_id
+                    and receipt.channel_id = delivery.channel_id and receipt.message_ts = delivery.message_ts
+                    and receipt.message_job_id = delivery.message_job_id
+                where delivery.delivery_id = ? and receipt.classification = 'ACCEPTED'
+                """, Integer.class, deliveryId)).isEqualTo(1);
     }
 
     @Test

@@ -215,7 +215,7 @@ public interface SlackDatabaseMapper extends BaseMapper<SlackDatabaseMapper.Deli
                 status, attempt_count, next_attempt_at, claim_number, created_at)
             values (#{deliveryId}, #{kind}, #{messageJobId,jdbcType=OTHER}, #{teamId}, #{channelId}, #{rootThreadTs}, #{messageTs}, #{text},
                 'PENDING', 0, clock_timestamp(), 0, clock_timestamp())
-            on conflict (team_id, channel_id, message_ts, kind) do nothing
+            on conflict (team_id, channel_id, message_ts) where kind in ('QUEUED', 'BUSY') do nothing
             """)
     int insertNoticeDelivery(
             @Param("deliveryId") UUID deliveryId, @Param("kind") String kind, @Param("messageJobId") UUID messageJobId,

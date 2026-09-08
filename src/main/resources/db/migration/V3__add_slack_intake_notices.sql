@@ -25,6 +25,10 @@ $$;
 alter table slack_delivery add column kind varchar(16) not null default 'ANSWER';
 alter table slack_delivery add column team_id varchar(128);
 alter table slack_delivery add column message_ts varchar(64);
+update slack_delivery delivery set team_id = receipt.team_id, message_ts = receipt.message_ts
+from slack_message_receipt receipt
+where delivery.kind = 'ANSWER' and receipt.classification = 'ACCEPTED'
+    and receipt.session_id = delivery.terminal_session_id and receipt.message_job_id = delivery.message_job_id;
 alter table slack_delivery alter column team_id set not null;
 alter table slack_delivery alter column message_ts set not null;
 alter table slack_delivery alter column terminal_session_id drop not null;
@@ -46,4 +50,5 @@ alter table slack_delivery add constraint slack_delivery_kind_identity_check che
     (kind = 'ANSWER' and terminal_session_id is not null and terminal_sequence is not null and message_job_id is not null)
     or (kind = 'QUEUED' and terminal_session_id is null and terminal_sequence is null and message_job_id is not null)
     or (kind = 'BUSY' and terminal_session_id is null and terminal_sequence is null and message_job_id is null));
-create unique index uq_slack_delivery_notice_source on slack_delivery(team_id, channel_id, message_ts, kind);
+create unique index uq_slack_delivery_notice_source on slack_delivery(team_id, channel_id, message_ts)
+    where kind in ('QUEUED', 'BUSY');
