@@ -64,6 +64,7 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.scheduling.TaskScheduler;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
+import org.springframework.util.Assert;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
 import javax.sql.DataSource;
@@ -168,8 +169,13 @@ public class RuntimeConfiguration {
             if (profile.topP() != null) { // cs-allow provider option is optional
                 options.topP(profile.topP());
             }
+            com.google.genai.types.HttpOptions.Builder httpOptions = com.google.genai.types.HttpOptions.builder()
+                    .retryOptions(com.google.genai.types.HttpRetryOptions.builder().attempts(1).build());
+            if (profile.timeout() != null) { // cs-allow provider option is optional
+                httpOptions.timeout(timeoutMillis(profile.timeout()));
+            }
             GoogleGenAiChatModel model = GoogleGenAiChatModel.builder()
-                    .genAiClient(com.google.genai.Client.builder().apiKey(profile.apiKey()).build())
+                    .genAiClient(com.google.genai.Client.builder().apiKey(profile.apiKey()).httpOptions(httpOptions.build()).build())
                     .options(options.build())
                     .retryTemplate(new org.springframework.core.retry.RetryTemplate(
                             org.springframework.core.retry.RetryPolicy.withMaxRetries(0)))
@@ -201,6 +207,12 @@ public class RuntimeConfiguration {
             return OpenAiChatModel.builder().options(options.build()).build();
         }
         throw new IllegalArgumentException("Unsupported configured model provider");
+    }
+
+    private static int timeoutMillis(Duration timeout) {
+        long milliseconds = timeout.toMillis();
+        Assert.isTrue(milliseconds > 0, "Google model timeout must be at least one millisecond");
+        return Math.toIntExact(milliseconds);
     }
 
     private static com.java.system.sessionagent.model.adapter.springai.SpringAiContinuationHandler continuationHandler(

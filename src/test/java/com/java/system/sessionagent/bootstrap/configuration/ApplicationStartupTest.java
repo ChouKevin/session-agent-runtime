@@ -6,6 +6,8 @@ import com.java.system.sessionagent.conversation.domain.ModelDescriptor;
 import com.java.system.sessionagent.conversation.domain.ModelRouteId;
 import com.java.system.sessionagent.conversation.port.out.ConversationModel;
 import com.java.system.sessionagent.conversation.port.out.ConversationStore;
+import com.java.system.sessionagent.model.adapter.springai.ConfiguredModels;
+import com.java.system.sessionagent.model.adapter.springai.SpringAiConversationModel;
 import com.java.system.sessionagent.mcp.adapter.sdk.McpConnectionManager;
 import com.java.system.sessionagent.slack.application.SlackSocketLifecycle;
 import com.java.system.sessionagent.slack.domain.SlackLifecycleState;
@@ -22,9 +24,12 @@ import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.env.Environment;
+import org.springframework.core.retry.RetryTemplate;
+import org.springframework.test.util.ReflectionTestUtils;
 import org.mybatis.spring.annotation.MapperScan;
 
 import javax.sql.DataSource;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -42,7 +47,8 @@ class ApplicationStartupTest {
                     "session-agent.model.models.google-primary.model-id=gemini-3.1-flash-lite",
                     "session-agent.model.models.google-primary.api-key=test-google-key",
                     "session-agent.model.models.google-primary.context-window-tokens=1048576",
-                    "session-agent.model.models.google-primary.max-output-tokens=8192");
+                    "session-agent.model.models.google-primary.max-output-tokens=8192",
+                    "session-agent.model.models.google-primary.timeout=250ms");
 
     @Test
     void starts_with_zero_mcp_connections() {
@@ -81,6 +87,31 @@ class ApplicationStartupTest {
         });
         contextRunner.withPropertyValues("session-agent.model.models.google-primary.context-window-tokens=0")
                 .run(context -> assertThat(context).hasFailed());
+    }
+
+    @Test
+    void configures_google_timeout_and_disables_both_spring_ai_and_sdk_retries() {
+        contextRunner.run(context -> {
+            ConfiguredModels configuredModels = context.getBean(ConfiguredModels.class);
+            SpringAiConversationModel conversationModel = (SpringAiConversationModel) configuredModels.defaultConversationModel();
+            org.springframework.ai.google.genai.GoogleGenAiChatModel googleModel =
+                    (org.springframework.ai.google.genai.GoogleGenAiChatModel) ReflectionTestUtils.getField(conversationModel, "chatModel");
+            RetryTemplate retryTemplate = (RetryTemplate) ReflectionTestUtils.getField(googleModel, "retryTemplate");
+            com.google.genai.Client client = (com.google.genai.Client) ReflectionTestUtils.getField(googleModel, "genAiClient");
+            com.google.genai.ApiClient apiClient =
+                    (com.google.genai.ApiClient) ReflectionTestUtils.getField(client, "apiClient");
+
+            AtomicInteger attempts = new AtomicInteger();
+            org.assertj.core.api.Assertions.assertThatThrownBy(() -> retryTemplate.invoke(() -> {
+                attempts.incrementAndGet();
+                throw new IllegalStateException("test failure");
+            })).isInstanceOf(IllegalStateException.class);
+            assertThat(attempts).hasValue(1);
+            assertThat(apiClient.httpOptions().timeout()).contains(250);
+            assertThat(apiClient.httpOptions().retryOptions())
+                    .flatMap(com.google.genai.types.HttpRetryOptions::attempts)
+                    .contains(1);
+        });
     }
 
     @Test

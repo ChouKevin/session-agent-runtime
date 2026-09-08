@@ -76,7 +76,7 @@ if [[ -e "${runtime_root}/src/test/java/com/java/system/sessionagent/model/Googl
     exit 1
 fi
 
-for required_input in SESSION_AGENT_MCP_CONFIGURATION_JSON GOOGLE_API_KEY GOOGLE_GENAI_MODEL; do
+for required_input in SESSION_AGENT_MCP_CONFIGURATION_JSON GOOGLE_API_KEY GOOGLE_GENAI_MODEL OPENAI_API_KEY; do
     grep -Fq "${required_input}" "${compose_file}" || {
         printf 'missing environment input: %s\n' "${required_input}" >&2
         exit 1

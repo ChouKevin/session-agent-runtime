@@ -1,12 +1,17 @@
 package com.java.system.sessionagent.bootstrap.configuration;
 
 import com.java.system.sessionagent.conversation.application.MessageJobRetryPolicy;
+import com.java.system.sessionagent.conversation.port.out.NoOpConversationTelemetry;
+import com.java.system.sessionagent.model.adapter.springai.ConfiguredModels;
+import com.java.system.sessionagent.model.adapter.springai.SystemPrompt;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.java.system.sessionagent.worker.configuration.WorkerProperties;
 import org.junit.jupiter.api.Test;
 import org.springframework.core.io.ClassPathResource;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException;
@@ -43,5 +48,45 @@ class RuntimeConfigurationTest {
                 Duration.ZERO, Duration.ofSeconds(30), 3, Duration.ofSeconds(60)));
         assertThatIllegalArgumentException().isThrownBy(() -> new RuntimeProperties.Datasource(
                 "jdbc:postgresql://localhost:5432/session_agent", " "));
+    }
+
+    @Test
+    void maps_configured_model_keys_to_stable_nonsecret_fingerprints() throws Exception {
+        RuntimeProperties.ModelProfile firstProfile = openAiProfile("first-key", 0.2);
+        RuntimeProperties.ModelProfile rotatedCredential = openAiProfile("rotated-key", 0.2);
+        RuntimeProperties.ModelProfile changedSampling = openAiProfile("rotated-key", 0.3);
+
+        try (ConfiguredModels first = configuredModels(firstProfile);
+                ConfiguredModels rotated = configuredModels(rotatedCredential);
+                ConfiguredModels changed = configuredModels(changedSampling)) {
+            assertThat(first.defaultBinding().model()).isEqualTo("openai-primary");
+            assertThat(first.defaultBinding().conversationModel().routeId().value()).isEqualTo("openai-primary");
+            assertThat(first.defaultBinding().fingerprint()).isEqualTo(rotated.defaultBinding().fingerprint());
+            assertThat(first.defaultBinding().fingerprint()).isNotEqualTo(changed.defaultBinding().fingerprint());
+            assertThat(first.defaultBinding().fingerprint()).doesNotContain("first-key", "rotated-key");
+        }
+    }
+
+    @Test
+    void rejects_invalid_configured_model_selection_and_profile_values() {
+        RuntimeProperties.ModelProfile profile = openAiProfile("test-key", 0.2);
+
+        assertThatIllegalArgumentException().isThrownBy(() -> new RuntimeProperties.Model(12, "missing", Map.of("openai", profile)));
+        assertThatIllegalArgumentException().isThrownBy(() -> new RuntimeProperties.ModelProfile("openai", "gpt-5-mini", "test-key",
+                200_000, 0, 0.2, 0.8, Duration.ofSeconds(2), "low", "https://api.openai.com/v1"));
+        assertThatIllegalArgumentException().isThrownBy(() -> new RuntimeProperties.ModelProfile("openai", "gpt-5-mini", " ",
+                200_000, 1_234, 0.2, 0.8, Duration.ofSeconds(2), "low", "https://api.openai.com/v1"));
+    }
+
+    private static ConfiguredModels configuredModels(RuntimeProperties.ModelProfile profile) {
+        RuntimeProperties properties = new RuntimeProperties(new RuntimeProperties.Model(12, "openai-primary",
+                Map.of("openai-primary", profile)), new RuntimeProperties.Worker(
+                Duration.ofSeconds(1), Duration.ofSeconds(30), 3, Duration.ofSeconds(60)));
+        return new RuntimeConfiguration().configuredModels(new SystemPrompt(), new NoOpConversationTelemetry(), new ObjectMapper(), properties);
+    }
+
+    private static RuntimeProperties.ModelProfile openAiProfile(String apiKey, double temperature) {
+        return new RuntimeProperties.ModelProfile("openai", "gpt-5-mini", apiKey, 200_000, 1_234,
+                temperature, 0.8, Duration.ofSeconds(2), "low", "https://api.openai.com/v1");
     }
 }

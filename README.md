@@ -106,6 +106,29 @@ Spring AI retries are disabled with `spring.ai.retry.max-attempts=1`. Retrying t
 
 Tool execution has no runtime deduplication layer. A read-only tool can run again if the process crashes after execution and before its observation batch commits. Any future side-effecting tool must provide idempotency at its adapter or external-service boundary.
 
+## Model configuration
+
+`src/main/resources/models.yml` is the single model configuration source imported by `application.yml`. It contains the default Google entry and an inactive OpenAI fragment. Model credentials are environment placeholders only; do not put a key in configuration committed to a repository.
+
+To deploy OpenAI alongside the existing Google entry, provide both credentials through the deployment environment and enable the OpenAI fragment in the deployed `models.yml` with complete, explicit capacities. For example, the non-secret shape is:
+
+```yaml
+session-agent:
+  model:
+    default-model: openai-primary
+    models:
+      openai-primary:
+        provider: openai
+        model-id: gpt-5-mini
+        api-key: ${OPENAI_API_KEY:}
+        context-window-tokens: 400000
+        max-output-tokens: 16384
+        timeout: 30s
+        base-url: https://api.openai.com/v1
+```
+
+For Docker Compose, set `OPENAI_API_KEY` in the untracked `docker/.env` (and retain `GOOGLE_API_KEY` while the Google entry is configured). The OpenAI adapter uses Chat Completions with `store=false`; it does not use the Responses API. A configured entry with a missing key, capacity, or default-key mapping fails at startup rather than selecting a different model.
+
 ## Database and local runtime
 
 The shipped schema is a fresh V1 schema. Reset a disposable PostgreSQL database before starting this version; do not reuse a database from an earlier schema. The Compose service binds the runtime HTTP port to loopback only. Required local credentials are intentionally not committed.

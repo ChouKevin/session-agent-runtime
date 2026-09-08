@@ -41,8 +41,11 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.Map;
+import java.util.regex.Pattern;
 
 public final class SpringAiConversationModel implements ConversationModel {
+
+    private static final Pattern FIVE_HUNDRED_STATUS = Pattern.compile("\\b5\\d\\d\\b");
 
     private final ChatModel chatModel;
     private final SystemPrompt promptResource;
@@ -338,7 +341,8 @@ public final class SpringAiConversationModel implements ConversationModel {
     }
 
     private static boolean hasProviderInputTokenLimitSignal(String message) {
-        return message.contains("input token count") && message.contains("maximum number of tokens allowed");
+        return (message.contains("input token count") && message.contains("maximum number of tokens allowed"))
+                || (message.contains("maximum context length") && message.contains("requested"));
     }
 
     private static boolean hasTransientSignal(Throwable exception) {
@@ -348,7 +352,7 @@ public final class SpringAiConversationModel implements ConversationModel {
                 return true;
             }
             String message = String.valueOf(current.getMessage()).toLowerCase(Locale.ROOT);
-            if (message.contains("429") || message.contains("503") || message.contains("timeout")) {
+            if (message.contains("429") || message.contains("timeout") || FIVE_HUNDRED_STATUS.matcher(message).find()) {
                 return true;
             }
         }
