@@ -65,7 +65,7 @@ if rg -n 'SESSION_AGENT_POSTGRES_PASSWORD:-|POSTGRES_PASSWORD:.*session_agent' "
     exit 1
 fi
 
-google_live_test="${runtime_root}/src/test/java/com/java/system/sessionagent/model/GoogleModelLiveTest.java"
+google_live_test="${runtime_root}/src/test/java/com/java/system/sessionagent/model/adapter/springai/GoogleModelLiveTest.java"
 [[ -f "${google_live_test}" ]] || { printf 'missing GoogleModelLiveTest\n' >&2; exit 1; }
 grep -Fq 'GOOGLE_MODEL_LIVE' "${google_live_test}" || {
     printf 'Google model smoke test must remain explicitly opt-in\n' >&2
