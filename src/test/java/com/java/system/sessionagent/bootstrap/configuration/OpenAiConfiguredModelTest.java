@@ -2,6 +2,7 @@ package com.java.system.sessionagent.bootstrap.configuration;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.java.system.sessionagent.conversation.domain.AssistantToolCallsMessage;
+import com.java.system.sessionagent.conversation.domain.ContextCompactionRequest;
 import com.java.system.sessionagent.conversation.domain.ModelCallResult;
 import com.java.system.sessionagent.conversation.domain.ModelContinuation;
 import com.java.system.sessionagent.conversation.domain.ModelReply;
@@ -14,6 +15,7 @@ import com.java.system.sessionagent.conversation.domain.SessionSequence;
 import com.java.system.sessionagent.conversation.domain.ToolCallId;
 import com.java.system.sessionagent.conversation.domain.ToolObservation;
 import com.java.system.sessionagent.conversation.domain.ToolRequest;
+import com.java.system.sessionagent.conversation.domain.UserMessage;
 import com.java.system.sessionagent.conversation.port.out.NoOpConversationTelemetry;
 import com.java.system.sessionagent.conversation.port.out.ModelCallFailure;
 import com.java.system.sessionagent.model.adapter.springai.SystemPrompt;
@@ -70,6 +72,34 @@ class OpenAiConfiguredModelTest {
     }
 
     @Test
+    void maps_a_configured_openai_summary_without_forcing_sampling_options() throws Exception {
+        AtomicReference<String> requestPath = new AtomicReference<>();
+        AtomicReference<String> requestBody = new AtomicReference<>();
+        AtomicInteger reservations = new AtomicInteger();
+        AtomicInteger providerRequests = new AtomicInteger();
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/v1/chat/completions", exchange -> respond(exchange, requestPath, requestBody, providerRequests,
+                textResponse("Concise session summary.")));
+        server.start();
+        UserMessage history = new UserMessage(new SessionId("session-1"), new SessionSequence(1),
+                Optional.of(new MessageJobId("job-1")), Instant.EPOCH, MessageRole.USER, "user", "History.");
+        try (ConfiguredModels models = configuredModels(server)) {
+            String summary = models.defaultConversationModel().summarize(
+                    new ContextCompactionRequest(Optional.empty(), List.of(history)), reservations::incrementAndGet);
+
+            assertThat(summary).isEqualTo("Concise session summary.");
+            assertThat(reservations).hasValue(1);
+            assertThat(providerRequests).hasValue(1);
+            assertThat(requestPath).hasValue("/v1/chat/completions");
+            assertThat(requestBody.get()).contains("\"model\":\"gpt-5-mini\"", "\"store\":false",
+                    "\"max_completion_tokens\":1234");
+            assertThat(requestBody.get()).doesNotContain("\"temperature\"", "\"top_p\"");
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
     void maps_a_single_openai_rate_limit_response_to_a_transient_failure_without_sdk_retry() throws Exception {
         AtomicInteger calls = new AtomicInteger();
         HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
@@ -103,6 +133,22 @@ class OpenAiConfiguredModelTest {
                     new ModelRequest(List.of(), new ToolSnapshot(List.of())), () -> 1))
                     .isInstanceOfSatisfying(ModelCallFailure.class,
                             failure -> assertThat(failure.kind()).isEqualTo(ModelCallFailure.Kind.TRANSIENT));
+            assertThat(providerRequests).hasValue(1);
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void maps_openai_bad_request_with_a_misleading_server_error_number_to_a_terminal_failure() throws Exception {
+        AtomicInteger providerRequests = new AtomicInteger();
+        HttpServer server = errorServer(400, "invalid value 500 for parameter", providerRequests);
+        server.start();
+        try (ConfiguredModels models = configuredModels(server)) {
+            assertThatThrownBy(() -> models.defaultConversationModel().respond(
+                    new ModelRequest(List.of(), new ToolSnapshot(List.of())), () -> 1))
+                    .isInstanceOfSatisfying(ModelCallFailure.class,
+                            failure -> assertThat(failure.kind()).isEqualTo(ModelCallFailure.Kind.TERMINAL));
             assertThat(providerRequests).hasValue(1);
         } finally {
             server.stop(0);

@@ -65,6 +65,7 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean
 import org.springframework.scheduling.TaskScheduler;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
 import org.springframework.util.Assert;
+import org.springframework.util.StringUtils;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
 import javax.sql.DataSource;
@@ -77,7 +78,7 @@ import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -85,6 +86,9 @@ import java.util.concurrent.ScheduledExecutorService;
 @Configuration(proxyBeanMethods = false)
 @EnableConfigurationProperties({RuntimeProperties.class, RuntimeProperties.Datasource.class, SlackProperties.class})
 public class RuntimeConfiguration {
+
+    private static final String GOOGLE_GENAI_API_ROUTE = "https://generativelanguage.googleapis.com";
+    private static final String OPENAI_DEFAULT_API_ROUTE = "https://api.openai.com/v1";
 
     @Bean
     @ConditionalOnMissingBean(ObjectMapper.class)
@@ -137,19 +141,37 @@ public class RuntimeConfiguration {
             ConversationTelemetry conversationTelemetry,
             ObjectMapper objectMapper,
             RuntimeProperties runtimeProperties) {
+        return assembleConfiguredModels(promptResource, conversationTelemetry, objectMapper, runtimeProperties,
+                RuntimeConfiguration::chatModel);
+    }
+
+    static ConfiguredModels assembleConfiguredModels(
+            SystemPrompt promptResource,
+            ConversationTelemetry conversationTelemetry,
+            ObjectMapper objectMapper,
+            RuntimeProperties runtimeProperties,
+            ConfiguredChatModelBuilder modelBuilder) {
+        Map<String, EffectiveModelProfile> profiles = canonicalProfiles(runtimeProperties.model().models());
         Map<String, ConfiguredModelBinding> bindings = new LinkedHashMap<>();
         List<AutoCloseable> resources = new ArrayList<>();
-        for (Map.Entry<String, RuntimeProperties.ModelProfile> entry : runtimeProperties.model().models().entrySet()) {
-            String key = entry.getKey();
-            RuntimeProperties.ModelProfile profile = entry.getValue();
-            ModelRouteId routeId = new ModelRouteId(key);
-            ChatModel chatModel = chatModel(profile, resources);
-            SpringAiConversationModel conversationModel = new SpringAiConversationModel(chatModel, promptResource,
-                    conversationTelemetry, objectMapper, continuationHandler(profile.provider(), routeId, objectMapper),
-                    new ModelDescriptor(routeId, profile.modelId(), profile.contextWindowTokens()));
-            bindings.put(key, new ConfiguredModelBinding(key, fingerprint(profile), conversationModel));
+        try {
+            for (Map.Entry<String, EffectiveModelProfile> entry : profiles.entrySet()) {
+                String key = entry.getKey();
+                EffectiveModelProfile profile = entry.getValue();
+                ModelRouteId routeId = new ModelRouteId(key);
+                CreatedChatModel createdModel = modelBuilder.create(profile);
+                createdModel.ownedResource().ifPresent(resources::add);
+                SpringAiConversationModel conversationModel = new SpringAiConversationModel(createdModel.chatModel(), promptResource,
+                        conversationTelemetry, objectMapper,
+                        continuationHandler(profile.profile().provider(), routeId, objectMapper),
+                        new ModelDescriptor(routeId, profile.profile().modelId(), profile.profile().contextWindowTokens()));
+                bindings.put(key, new ConfiguredModelBinding(key, fingerprint(profile), conversationModel));
+            }
+            return new ConfiguredModels(bindings, runtimeProperties.model().defaultModel(), resources);
+        } catch (RuntimeException | Error failure) {
+            closeResources(resources, failure);
+            throw failure;
         }
-        return new ConfiguredModels(bindings, runtimeProperties.model().defaultModel(), resources);
     }
 
     @Bean
@@ -157,7 +179,8 @@ public class RuntimeConfiguration {
         return configuredModels.defaultConversationModel();
     }
 
-    private static ChatModel chatModel(RuntimeProperties.ModelProfile profile, List<AutoCloseable> resources) {
+    private static CreatedChatModel chatModel(EffectiveModelProfile effectiveProfile) {
+        RuntimeProperties.ModelProfile profile = effectiveProfile.profile();
         if ("google-genai".equals(profile.provider())) {
             GoogleGenAiChatOptions.Builder options = GoogleGenAiChatOptions.builder()
                     .model(profile.modelId())
@@ -174,19 +197,28 @@ public class RuntimeConfiguration {
             if (profile.timeout() != null) { // cs-allow provider option is optional
                 httpOptions.timeout(timeoutMillis(profile.timeout()));
             }
-            GoogleGenAiChatModel model = GoogleGenAiChatModel.builder()
-                    .genAiClient(com.google.genai.Client.builder().apiKey(profile.apiKey()).httpOptions(httpOptions.build()).build())
-                    .options(options.build())
-                    .retryTemplate(new org.springframework.core.retry.RetryTemplate(
-                            org.springframework.core.retry.RetryPolicy.withMaxRetries(0)))
+            com.google.genai.Client client = com.google.genai.Client.builder()
+                    .apiKey(profile.apiKey())
+                    .httpOptions(httpOptions.build())
                     .build();
-            resources.add(model::destroy);
-            return model;
+            try {
+                GoogleGenAiChatModel model = GoogleGenAiChatModel.builder()
+                        .genAiClient(client)
+                        .options(options.build())
+                        .retryTemplate(new org.springframework.core.retry.RetryTemplate(
+                                org.springframework.core.retry.RetryPolicy.withMaxRetries(0)))
+                        .build();
+                AutoCloseable resource = model::destroy;
+                return new CreatedChatModel(model, Optional.of(resource));
+            } catch (RuntimeException | Error failure) {
+                closeResource(client, failure);
+                throw failure;
+            }
         }
         if ("openai".equals(profile.provider())) {
             OpenAiChatOptions.Builder options = OpenAiChatOptions.builder()
                     .apiKey(profile.apiKey())
-                    .baseUrl(profile.baseUrl())
+                    .baseUrl(effectiveProfile.apiRoute())
                     .model(profile.modelId())
                     .maxCompletionTokens(profile.maxOutputTokens())
                     .maxRetries(0)
@@ -204,15 +236,66 @@ public class RuntimeConfiguration {
             if (profile.reasoningEffort() != null) { // cs-allow provider option is optional
                 options.reasoningEffort(profile.reasoningEffort());
             }
-            return OpenAiChatModel.builder().options(options.build()).build();
+            return new CreatedChatModel(OpenAiChatModel.builder().options(options.build()).build(), Optional.empty());
         }
         throw new IllegalArgumentException("Unsupported configured model provider");
+    }
+
+    private static Map<String, EffectiveModelProfile> canonicalProfiles(
+            Map<String, RuntimeProperties.ModelProfile> configuredProfiles) {
+        Map<String, EffectiveModelProfile> profiles = new LinkedHashMap<>();
+        for (Map.Entry<String, RuntimeProperties.ModelProfile> entry : configuredProfiles.entrySet()) {
+            String key = entry.getKey();
+            new ModelRouteId(key);
+            profiles.put(key, canonicalProfile(entry.getValue()));
+        }
+        return profiles;
+    }
+
+    private static EffectiveModelProfile canonicalProfile(RuntimeProperties.ModelProfile profile) {
+        Assert.notNull(profile, "Configured model profile must not be null");
+        if ("google-genai".equals(profile.provider())) {
+            Assert.isTrue(!StringUtils.hasText(profile.reasoningEffort()),
+                    "Google model profiles must not set OpenAI reasoning effort");
+            Assert.isTrue(!StringUtils.hasText(profile.baseUrl()),
+                    "Google model profiles must not set an OpenAI base URL");
+            if (profile.timeout() != null) { // cs-allow Google SDK accepts a bounded millisecond timeout
+                timeoutMillis(profile.timeout());
+            }
+            return new EffectiveModelProfile(profile, GOOGLE_GENAI_API_ROUTE);
+        }
+        if ("openai".equals(profile.provider())) {
+            return new EffectiveModelProfile(profile, canonicalOpenAiRoute(profile.baseUrl()));
+        }
+        throw new IllegalArgumentException("Unsupported configured model provider");
+    }
+
+    private static String canonicalOpenAiRoute(String baseUrl) {
+        if (!StringUtils.hasText(baseUrl)) {
+            return OPENAI_DEFAULT_API_ROUTE;
+        }
+        return baseUrl.endsWith("/") ? baseUrl.substring(0, baseUrl.length() - 1) : baseUrl;
+    }
+
+    private static void closeResources(List<AutoCloseable> resources, Throwable failure) {
+        for (AutoCloseable resource : resources) {
+            closeResource(resource, failure);
+        }
+    }
+
+    private static void closeResource(AutoCloseable resource, Throwable failure) {
+        try {
+            resource.close();
+        } catch (Exception | Error cleanupFailure) {
+            failure.addSuppressed(cleanupFailure);
+        }
     }
 
     private static int timeoutMillis(Duration timeout) {
         long milliseconds = timeout.toMillis();
         Assert.isTrue(milliseconds > 0, "Google model timeout must be at least one millisecond");
-        return Math.toIntExact(milliseconds);
+        Assert.isTrue(milliseconds <= Integer.MAX_VALUE, "Google model timeout must fit SDK milliseconds");
+        return (int) milliseconds;
     }
 
     private static com.java.system.sessionagent.model.adapter.springai.SpringAiContinuationHandler continuationHandler(
@@ -225,16 +308,32 @@ public class RuntimeConfiguration {
         return new DiscardingContinuationHandler(routeId);
     }
 
-    private static String fingerprint(RuntimeProperties.ModelProfile profile) {
-        String normalized = String.join("\n", profile.provider(), profile.modelId(),
-                String.valueOf(profile.baseUrl()), String.valueOf(profile.contextWindowTokens()),
-                String.valueOf(profile.maxOutputTokens()), String.valueOf(profile.temperature()), String.valueOf(profile.topP()),
-                String.valueOf(profile.timeout()), String.valueOf(profile.reasoningEffort()));
+    private static String fingerprint(EffectiveModelProfile effectiveProfile) {
+        RuntimeProperties.ModelProfile profile = effectiveProfile.profile();
+        String normalized = String.join("\n", profile.provider(), effectiveProfile.apiRoute(), profile.modelId(),
+                String.valueOf(profile.contextWindowTokens()), String.valueOf(profile.maxOutputTokens()),
+                String.valueOf(profile.temperature()), String.valueOf(profile.topP()), String.valueOf(profile.timeout()),
+                String.valueOf(profile.reasoningEffort()));
         try {
             return "v1:" + HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
                     .digest(normalized.getBytes(StandardCharsets.UTF_8)));
         } catch (java.security.NoSuchAlgorithmException exception) {
             throw new IllegalStateException("SHA-256 must be available", exception);
+        }
+    }
+
+    record EffectiveModelProfile(RuntimeProperties.ModelProfile profile, String apiRoute) {
+    }
+
+    @FunctionalInterface
+    interface ConfiguredChatModelBuilder {
+        CreatedChatModel create(EffectiveModelProfile profile);
+    }
+
+    record CreatedChatModel(ChatModel chatModel, Optional<AutoCloseable> ownedResource) {
+        CreatedChatModel {
+            Assert.notNull(chatModel, "Configured chat model must not be null");
+            Assert.notNull(ownedResource, "Configured model ownership must not be null");
         }
     }
 

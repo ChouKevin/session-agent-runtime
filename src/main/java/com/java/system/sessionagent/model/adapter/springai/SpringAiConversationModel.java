@@ -3,6 +3,9 @@ package com.java.system.sessionagent.model.adapter.springai;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.openai.errors.OpenAIIoException;
+import com.openai.errors.OpenAIRetryableException;
+import com.openai.errors.OpenAIServiceException;
 import com.java.system.sessionagent.conversation.domain.ModelReply;
 import com.java.system.sessionagent.conversation.domain.ModelCallResult;
 import com.java.system.sessionagent.conversation.domain.ModelDescriptor;
@@ -41,11 +44,8 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.Map;
-import java.util.regex.Pattern;
 
 public final class SpringAiConversationModel implements ConversationModel {
-
-    private static final Pattern FIVE_HUNDRED_STATUS = Pattern.compile("\\b5\\d\\d\\b");
 
     private final ChatModel chatModel;
     private final SystemPrompt promptResource;
@@ -348,14 +348,20 @@ public final class SpringAiConversationModel implements ConversationModel {
     private static boolean hasTransientSignal(Throwable exception) {
         for (Throwable current = exception; current != null; current = current.getCause()) { // cs-allow traversal ends at null
             if (current instanceof TransientAiException || current instanceof SocketTimeoutException
-                    || current instanceof java.util.concurrent.TimeoutException) {
+                    || current instanceof java.util.concurrent.TimeoutException
+                    || current instanceof OpenAIRetryableException
+                    || current instanceof OpenAIIoException) {
                 return true;
             }
-            String message = String.valueOf(current.getMessage()).toLowerCase(Locale.ROOT);
-            if (message.contains("429") || message.contains("timeout") || FIVE_HUNDRED_STATUS.matcher(message).find()) {
+            if (current instanceof OpenAIServiceException providerFailure
+                    && isTransientHttpStatus(providerFailure.statusCode())) {
                 return true;
             }
         }
         return false;
+    }
+
+    private static boolean isTransientHttpStatus(int statusCode) {
+        return statusCode == 429 || (statusCode >= 500 && statusCode < 600);
     }
 }
