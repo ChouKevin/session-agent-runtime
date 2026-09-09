@@ -202,6 +202,41 @@ class SlackDeliveryPostgresIT {
     }
 
     @Test
+    void omits_whitespace_only_delivery_parts_without_changing_the_committed_terminal_answer() {
+        String terminalText = "\n".repeat(4_000) + "  indented answer";
+        MessageReceipt receipt = completeSlackJobWithTerminalRuntime("1.000001", terminalText);
+        markQueuedNoticeSent();
+        SlackPostgresDeliveryStore deliveryStore = new SlackPostgresDeliveryStore(dataSource());
+        List<SlackPostRequest> posts = new ArrayList<>();
+        SlackWebApi slack = request -> {
+            posts.add(request);
+            return "2.000001";
+        };
+        SlackDeliveryWorker worker = new SlackDeliveryWorker(deliveryStore, slack, new SlackDeliveryProperties(), "delivery-worker");
+
+        assertThat(worker.poll()).isTrue();
+
+        UUID deliveryId = answerDeliveryId();
+        assertThat(posts).extracting(SlackPostRequest::text).containsExactly("  indented answer");
+        assertThat(deliveryStore.read(deliveryId)).hasValueSatisfying(delivery -> {
+            assertThat(delivery.status()).isEqualTo(SlackDeliveryStatus.SENT);
+            assertThat(delivery.totalParts()).contains(1);
+            assertThat(delivery.sentParts()).isEqualTo(1);
+        });
+        assertThat(jdbcTemplate.queryForList("""
+                select part_index from slack_delivery_part where delivery_id = ? order by part_index
+                """, Integer.class, deliveryId)).containsExactly(0);
+        assertThat(jdbcTemplate.queryForList("""
+                select part_text from slack_delivery_part where delivery_id = ? order by part_index
+                """, String.class, deliveryId)).containsExactly("  indented answer");
+        assertThat(jdbcTemplate.queryForObject("""
+                select runtime.message from runtime_message runtime
+                join session_message session on session.session_id = runtime.session_id and session.sequence = runtime.sequence
+                where session.message_job_id = ?
+                """, String.class, UUID.fromString(receipt.messageJobId().value()))).isEqualTo(terminalText);
+    }
+
+    @Test
     void renews_the_parent_lease_before_each_part_so_multiple_sends_outlive_the_original_lease() throws Exception {
         completeSlackJobWithTerminalRuntime("1.000001", "x".repeat(4_001));
         markQueuedNoticeSent();

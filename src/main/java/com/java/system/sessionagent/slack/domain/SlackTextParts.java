@@ -33,7 +33,10 @@ public final class SlackTextParts {
                 finalPart = end == text.length();
                 suffix = endsInsideFence ? CLOSE_FENCE : "";
             }
-            parts.add(prefix + text.substring(start, end) + suffix);
+            String sourcePart = text.substring(start, end);
+            if (insideFence || !sourcePart.isBlank()) {
+                parts.add(prefix + sourcePart + suffix);
+            }
             start = end;
             insideFence = endsInsideFence;
             if (finalPart) {
@@ -50,10 +53,7 @@ public final class SlackTextParts {
         int maximumEnd = safeBoundary(text, start, Math.min(text.length(), start + capacity));
         int newline = text.lastIndexOf('\n', maximumEnd - 1);
         if (newline >= start) {
-            int newlineEnd = safeBoundary(text, start, newline + 1);
-            if (newlineEnd - start >= capacity / 2 && !text.substring(start, newlineEnd).isBlank()) {
-                return newlineEnd;
-            }
+            return safeBoundary(text, start, newline + 1);
         }
         if (maximumEnd == start) {
             return safeBoundary(text, start, nextCodePointEnd(text, start));
