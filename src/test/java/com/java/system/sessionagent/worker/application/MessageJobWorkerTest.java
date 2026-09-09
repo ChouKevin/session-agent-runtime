@@ -129,6 +129,115 @@ class MessageJobWorkerTest {
     }
 
     @Test
+    void serializes_claiming_and_registration_before_an_expired_lease_can_be_reclaimed() throws Exception {
+        MessageWorkClaim staleClaim = claim("stale", "session");
+        ConversationStore store = mock(ConversationStore.class);
+        AtomicInteger claimAttempts = new AtomicInteger();
+        CountDownLatch firstDatabaseClaimed = new CountDownLatch(1);
+        CountDownLatch releaseFirstClaim = new CountDownLatch(1);
+        CountDownLatch secondDatabaseClaimed = new CountDownLatch(1);
+        AtomicBoolean secondClaimExcludedSession = new AtomicBoolean();
+        when(store.claimNext(any(String.class), any(Duration.class), org.mockito.ArgumentMatchers.<Set<SessionId>>any()))
+                .thenAnswer(invocation -> {
+                    Set<SessionId> excludedSessions = invocation.getArgument(2);
+                    if (claimAttempts.getAndIncrement() == 0) {
+                        firstDatabaseClaimed.countDown();
+                        try {
+                            releaseFirstClaim.await();
+                        } catch (InterruptedException exception) {
+                            Thread.currentThread().interrupt();
+                            throw new IllegalStateException(exception);
+                        }
+                        return Optional.of(staleClaim);
+                    }
+                    secondClaimExcludedSession.set(excludedSessions.contains(staleClaim.sessionId()));
+                    secondDatabaseClaimed.countDown();
+                    return Optional.empty();
+                });
+        ScheduledExecutorService scheduler = mock(ScheduledExecutorService.class);
+        ScheduledFuture<?> renewal = mock(ScheduledFuture.class);
+        org.mockito.Mockito.doReturn(renewal).when(scheduler).scheduleAtFixedRate(any(Runnable.class),
+                org.mockito.ArgumentMatchers.anyLong(), org.mockito.ArgumentMatchers.anyLong(), any());
+        CountDownLatch processingStarted = new CountDownLatch(1);
+        CountDownLatch releaseProcessing = new CountDownLatch(1);
+        MessageJobPort jobs = (claim, guard) -> {
+            processingStarted.countDown();
+            try {
+                releaseProcessing.await();
+            } catch (InterruptedException exception) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException(exception);
+            }
+            return MessageJobProcessingResult.COMPLETED;
+        };
+        MessageJobWorker worker = worker(store, jobs, scheduler);
+        ExecutorService pollingExecutor = Executors.newFixedThreadPool(2);
+        try {
+            Future<Boolean> first = pollingExecutor.submit(worker::poll);
+            assertThat(firstDatabaseClaimed.await(5, TimeUnit.SECONDS)).isTrue();
+
+            Future<Boolean> second = pollingExecutor.submit(worker::poll);
+            assertThat(secondDatabaseClaimed.await(250, TimeUnit.MILLISECONDS)).isFalse();
+
+            releaseFirstClaim.countDown();
+            assertThat(processingStarted.await(5, TimeUnit.SECONDS)).isTrue();
+            assertThat(secondDatabaseClaimed.await(5, TimeUnit.SECONDS)).isTrue();
+            assertThat(secondClaimExcludedSession).isTrue();
+            assertThat(second.get(5, TimeUnit.SECONDS)).isFalse();
+
+            releaseProcessing.countDown();
+            assertThat(first.get(5, TimeUnit.SECONDS)).isTrue();
+        } finally {
+            releaseFirstClaim.countDown();
+            releaseProcessing.countDown();
+            pollingExecutor.shutdownNow();
+        }
+    }
+
+    @Test
+    void keeps_shutdown_outside_a_blocked_database_claim() throws Exception {
+        ConversationStore store = mock(ConversationStore.class);
+        CountDownLatch databaseClaimStarted = new CountDownLatch(1);
+        CountDownLatch releaseDatabaseClaim = new CountDownLatch(1);
+        when(store.claimNext(any(String.class), any(Duration.class), org.mockito.ArgumentMatchers.<Set<SessionId>>any()))
+                .thenAnswer(invocation -> {
+                    databaseClaimStarted.countDown();
+                    try {
+                        releaseDatabaseClaim.await();
+                    } catch (InterruptedException exception) {
+                        Thread.currentThread().interrupt();
+                        throw new IllegalStateException(exception);
+                    }
+                    return Optional.empty();
+                });
+        ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
+        ExecutorService workerExecutor = Executors.newSingleThreadExecutor();
+        ExecutorService stopExecutor = Executors.newSingleThreadExecutor();
+        CountDownLatch shutdownCallback = new CountDownLatch(1);
+        WorkerProperties properties = new WorkerProperties(Duration.ofSeconds(1), Duration.ofMillis(10), Duration.ofMillis(10), 1);
+        MessageJobWorker worker = new MessageJobWorker(store, mock(MessageJobPort.class), properties,
+                Clock.fixed(Instant.EPOCH, ZoneOffset.UTC), scheduler, workerExecutor, "worker", new NoOpConversationTelemetry());
+        try {
+            worker.start();
+            assertThat(databaseClaimStarted.await(5, TimeUnit.SECONDS)).isTrue();
+
+            Future<?> stopping = stopExecutor.submit(() -> worker.stop(shutdownCallback::countDown));
+            stopping.get(250, TimeUnit.MILLISECONDS);
+            assertThat(worker.isRunning()).isFalse();
+
+            releaseDatabaseClaim.countDown();
+            assertThat(shutdownCallback.await(5, TimeUnit.SECONDS)).isTrue();
+            assertThat(workerExecutor.awaitTermination(5, TimeUnit.SECONDS)).isTrue();
+        } finally {
+            releaseDatabaseClaim.countDown();
+            worker.stop();
+            scheduler.shutdownNow();
+            workerExecutor.shutdownNow();
+            stopExecutor.shutdownNow();
+        }
+    }
+
+    @Test
     void releases_local_occupancy_when_renewal_scheduling_fails() {
         ConversationStore store = mock(ConversationStore.class);
         MessageWorkClaim firstClaim = claim("first", "session");

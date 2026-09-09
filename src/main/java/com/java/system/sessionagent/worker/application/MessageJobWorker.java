@@ -41,6 +41,7 @@ public final class MessageJobWorker implements SmartLifecycle {
     private final String workerId;
     private final ConversationTelemetry telemetry;
     private final Map<SessionId, ActiveClaim> occupiedSessions = new ConcurrentHashMap<>();
+    private final Object claimMonitor = new Object();
     private final Object lifecycleMonitor = new Object();
     private final AtomicBoolean running = new AtomicBoolean();
 
@@ -234,29 +235,31 @@ public final class MessageJobWorker implements SmartLifecycle {
     }
 
     private Optional<ActiveClaim> claimAndRegister(boolean requireRunning) {
-        if (requireRunning && !running.get()) {
-            return Optional.empty();
-        }
-        Optional<MessageWorkClaim> claimed = conversationStore.claimNext(
-                workerId, properties.claimDuration(), Set.copyOf(occupiedSessions.keySet()));
-        if (claimed.isEmpty()) {
-            return Optional.empty();
-        }
-        MessageWorkClaim claim = claimed.orElseThrow();
-        synchronized (lifecycleMonitor) {
+        synchronized (claimMonitor) {
             if (requireRunning && !running.get()) {
                 return Optional.empty();
             }
-            ActiveClaim activeClaim = new ActiveClaim(claim, new AtomicBoolean(true), new AtomicReference<>());
-            ActiveClaim existingClaim = occupiedSessions.putIfAbsent(claim.sessionId(), activeClaim);
-            if (Objects.nonNull(existingClaim)) {
-                LOGGER.atWarn().addKeyValue("event", "message_job_claim_rejected")
-                        .addKeyValue("messageJobId", claim.messageJobId().value())
-                        .addKeyValue("sessionId", claim.sessionId().value())
-                        .addKeyValue("outcome", "SESSION_OCCUPIED").log("runtime_lifecycle");
+            Optional<MessageWorkClaim> claimed = conversationStore.claimNext(
+                    workerId, properties.claimDuration(), Set.copyOf(occupiedSessions.keySet()));
+            if (claimed.isEmpty()) {
                 return Optional.empty();
             }
-            return Optional.of(activeClaim);
+            MessageWorkClaim claim = claimed.orElseThrow();
+            synchronized (lifecycleMonitor) {
+                if (requireRunning && !running.get()) {
+                    return Optional.empty();
+                }
+                ActiveClaim activeClaim = new ActiveClaim(claim, new AtomicBoolean(true), new AtomicReference<>());
+                ActiveClaim existingClaim = occupiedSessions.putIfAbsent(claim.sessionId(), activeClaim);
+                if (Objects.nonNull(existingClaim)) {
+                    LOGGER.atWarn().addKeyValue("event", "message_job_claim_rejected")
+                            .addKeyValue("messageJobId", claim.messageJobId().value())
+                            .addKeyValue("sessionId", claim.sessionId().value())
+                            .addKeyValue("outcome", "SESSION_OCCUPIED").log("runtime_lifecycle");
+                    return Optional.empty();
+                }
+                return Optional.of(activeClaim);
+            }
         }
     }
 
