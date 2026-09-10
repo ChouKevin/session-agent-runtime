@@ -41,7 +41,7 @@ if (
     exit 1
 fi
 
-[[ -f "${runtime_root}/src/test/java/com/java/system/sessionagent/model/GoogleModelLiveTest.java" ]] || {
+[[ -f "${runtime_root}/src/test/java/com/java/system/sessionagent/model/adapter/springai/GoogleModelLiveTest.java" ]] || {
     printf 'missing renamed Google model live smoke test\n' >&2
     exit 1
 }

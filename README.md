@@ -59,9 +59,15 @@ Submit a message, poll its job, then read the complete session history:
 POST /internal/messages
 GET  /internal/message-jobs/{messageJobId}
 GET  /internal/sessions/{sessionId}/messages
+PUT  /internal/sessions/{sessionId}/model
+GET  /internal/slack-deliveries?teamId=...&channelId=...&messageTs=...
 ```
 
 `POST /internal/messages` accepts `sessionKey`, `participantId`, `sourceMessageId`, and `message`. Reusing a nonblank `sessionKey` continues the same session. The accepted response contains `sessionId` and `messageJobId`. The job response contains its IDs, `status`, `retryCount`, and `modelCallCount`.
+
+`PUT /internal/sessions/{sessionId}/model` accepts `{"model":"configured-key"}` and returns `200` with `{sessionId, model, effectiveFor:"NEW_MESSAGES"}`. Only messages accepted after the change use the selected model; queued, running, and retrying jobs keep the model captured when they were accepted. Selecting a configured model takes effect without restarting Runtime.
+
+`GET /internal/slack-deliveries?teamId=...&channelId=...&messageTs=...` returns a safe delivery-status array for exactly one Slack source. Each row has `deliveryId`, `kind`, `status`, `attemptCount`, `failureCategory`, `nextAttemptAt`, `jobId`, `totalParts`, and `sentParts`. Absent optional values are `null`; `totalParts` is `null` when no parts exist, while `sentParts` is always a number (`0` when none have been sent). Missing, blank, or duplicate query parameters return `400`. It never returns delivery text, tokens, URLs, or provider errors. Slack delivery status is separate from the model job result; an unknown source returns an empty array.
 
 `GET /internal/sessions/{sessionId}/messages` accepts optional `afterSequence` and `limit` query parameters. Omitting both returns the complete committed history. When either is present, results are the ascending raw-history page after `afterSequence` (default `0`), limited by `limit` when supplied; an exhausted cursor for an existing session returns an empty list, while an unknown session returns `404`.
 
@@ -75,7 +81,13 @@ History records share `sequence`, `createdAt`, and `messageJobId` fields. The pu
 | `ASSISTANT` | `message` |
 | `RUNTIME` | `code`, `message` |
 
-Tool inputs and outputs are opaque runtime data. There is no separate result-lookup endpoint.
+Tool inputs and outputs are opaque runtime data. There is no separate tool-result lookup endpoint; use the message-job endpoint for job state and the Slack-delivery endpoint for outbound delivery state.
+
+## Queue and intake
+
+The default worker configuration is `session-agent.worker.concurrency: 4`. The database queue capacity is `session-agent.worker.max-unfinished-jobs: 100`, counting all `PENDING`, `WORKING`, and `RETRY` jobs together. Terminal jobs release capacity. The database is the waiting queue: jobs in the same session run FIFO, while different sessions can run in parallel.
+
+When this unfinished-job capacity is full, a new HTTP message is rejected with `429` and `{"code":"queue_full"}`. A successful resend of an already accepted message returns its original `202` receipt instead of creating another job.
 
 ## Generic MCP connections
 
@@ -108,9 +120,9 @@ Tool execution has no runtime deduplication layer. A read-only tool can run agai
 
 ## Model configuration
 
-`src/main/resources/models.yml` is the single model configuration source imported by `application.yml`. It contains the default Google entry and an inactive OpenAI fragment. Model credentials are environment placeholders only; do not put a key in configuration committed to a repository.
+`src/main/resources/models.yml` is the single model configuration source imported by `application.yml` and bundled into the built image. It contains the default Google entry and an inactive OpenAI fragment. Model credentials are environment placeholders only; do not put a key in configuration committed to a repository.
 
-To deploy OpenAI alongside the existing Google entry, provide both credentials through the deployment environment and enable the OpenAI fragment in the deployed `models.yml` with complete, explicit capacities. For example, the non-secret shape is:
+To deploy OpenAI alongside the existing Google entry, edit `src/main/resources/models.yml` to enable the OpenAI fragment, provide both credentials through the deployment environment, and rebuild the image. The entry must have complete, explicit capacities. For example, the non-secret shape is:
 
 ```yaml
 session-agent:
@@ -127,11 +139,13 @@ session-agent:
         base-url: https://api.openai.com/v1
 ```
 
-For Docker Compose, set `OPENAI_API_KEY` in the untracked `docker/.env` (and retain `GOOGLE_API_KEY` while the Google entry is configured). The OpenAI adapter uses Chat Completions with `store=false`; it does not use the Responses API. A configured entry with a missing key, capacity, or default-key mapping fails at startup rather than selecting a different model.
+For Docker Compose, set `OPENAI_API_KEY` in the untracked `docker/.env` (and retain `GOOGLE_API_KEY` while the Google entry is configured). The OpenAI adapter uses Chat Completions with `store=false`; it does not use the Responses API. A configured entry with a missing key, capacity, or default-key mapping fails at startup rather than selecting a different model. Enabling an entry in bundled `models.yml` requires an image rebuild; selecting among already configured entries through the session API does not require a restart and affects only subsequently accepted messages.
 
 ## Database and local runtime
 
-The shipped schema is a fresh V1 schema. Reset a disposable PostgreSQL database before starting this version; do not reuse a database from an earlier schema. The Compose service binds the runtime HTTP port to loopback only. Required local credentials are intentionally not committed.
+The shipped database contract is a fresh schema applied through ordered Flyway migrations V1 through V4. Compatibility with removed pre-release schemas is not supported. Do not reset or delete the current database or its data as part of starting this version. The Compose service binds the runtime HTTP port to loopback only. Required local credentials are intentionally not committed.
+
+Conversations and tool results are retained indefinitely. This POC adds no TTL, automatic cleanup, or backup/recovery workflow. Existing temporary continuation cleanup and Docker/host log rotation remain unchanged.
 
 ## Docker JSON logs
 
@@ -179,13 +193,32 @@ Configure the Slack app for Socket Mode and subscribe to `app_mention` plus
 message events for public channels, private channels, MPIMs, and direct
 messages. Grant the matching read scopes (`app_mentions:read`,
 `channels:history`, `groups:history`, `mpim:history`, and `im:history`) and the
-bot write scope needed for the later outbound-response integration. Runtime has
-no public Slack callback endpoint, signing secret, OAuth flow, or polling loop.
+bot write scope needed for outbound replies. Socket Mode supplies inbound event
+intake and envelope acknowledgement; accepted messages and outbound notices or
+answers are persisted as database deliveries, which a separate worker polls and
+sends through the Slack Web API. Runtime has no public Slack callback endpoint,
+signing secret, OAuth flow, or Slack event polling loop.
 
 An addressed top-level channel, private-channel, or MPIM message starts a
 conversation after its bot mention is removed. A top-level DM needs no textual
 mention. Slack connection failures leave Runtime, storage, and MCP startup
 available; the Socket Mode client reconnects asynchronously.
+
+Accepted events receive one durable queued confirmation (`已收到，正在排隊處理。`).
+When the unfinished-job capacity is full, the source is durably recorded as busy
+with (`目前工作已滿，這則訊息尚未受理，請稍後重新送出。`) and is not later
+promoted into a job by a resend. These notices are delivery status, not proof of
+job completion or a replacement for Socket Mode acknowledgement.
+
+Terminal answers are persisted and delivered in parts of at most 4,000 UTF-16
+code units; retries continue with unsent parts and do not rerun the model.
+Splitting is presentation only: user text, model text, and raw database history
+remain unchanged. The splitter prefers line breaks and safe character boundaries,
+preserves whitespace inside code fences, may omit whitespace-only parts outside
+fences, and adds synthetic closing or reopening fences as needed for presentation,
+including closing an unclosed final fence. This is fence-aware presentation, not a
+full Markdown or JSON parser, so parts are not guaranteed to be independently valid
+Markdown or JSON.
 
 ## Verification
 
