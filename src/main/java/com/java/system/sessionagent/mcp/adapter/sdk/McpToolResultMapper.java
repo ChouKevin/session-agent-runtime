@@ -1,7 +1,7 @@
 package com.java.system.sessionagent.mcp.adapter.sdk;
 
-import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.java.system.sessionagent.tool.port.ToolOutput;
 import io.modelcontextprotocol.spec.McpError;
 import io.modelcontextprotocol.spec.McpSchema;
@@ -33,15 +33,12 @@ final class McpToolResultMapper {
 
     ToolOutput map(McpSchema.CallToolResult callResult) {
         Assert.notNull(callResult, "MCP tool result must not be null");
-        Object source = Optional.ofNullable(callResult.structuredContent()).orElse(callResult.content());
-        return mapStructuredValue(source, Boolean.TRUE.equals(callResult.isError()));
-    }
-
-    ToolOutput mapStructuredValue(Object source, boolean isError) {
         try {
-            JsonNode tree = objectMapper.valueToTree(source);
+            ObjectNode tree = objectMapper.valueToTree(callResult);
+            tree.remove("isError");
+            tree.remove("_meta");
             Object result = objectMapper.treeToValue(tree, Object.class);
-            return new ToolOutput(isError, result);
+            return new ToolOutput(Boolean.TRUE.equals(callResult.isError()), result);
         } catch (RuntimeException exception) {
             return protocolFailure();
         } catch (Exception exception) {

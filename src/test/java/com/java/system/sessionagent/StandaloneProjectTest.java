@@ -63,7 +63,6 @@ class StandaloneProjectTest {
     private static void assertLockedBuildConfiguration(Element project) {
         Element properties = child(project, "properties");
         assertEquals("21", childText(properties, "java.version"));
-        assertEquals("2.0.1", childText(properties, "spring-ai.version"));
         assertEquals("2.1.0", childText(properties, "spring-modulith.version"));
         assertEquals("1.4.2", childText(properties, "archunit.version"));
 

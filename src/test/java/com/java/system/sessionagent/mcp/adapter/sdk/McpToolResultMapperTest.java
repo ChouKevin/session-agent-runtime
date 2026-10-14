@@ -15,15 +15,23 @@ class McpToolResultMapperTest {
     private final McpToolResultMapper mapper = new McpToolResultMapper(new ObjectMapper());
 
     @Test
-    void preserves_structured_content_and_provider_error_without_sdk_values() {
+    void preserves_text_evidence_alongside_structured_content_and_provider_error_without_sdk_values() {
+        String evidence = "13 | observed value\r\n14 | \r\n";
+        Map<String, Object> structured = Map.of("value", "observed value\r\n\r\n", "startLine", 13);
         McpSchema.CallToolResult result = new McpSchema.CallToolResult(
-                List.of(McpSchema.TextContent.builder("ignored").build()), true,
-                Map.of("items", List.of(Map.of("name", "payments"))), Map.of());
+                List.of(McpSchema.TextContent.builder(evidence).build()), true,
+                structured, Map.of("clientOnly", "not model evidence"));
 
         ToolOutput output = mapper.map(result);
+        Map<?, ?> body = (Map<?, ?>) output.result();
 
         assertThat(output.isError()).isTrue();
-        assertThat(output.result()).isEqualTo(Map.of("items", List.of(Map.of("name", "payments"))));
+        assertThat(body.get("structuredContent")).isEqualTo(structured);
+        assertThat((List<?>) body.get("content")).singleElement().satisfies(content -> {
+            assertThat(((Map<?, ?>) content).get("type")).isEqualTo("text");
+            assertThat(((Map<?, ?>) content).get("text")).isEqualTo(evidence);
+        });
+        assertThat(body.containsKey("_meta")).isFalse();
         assertThat(containsSdkValue(output.result())).isFalse();
     }
 
@@ -35,19 +43,14 @@ class McpToolResultMapperTest {
         ToolOutput output = mapper.map(result);
 
         assertThat(output.isError()).isFalse();
-        assertThat(output.result()).isInstanceOf(List.class);
-        assertThat((List<?>) output.result()).singleElement().satisfies(content -> {
+        Map<?, ?> body = (Map<?, ?>) output.result();
+        assertThat(body.containsKey("structuredContent")).isFalse();
+        assertThat((List<?>) body.get("content")).singleElement().satisfies(content -> {
             assertThat(content).isInstanceOf(Map.class);
+            assertThat(((Map<?, ?>) content).get("type")).isEqualTo("text");
             assertThat(((Map<?, ?>) content).get("text")).isEqualTo("source text");
         });
         assertThat(containsSdkValue(output.result())).isFalse();
-    }
-
-    @Test
-    void preserves_a_valid_null_result_root_in_the_outer_output_wrapper() {
-        ToolOutput output = mapper.mapStructuredValue(null, false);
-
-        assertThat(output.asStructuredValue()).containsEntry("result", null);
     }
 
     @Test

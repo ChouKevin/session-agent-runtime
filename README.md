@@ -83,6 +83,15 @@ History records share `sequence`, `createdAt`, and `messageJobId` fields. The pu
 
 Tool inputs and outputs are opaque runtime data. There is no separate tool-result lookup endpoint; use the message-job endpoint for job state and the Slack-delivery endpoint for outbound delivery state.
 
+For MCP observations, `output` has the generic `{isError, result}` wrapper;
+`result` retains native MCP `content` blocks and, when present, `structuredContent`.
+Both channels reach stored history and subsequent model turns: human-readable
+content may contain evidence or presentation details absent from structured data.
+Content type discriminators are preserved; the MCP result-envelope `_meta` is not
+forwarded to the model. Runtime does not parse tool-specific source text or impose
+a citation format. Previously committed observations remain unchanged; operational
+Runtime failures retain their safe `{code, message}` result.
+
 ## Queue and intake
 
 The default worker configuration is `session-agent.worker.concurrency: 4`. The database queue capacity is `session-agent.worker.max-unfinished-jobs: 100`, counting all `PENDING`, `WORKING`, and `RETRY` jobs together. Terminal jobs release capacity. The database is the waiting queue: jobs in the same session run FIFO, while different sessions can run in parallel.
@@ -120,6 +129,11 @@ Tool execution has no runtime deduplication layer. A read-only tool can run agai
 
 ## Model configuration
 
+The build pins Spring AI **2.1.0-M1**, a milestone/pre-release rather than a stable
+release. The upgrade retains the existing Google and OpenAI adapters; availability
+of Responses API support in the dependency does not enable it in this runtime or
+add native Codex OAuth login/refresh.
+
 `src/main/resources/models.yml` is the single model configuration source imported by `application.yml` and bundled into the built image. It contains the default Google entry and an inactive OpenAI fragment. Model credentials are environment placeholders only; do not put a key in configuration committed to a repository.
 
 To deploy OpenAI alongside the existing Google entry, edit `src/main/resources/models.yml` to enable the OpenAI fragment, provide both credentials through the deployment environment, and rebuild the image. The entry must have complete, explicit capacities. For example, the non-secret shape is:
@@ -140,6 +154,20 @@ session-agent:
 ```
 
 For Docker Compose, set `OPENAI_API_KEY` in the untracked `docker/.env` (and retain `GOOGLE_API_KEY` while the Google entry is configured). The OpenAI adapter uses Chat Completions with `store=false`; it does not use the Responses API. A configured entry with a missing key, capacity, or default-key mapping fails at startup rather than selecting a different model. Enabling an entry in bundled `models.yml` requires an image rebuild; selecting among already configured entries through the session API does not require a restart and affects only subsequently accepted messages.
+
+Codex OAuth is not a native Runtime authentication mode. The `openai` adapter can
+use an external OpenAI-compatible gateway through `base-url`; in that deployment,
+`api-key` is the gateway's bearer credential, while the gateway owns Codex OAuth
+login, refresh, and provider-protocol conversion. An OAuth access token is not a
+drop-in replacement for an OpenAI API key. Keep these provider details outside
+the conversation and MCP contracts.
+
+On a workstation with the separately installed OMP-backed MVP deployment, use
+`~/.local/bin/session-agent-mvp check|start|stop|restart|status|logs`. Its private
+configuration, pinned artifacts, and operating instructions live outside the
+repository at `~/.local/share/session-agent-runtime-mvp/OPERATIONS.md`. This is a
+host-local installation, not something created by the Docker helper below.
+Do not start both deployment methods on the same ports.
 
 ## Database and local runtime
 
