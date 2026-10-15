@@ -101,11 +101,15 @@ public interface ConversationStore {
 
     void updateProgress(MessageWorkClaim claim, JobProgress progress);
 
-    void append(MessageWorkClaim claim, MessageBatch batch, Instant createdAt);
+    JobStatus append(MessageWorkClaim claim, MessageBatch batch, Instant createdAt);
 
     boolean scheduleRetry(MessageWorkClaim claim, Duration retryDelay, JobFailure failure);
 
     Optional<MessageJobProjection> readJob(MessageJobId messageJobId);
+
+    Optional<MessageJobProjection> requestCancellation(MessageJobId messageJobId);
+
+    boolean isCancellationRequested(MessageWorkClaim claim);
 
     default Optional<SessionProjection> readSession(SessionId sessionId) {
         return Optional.empty();
@@ -118,7 +122,8 @@ public interface ConversationStore {
             int retryCount,
             int modelCallCount,
             Optional<JobProgress> progress,
-            Optional<JobFailure> failure) {
+            Optional<JobFailure> failure,
+            Optional<Instant> cancellationRequestedAt) {
     }
 
     record SessionProjection(SessionId sessionId, Instant createdAt, Optional<MessageJobProjection> currentJob, String selectedModel) {
@@ -133,7 +138,8 @@ public interface ConversationStore {
 
     enum JobUpdate {
         KEEP_WORKING,
-        COMPLETE
+        COMPLETE,
+        CANCEL
     }
 
     sealed interface MessageData permits AssistantData, AssistantToolCallsData, ToolObservationData, RuntimeData {
@@ -233,6 +239,8 @@ public interface ConversationStore {
             long toolCallEvents = messages.stream().filter(AssistantToolCallsData.class::isInstance).count();
             Assert.isTrue(continuation.isEmpty() || (jobUpdate == JobUpdate.KEEP_WORKING && toolCallEvents == 1),
                     "Model continuation requires one working assistant tool call event");
+            Assert.isTrue(jobUpdate != JobUpdate.CANCEL || failure.isEmpty(),
+                    "Cancellation is not a job failure");
         }
 
         public MessageBatch(List<MessageData> messages, JobUpdate jobUpdate) {

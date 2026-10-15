@@ -5,11 +5,13 @@ import com.google.genai.errors.ApiException;
 import com.java.system.sessionagent.conversation.application.MessageService;
 import com.java.system.sessionagent.conversation.application.SessionModelService;
 import com.java.system.sessionagent.conversation.application.ConversationQueryService;
+import com.java.system.sessionagent.conversation.application.JobCancellationService;
 import com.java.system.sessionagent.conversation.application.MessageJobRetryPolicy;
 import com.java.system.sessionagent.conversation.application.JobProcessor;
 import com.java.system.sessionagent.conversation.port.in.ConversationQueryPort;
 import com.java.system.sessionagent.conversation.port.in.ExternalSessionReferenceQueryPort;
 import com.java.system.sessionagent.conversation.port.in.MessageIntakePort;
+import com.java.system.sessionagent.conversation.port.in.MessageJobCancellationPort;
 import com.java.system.sessionagent.conversation.port.in.SessionModelPort;
 import com.java.system.sessionagent.conversation.port.out.ConversationModel;
 import com.java.system.sessionagent.conversation.port.out.ConversationStore;
@@ -458,6 +460,11 @@ public class RuntimeConfiguration {
             ConfiguredModels configuredModels,
             ToolCatalog toolCatalog) {
         return new ConversationQueryService(conversationStore, configuredModels, toolCatalog, new ContextUsageEstimator());
+    }
+
+    @Bean
+    MessageJobCancellationPort messageJobCancellationPort(ConversationStore conversationStore) {
+        return new JobCancellationService(conversationStore);
     }
 
     @Bean

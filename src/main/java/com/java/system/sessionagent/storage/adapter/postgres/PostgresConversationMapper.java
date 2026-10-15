@@ -482,6 +482,30 @@ public interface PostgresConversationMapper extends BaseMapper<PostgresConversat
             @Param("workerId") String workerId,
             @Param("claimNumber") long claimNumber);
 
+    @Select("""
+            select message_job_id, session_id, status, cancellation_requested_at
+            from message_job where message_job_id = #{messageJobId} for update
+            """)
+    @Options(flushCache = Options.FlushCachePolicy.FALSE, useCache = false)
+    List<CancellationRow> lockCancellationJob(@Param("messageJobId") UUID messageJobId);
+
+    @Select("select cancellation_requested_at is not null from message_job where message_job_id = #{messageJobId}")
+    @Options(flushCache = Options.FlushCachePolicy.FALSE, useCache = false)
+    boolean isCancellationRequested(@Param("messageJobId") UUID messageJobId);
+
+    @Update("""
+            update message_job set cancellation_requested_at = coalesce(cancellation_requested_at, clock_timestamp())
+            where message_job_id = #{messageJobId}
+            """)
+    int requestCancellation(@Param("messageJobId") UUID messageJobId);
+
+    @Update("""
+            update message_job set status = 'CANCELLED', completed_at = clock_timestamp(), worker_id = null, locked_until = null,
+                phase = null, phase_started_at = null, current_tool_name = null, failure_code = null
+            where message_job_id = #{messageJobId} and cancellation_requested_at is not null
+            """)
+    int cancelJob(@Param("messageJobId") UUID messageJobId);
+
     @Update("""
             update message_job set phase = 'PREPARING', phase_started_at = #{startedAt}, current_tool_name = null,
                 failure_code = #{failureCode,jdbcType=VARCHAR}
@@ -511,7 +535,7 @@ public interface PostgresConversationMapper extends BaseMapper<PostgresConversat
             @Param("failureCode") String failureCode);
 
     @Select("""
-            select message_job_id, session_id, status, retry_count, model_calls,
+            select message_job_id, session_id, status, retry_count, model_calls, cancellation_requested_at,
                 case when status = 'WORKING' and locked_until > statement_timestamp() then phase end as phase,
                 case when status = 'WORKING' and locked_until > statement_timestamp() then phase_started_at end as phase_started_at,
                 case when status = 'WORKING' and locked_until > statement_timestamp() then current_tool_name end as current_tool_name,
@@ -524,10 +548,10 @@ public interface PostgresConversationMapper extends BaseMapper<PostgresConversat
 
     @Select("""
             select session.session_id, session.created_at, session.selected_model, job.message_job_id, job.status, job.retry_count, job.model_calls,
-                job.phase, job.phase_started_at, job.current_tool_name, job.failure_code
+                job.phase, job.phase_started_at, job.current_tool_name, job.failure_code, job.cancellation_requested_at
             from conversation_session session
             left join lateral (
-                select message_job_id, session_id, status, retry_count, model_calls,
+                select message_job_id, session_id, status, retry_count, model_calls, cancellation_requested_at,
                     case when status = 'WORKING' and locked_until > statement_timestamp() then phase end as phase,
                     case when status = 'WORKING' and locked_until > statement_timestamp() then phase_started_at end as phase_started_at,
                     case when status = 'WORKING' and locked_until > statement_timestamp() then current_tool_name end as current_tool_name,
@@ -770,6 +794,9 @@ public interface PostgresConversationMapper extends BaseMapper<PostgresConversat
             OffsetDateTime createdAt) {
     }
 
+    record CancellationRow(UUID messageJobId, UUID sessionId, String status, OffsetDateTime cancellationRequestedAt) {
+    }
+
     record JobProjectionRow(
             UUID messageJobId,
             UUID sessionId,
@@ -779,7 +806,8 @@ public interface PostgresConversationMapper extends BaseMapper<PostgresConversat
             String phase,
             OffsetDateTime phaseStartedAt,
             String currentToolName,
-            String failureCode) {
+            String failureCode,
+            OffsetDateTime cancellationRequestedAt) {
     }
 
     record SessionProjectionRow(
@@ -793,6 +821,7 @@ public interface PostgresConversationMapper extends BaseMapper<PostgresConversat
             String phase,
             OffsetDateTime phaseStartedAt,
             String currentToolName,
-            String failureCode) {
+            String failureCode,
+            OffsetDateTime cancellationRequestedAt) {
     }
 }

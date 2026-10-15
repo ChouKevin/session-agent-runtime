@@ -4,6 +4,7 @@ import com.java.system.sessionagent.conversation.domain.JobFailure;
 import com.java.system.sessionagent.conversation.domain.JobProgress;
 import com.java.system.sessionagent.conversation.domain.JobStatus;
 
+import java.time.Instant;
 import java.util.Optional;
 
 public record MessageJobView(
@@ -13,5 +14,6 @@ public record MessageJobView(
         int retryCount,
         int modelCallCount,
         Optional<JobProgress> progress,
-        Optional<JobFailure> failure) {
+        Optional<JobFailure> failure,
+        Optional<Instant> cancellationRequestedAt) {
 }

@@ -41,7 +41,6 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -49,7 +48,7 @@ class MessageJobToolExecutionTest {
 
     @Test
     void completes_an_unrestricted_text_reply_without_tool_execution() {
-        ConversationStore store = mock(ConversationStore.class);
+        ConversationStore store = mockStore();
         MessageWorkClaim claim = claim();
         when(store.loadHistory(claim.sessionId())).thenReturn(List.of(user()));
         when(store.reserveModelCall(eq(claim), eq(2), any(Instant.class))).thenReturn(OptionalInt.of(1));
@@ -70,7 +69,7 @@ class MessageJobToolExecutionTest {
 
     @Test
     void releases_the_snapshot_after_a_final_text_reply() {
-        ConversationStore store = mock(ConversationStore.class);
+        ConversationStore store = mockStore();
         MessageWorkClaim claim = claim();
         AtomicInteger releases = new AtomicInteger();
         when(store.loadHistory(claim.sessionId())).thenReturn(List.of(user()));
@@ -88,7 +87,7 @@ class MessageJobToolExecutionTest {
 
     @Test
     void keeps_the_snapshot_open_for_its_tool_batch_then_releases_it() {
-        ConversationStore store = mock(ConversationStore.class);
+        ConversationStore store = mockStore();
         MessageWorkClaim claim = claim();
         List<String> releases = new ArrayList<>();
         AtomicInteger snapshots = new AtomicInteger();
@@ -120,7 +119,7 @@ class MessageJobToolExecutionTest {
 
     @Test
     void releases_the_snapshot_when_the_model_fails() {
-        ConversationStore store = mock(ConversationStore.class);
+        ConversationStore store = mockStore();
         MessageWorkClaim claim = claim();
         AtomicInteger releases = new AtomicInteger();
         when(store.loadHistory(claim.sessionId())).thenReturn(List.of(user()));
@@ -133,7 +132,7 @@ class MessageJobToolExecutionTest {
 
     @Test
     void releases_the_snapshot_when_work_ownership_is_lost_after_the_model_reply() {
-        ConversationStore store = mock(ConversationStore.class);
+        ConversationStore store = mockStore();
         MessageWorkClaim claim = claim();
         AtomicInteger releases = new AtomicInteger();
         AtomicBoolean owned = new AtomicBoolean(true);
@@ -152,7 +151,7 @@ class MessageJobToolExecutionTest {
 
     @Test
     void releases_the_snapshot_when_the_model_call_limit_blocks_a_tool_batch() {
-        ConversationStore store = mock(ConversationStore.class);
+        ConversationStore store = mockStore();
         MessageWorkClaim claim = claim();
         AtomicInteger releases = new AtomicInteger();
         when(store.loadHistory(claim.sessionId())).thenReturn(List.of(user()));
@@ -169,7 +168,7 @@ class MessageJobToolExecutionTest {
 
     @Test
     void commits_native_assistant_calls_and_ordered_outputs_as_one_batch() {
-        ConversationStore store = mock(ConversationStore.class);
+        ConversationStore store = mockStore();
         MessageWorkClaim claim = claim();
         when(store.loadHistory(claim.sessionId())).thenReturn(List.of(user())).thenReturn(List.of(user()));
         when(store.reserveModelCall(eq(claim), eq(2), any(Instant.class))).thenReturn(OptionalInt.of(1), OptionalInt.of(2));
@@ -196,7 +195,7 @@ class MessageJobToolExecutionTest {
 
     @Test
     void reloads_the_committed_continuation_for_the_next_model_call() {
-        ConversationStore store = mock(ConversationStore.class);
+        ConversationStore store = mockStore();
         MessageWorkClaim claim = claim();
         ModelContinuation continuation = new ModelContinuation(new ModelRouteId("gemini-primary"), "opaque-v1", new byte[] {1, 2, 3});
         List<ModelRequest> requests = new ArrayList<>();
@@ -224,7 +223,7 @@ class MessageJobToolExecutionTest {
 
     @Test
     void preserves_nested_tool_arguments_when_an_executor_mutates_them() {
-        ConversationStore store = mock(ConversationStore.class);
+        ConversationStore store = mockStore();
         MessageWorkClaim claim = claim();
         LinkedHashMap<String, Object> arguments = new LinkedHashMap<>();
         arguments.put("filters", new LinkedHashMap<>(Map.of("branch", "main")));
@@ -258,7 +257,7 @@ class MessageJobToolExecutionTest {
 
     @Test
     void executes_later_calls_after_an_ordinary_middle_failure() {
-        ConversationStore store = mock(ConversationStore.class);
+        ConversationStore store = mockStore();
         MessageWorkClaim claim = claim();
         when(store.loadHistory(claim.sessionId())).thenReturn(List.of(user())).thenReturn(List.of(user()));
         when(store.reserveModelCall(eq(claim), eq(2), any(Instant.class))).thenReturn(OptionalInt.of(1), OptionalInt.of(2));
@@ -293,7 +292,7 @@ class MessageJobToolExecutionTest {
 
     @Test
     void keeps_a_response_on_the_final_ordinal_from_executing_tools() {
-        ConversationStore store = mock(ConversationStore.class);
+        ConversationStore store = mockStore();
         MessageWorkClaim claim = claim();
         when(store.loadHistory(claim.sessionId())).thenReturn(List.of(user()));
         when(store.reserveModelCall(eq(claim), eq(1), any(Instant.class))).thenReturn(OptionalInt.of(1));
@@ -317,7 +316,7 @@ class MessageJobToolExecutionTest {
 
     @Test
     void uses_the_captured_snapshot_for_a_batch_and_refreshes_before_the_next_native_replay() {
-        ConversationStore store = mock(ConversationStore.class);
+        ConversationStore store = mockStore();
         MessageWorkClaim claim = claim();
         List<SessionMessage> replayedHistory = nativeHistory();
         when(store.loadHistory(claim.sessionId())).thenReturn(List.of(user())).thenReturn(replayedHistory);

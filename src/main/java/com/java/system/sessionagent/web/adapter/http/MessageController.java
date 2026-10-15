@@ -3,6 +3,7 @@ package com.java.system.sessionagent.web.adapter.http;
 import com.java.system.sessionagent.conversation.domain.IncomingMessage;
 import com.java.system.sessionagent.conversation.domain.MessageReceipt;
 import com.java.system.sessionagent.conversation.port.in.ConversationQueryPort;
+import com.java.system.sessionagent.conversation.port.in.MessageJobCancellationPort;
 import com.java.system.sessionagent.conversation.port.in.ExternalSessionReferenceQueryPort;
 import com.java.system.sessionagent.conversation.port.in.MessageIntakePort;
 import com.java.system.sessionagent.conversation.port.in.SessionModelPort;
@@ -34,6 +35,7 @@ public final class MessageController {
 
     private final MessageIntakePort messageIntakePort;
     private final ConversationQueryPort conversationQueryPort;
+    private final MessageJobCancellationPort messageJobCancellationPort;
     private final ExternalSessionReferenceQueryPort externalSessionReferenceQueryPort;
     private final SessionModelPort sessionModelPort;
     private final SlackDeliveryStore slackDeliveryStore;
@@ -41,16 +43,19 @@ public final class MessageController {
     public MessageController(
             MessageIntakePort messageIntakePort,
             ConversationQueryPort conversationQueryPort,
+            MessageJobCancellationPort messageJobCancellationPort,
             ExternalSessionReferenceQueryPort externalSessionReferenceQueryPort,
             SessionModelPort sessionModelPort,
             SlackDeliveryStore slackDeliveryStore) {
         Assert.notNull(messageIntakePort, "Message intake port must not be null");
         Assert.notNull(conversationQueryPort, "Conversation query port must not be null");
+        Assert.notNull(messageJobCancellationPort, "Message job cancellation port must not be null");
         Assert.notNull(externalSessionReferenceQueryPort, "External session reference query port must not be null");
         Assert.notNull(sessionModelPort, "Session model port must not be null");
         Assert.notNull(slackDeliveryStore, "Slack delivery store must not be null");
         this.messageIntakePort = messageIntakePort;
         this.conversationQueryPort = conversationQueryPort;
+        this.messageJobCancellationPort = messageJobCancellationPort;
         this.externalSessionReferenceQueryPort = externalSessionReferenceQueryPort;
         this.sessionModelPort = sessionModelPort;
         this.slackDeliveryStore = slackDeliveryStore;
@@ -93,6 +98,13 @@ public final class MessageController {
     public MessageResponses.MessageJobResponse job(@PathVariable String messageJobId) {
         requireUuid(messageJobId);
         return conversationQueryPort.findJob(messageJobId).map(MessageResponses.MessageJobResponse::from)
+                .orElseThrow(WebErrorHandler.NotFoundException::new);
+    }
+
+    @PostMapping("/message-jobs/{messageJobId}/cancel")
+    public MessageResponses.MessageJobResponse cancelJob(@PathVariable String messageJobId) {
+        requireUuid(messageJobId);
+        return messageJobCancellationPort.cancel(messageJobId).map(MessageResponses.MessageJobResponse::from)
                 .orElseThrow(WebErrorHandler.NotFoundException::new);
     }
 

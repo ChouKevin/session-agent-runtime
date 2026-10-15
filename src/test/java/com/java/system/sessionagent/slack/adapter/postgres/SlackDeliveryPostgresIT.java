@@ -26,6 +26,9 @@ import com.java.system.sessionagent.conversation.application.MessageJobRetryPoli
 import com.java.system.sessionagent.conversation.port.out.ConversationModels;
 import com.java.system.sessionagent.conversation.TestConfiguredModels;
 import com.java.system.sessionagent.conversation.domain.IncomingMessage;
+import com.java.system.sessionagent.conversation.domain.JobCancellation;
+import com.java.system.sessionagent.conversation.domain.JobStatus;
+import com.java.system.sessionagent.conversation.domain.MessageJobId;
 import com.java.system.sessionagent.conversation.domain.IncomingMessageSource;
 import com.java.system.sessionagent.conversation.domain.ModelCallResult;
 import com.java.system.sessionagent.conversation.domain.ModelDescriptor;
@@ -101,6 +104,39 @@ class SlackDeliveryPostgresIT {
     @AfterEach
     void clean() {
         flyway().clean();
+    }
+
+    @Test
+    void discovers_and_delivers_a_cancelled_job_exactly_once_and_accepts_the_next_slack_message() {
+        PostgresConversationStore conversationStore = new PostgresConversationStore(dataSource(), Clock.fixed(NOW, ZoneOffset.UTC),
+                new ObjectMapper(), 1);
+        MessageIntakePort messageIntake = new MessageService(conversationStore, TestConfiguredModels.withDefault("test"),
+                new NoOpConversationTelemetry());
+        MessageHandler adapter = new MessageHandler("UBOT",
+                new PostgresMessageSubmission(dataSource(), messageIntake, Clock.fixed(NOW, ZoneOffset.UTC), 1));
+        assertThat(adapter.handle(new IncomingEvent("cancel-event", "T1", "C1", "1.000001", "", "U1", "", "channel",
+                "<@UBOT> hello", "", false, false))).isEqualTo(SlackEventOutcome.ACCEPTED);
+        MessageJobId jobId = new MessageJobId(jdbcTemplate.queryForObject(
+                "select message_job_id::text from message_job", String.class));
+
+        assertThat(conversationStore.requestCancellation(jobId).orElseThrow().status()).isEqualTo(JobStatus.CANCELLED);
+        conversationStore.requestCancellation(jobId);
+        markQueuedNoticeSent();
+        SlackPostgresDeliveryStore deliveryStore = new SlackPostgresDeliveryStore(dataSource());
+        deliveryStore.discover();
+        deliveryStore.discover();
+        List<SlackPostRequest> posts = new ArrayList<>();
+        SlackDeliveryWorker worker = new SlackDeliveryWorker(deliveryStore, request -> {
+            posts.add(request);
+            return "2.000001";
+        }, new SlackDeliveryProperties(), "delivery-worker");
+        assertThat(worker.poll()).isTrue();
+        assertThat(worker.poll()).isFalse();
+        assertThat(posts).containsExactly(new SlackPostRequest("C1", "1.000001", JobCancellation.MESSAGE));
+        assertThat(deliveryStore.findBySource("T1", "C1", "1.000001"))
+                .extracting(value -> value.kind().name()).containsExactly("QUEUED", "ANSWER");
+        assertThat(adapter.handle(new IncomingEvent("next-event", "T1", "C1", "1.000002", "1.000001", "U1", "", "channel",
+                "<@UBOT> next", "", false, false))).isEqualTo(SlackEventOutcome.ACCEPTED);
     }
 
     @Test

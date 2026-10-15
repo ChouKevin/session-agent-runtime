@@ -7,6 +7,7 @@ import com.java.system.sessionagent.conversation.domain.AssistantMessage;
 import com.java.system.sessionagent.conversation.domain.AssistantToolCallsMessage;
 import com.java.system.sessionagent.conversation.domain.IncomingMessage;
 import com.java.system.sessionagent.conversation.domain.JobStatus;
+import com.java.system.sessionagent.conversation.domain.JobCancellation;
 import com.java.system.sessionagent.conversation.domain.JobFailure;
 import com.java.system.sessionagent.conversation.domain.JobPhase;
 import com.java.system.sessionagent.conversation.domain.JobProgress;
@@ -33,6 +34,7 @@ import com.java.system.sessionagent.conversation.domain.UserMessage;
 import com.java.system.sessionagent.conversation.port.in.MessageConflictException;
 import com.java.system.sessionagent.conversation.port.in.QueueFullException;
 import com.java.system.sessionagent.conversation.port.out.ConversationStore;
+import com.java.system.sessionagent.conversation.port.out.JobCancellationRequestedException;
 import com.java.system.sessionagent.conversation.port.out.ModelSelectionLookup;
 import com.java.system.sessionagent.conversation.port.out.ConversationStoreFailure;
 import com.java.system.sessionagent.conversation.port.out.ModelRouteMismatchException;
@@ -392,6 +394,7 @@ public final class PostgresConversationStore implements ConversationStore {
         Instant requiredCreatedAt = Objects.requireNonNull(createdAt, "Context compaction creation time must not be null");
         inTransaction(() -> {
             requireLiveClaim(requiredClaim);
+            rejectCancellation(requiredClaim);
             UUID sessionId = sessionId(requiredClaim);
             mapper.insertCompaction(sessionId, requiredCompaction.generation(), messageJobId(requiredClaim),
                     requiredCompaction.reason().name(), requiredCompaction.summary(), requiredCompaction.coveredThrough().value(),
@@ -454,42 +457,57 @@ public final class PostgresConversationStore implements ConversationStore {
         MessageWorkClaim requiredClaim = Objects.requireNonNull(claim, "Message work claim must not be null");
         Assert.isTrue(maxModelCalls > 0, "Maximum model calls must be positive");
         Objects.requireNonNull(now, "Current time must not be null");
-        try {
+        return inTransaction(() -> {
+            if (mapper.requireLiveClaim(messageJobId(requiredClaim), sessionId(requiredClaim),
+                    requiredClaim.workerId(), requiredClaim.claimNumber()) != 1) {
+                return OptionalInt.empty();
+            }
+            rejectCancellation(requiredClaim);
             return mapper.reserveModelCall(messageJobId(requiredClaim), sessionId(requiredClaim), requiredClaim.workerId(),
-                    requiredClaim.claimNumber(), maxModelCalls, timestamp(now)).stream().findFirst().map(value -> OptionalInt.of(value))
+                    requiredClaim.claimNumber(), maxModelCalls, timestamp(now)).stream().findFirst().map(OptionalInt::of)
                     .orElseGet(OptionalInt::empty);
-        } catch (RuntimeException exception) {
-            throw translate(exception);
-        }
+        });
     }
 
     @Override
     public void updateProgress(MessageWorkClaim claim, JobProgress progress) {
         MessageWorkClaim requiredClaim = Objects.requireNonNull(claim, "Message work claim must not be null");
         JobProgress requiredProgress = Objects.requireNonNull(progress, "Job progress must not be null");
-        try {
+        inTransaction(() -> {
+            requireLiveClaim(requiredClaim);
+            if (requiredProgress.phase() == JobPhase.TOOL_EXECUTION) {
+                rejectCancellation(requiredClaim);
+            }
             int rows = mapper.updateProgress(messageJobId(requiredClaim), sessionId(requiredClaim),
                     requiredClaim.workerId(), requiredClaim.claimNumber(), requiredProgress.phase().name(),
                     timestamp(requiredProgress.startedAt()), requiredProgress.toolName().orElse(null));
             if (rows != 1) {
                 throw new StaleWorkClaimException();
             }
-        } catch (RuntimeException exception) {
-            throw translate(exception);
-        }
+            return Boolean.TRUE;
+        });
     }
 
     @Override
-    public void append(MessageWorkClaim claim, MessageBatch batch, Instant createdAt) {
+    public JobStatus append(MessageWorkClaim claim, MessageBatch batch, Instant createdAt) {
         MessageWorkClaim requiredClaim = Objects.requireNonNull(claim, "Message work claim must not be null");
         MessageBatch requiredBatch = Objects.requireNonNull(batch, "Message batch must not be null");
         Instant requiredCreatedAt = Objects.requireNonNull(createdAt, "Message creation time must not be null");
-        inTransaction(() -> {
+        return inTransaction(() -> {
             requireLiveClaim(requiredClaim);
+            boolean cancelled = mapper.isCancellationRequested(messageJobId(requiredClaim));
+            Assert.isTrue(requiredBatch.jobUpdate() != JobUpdate.CANCEL || cancelled,
+                    "Cancellation finalization requires a recorded request");
+            Assert.isTrue(requiredBatch.jobUpdate() != JobUpdate.CANCEL
+                            || (requiredBatch.continuation().isEmpty() && requiredBatch.failure().isEmpty()),
+                    "Cancellation finalization must not retain continuation or failure");
             UUID sessionId = sessionId(requiredClaim);
             Optional<SessionSequence> continuationSequence = Optional.empty();
             Optional<SessionSequence> responseSequence = Optional.empty();
             for (MessageData message : requiredBatch.messages()) {
+                if (cancelled && !(message instanceof AssistantToolCallsData) && !(message instanceof ToolObservationData)) {
+                    continue;
+                }
                 long sequence = allocateSequence(sessionId);
                 requireLiveClaim(requiredClaim);
                 if (message instanceof AssistantData assistant) {
@@ -511,7 +529,10 @@ public final class PostgresConversationStore implements ConversationStore {
                     mapper.insertRuntimeMessage(sessionId, sequence, runtime.code(), runtime.message());
                 }
             }
-            if (requiredBatch.usageCheckpoint().isPresent()) {
+            if (cancelled) {
+                insertCancellationMessage(sessionId, messageJobId(requiredClaim), requiredCreatedAt);
+            }
+            if (requiredBatch.usageCheckpoint().isPresent() && (!cancelled || responseSequence.isPresent())) {
                 ConversationStore.UsageCheckpointData checkpoint = requiredBatch.usageCheckpoint().orElseThrow();
                 SessionSequence boundary = responseSequence.orElseThrow();
                 mapper.insertUsageCheckpoint(sessionId, boundary.value(), checkpoint.model().routeId().value(),
@@ -520,13 +541,18 @@ public final class PostgresConversationStore implements ConversationStore {
                         checkpoint.completionTokens(), checkpoint.totalTokens(), checkpoint.requestShapeFingerprint(),
                         checkpoint.compactGeneration(), timestamp(requiredCreatedAt));
             }
-            if (requiredBatch.continuation().isPresent()) {
+            if (!cancelled && requiredBatch.continuation().isPresent()) {
                 SessionSequence assistantSequence = continuationSequence.orElseThrow();
                 ModelContinuation continuation = requiredBatch.continuation().orElseThrow();
                 mapper.insertContinuation(messageJobId(requiredClaim), sessionId, assistantSequence.value(),
                         continuation.modelRouteId().value(), continuation.format(), continuation.payload());
             }
-            if (requiredBatch.jobUpdate() == JobUpdate.COMPLETE) {
+            if (cancelled) {
+                mapper.deleteContinuations(messageJobId(requiredClaim), sessionId);
+                requireLiveClaim(requiredClaim);
+                mapper.cancelJob(messageJobId(requiredClaim));
+                return JobStatus.CANCELLED;
+            } else if (requiredBatch.jobUpdate() == JobUpdate.COMPLETE) {
                 mapper.deleteContinuations(messageJobId(requiredClaim), sessionId);
                 completeJob(requiredClaim, clock.instant(), requiredBatch.failure());
             } else {
@@ -537,7 +563,7 @@ public final class PostgresConversationStore implements ConversationStore {
                     throw new StaleWorkClaimException();
                 }
             }
-            return Boolean.TRUE;
+            return requiredBatch.jobUpdate() == JobUpdate.COMPLETE ? JobStatus.DONE : JobStatus.WORKING;
         });
     }
 
@@ -547,12 +573,15 @@ public final class PostgresConversationStore implements ConversationStore {
         Duration requiredDelay = Objects.requireNonNull(retryDelay, "Retry delay must not be null");
         JobFailure requiredFailure = Objects.requireNonNull(failure, "Job failure must not be null");
         Assert.isTrue(!requiredDelay.isNegative(), "Retry delay must not be negative");
-        try {
+        return inTransaction(() -> {
+            if (mapper.requireLiveClaim(messageJobId(requiredClaim), sessionId(requiredClaim),
+                    requiredClaim.workerId(), requiredClaim.claimNumber()) != 1) {
+                return false;
+            }
+            rejectCancellation(requiredClaim);
             return mapper.scheduleRetry(requiredDelay.toMillis(), messageJobId(requiredClaim), sessionId(requiredClaim),
                     requiredClaim.workerId(), requiredClaim.claimNumber(), requiredFailure.name()) == 1;
-        } catch (RuntimeException exception) {
-            throw translate(exception);
-        }
+        });
     }
 
     private <T> T inTransaction(Supplier<T> work) {
@@ -571,6 +600,50 @@ public final class PostgresConversationStore implements ConversationStore {
         if (rows != 1) {
             throw new StaleWorkClaimException();
         }
+    }
+
+    private void rejectCancellation(MessageWorkClaim claim) {
+        if (mapper.isCancellationRequested(messageJobId(claim))) {
+            throw new JobCancellationRequestedException();
+        }
+    }
+
+    @Override
+    public boolean isCancellationRequested(MessageWorkClaim claim) {
+        MessageWorkClaim requiredClaim = Objects.requireNonNull(claim, "Message work claim must not be null");
+        return inTransaction(() -> {
+            requireLiveClaim(requiredClaim);
+            return mapper.isCancellationRequested(messageJobId(requiredClaim));
+        });
+    }
+
+    @Override
+    public Optional<MessageJobProjection> requestCancellation(MessageJobId messageJobId) {
+        MessageJobId requiredId = Objects.requireNonNull(messageJobId, "Message job ID must not be null");
+        return inTransaction(() -> {
+            UUID jobId = UUID.fromString(requiredId.value());
+            Optional<PostgresConversationMapper.CancellationRow> found = mapper.lockCancellationJob(jobId).stream().findFirst();
+            if (found.isEmpty()) {
+                return Optional.empty();
+            }
+            PostgresConversationMapper.CancellationRow job = found.orElseThrow();
+            JobStatus currentStatus = JobStatus.valueOf(job.status());
+            if (!currentStatus.isTerminal()) {
+                mapper.requestCancellation(jobId);
+                if (currentStatus != JobStatus.WORKING) {
+                    insertCancellationMessage(job.sessionId(), jobId, clock.instant());
+                    mapper.deleteContinuations(jobId, job.sessionId());
+                    mapper.cancelJob(jobId);
+                }
+            }
+            return readJob(requiredId);
+        });
+    }
+
+    private void insertCancellationMessage(UUID sessionId, UUID jobId, Instant createdAt) {
+        long sequence = allocateSequence(sessionId);
+        insertSessionMessage(sessionId, sequence, jobId, "RUNTIME", createdAt);
+        mapper.insertRuntimeMessage(sessionId, sequence, JobCancellation.CODE, JobCancellation.MESSAGE);
     }
 
     private void insertSessionMessage(UUID sessionId, long sequence, UUID jobId, String role, Instant createdAt) {
@@ -646,7 +719,8 @@ public final class PostgresConversationStore implements ConversationStore {
                             new MessageJobId(row.messageJobId().toString()), new SessionId(row.sessionId().toString()),
                             JobStatus.valueOf(row.status()), row.retryCount(), row.modelCalls(),
                             storedProgress(row.phase(), row.phaseStartedAt(), row.currentToolName()),
-                            Optional.ofNullable(row.failureCode()).map(JobFailure::valueOf)));
+                            Optional.ofNullable(row.failureCode()).map(JobFailure::valueOf),
+                            Optional.ofNullable(row.cancellationRequestedAt()).map(OffsetDateTime::toInstant)));
         } catch (RuntimeException exception) {
             throw translate(exception);
         }
@@ -663,7 +737,8 @@ public final class PostgresConversationStore implements ConversationStore {
                     currentJob = Optional.of(new MessageJobProjection(new MessageJobId(storedJobId.orElseThrow().toString()),
                             new SessionId(row.sessionId().toString()), JobStatus.valueOf(row.status()), row.retryCount(),
                             row.modelCalls(), storedProgress(row.phase(), row.phaseStartedAt(), row.currentToolName()),
-                            Optional.ofNullable(row.failureCode()).map(JobFailure::valueOf)));
+                            Optional.ofNullable(row.failureCode()).map(JobFailure::valueOf),
+                            Optional.ofNullable(row.cancellationRequestedAt()).map(OffsetDateTime::toInstant)));
                 }
                 return new SessionProjection(new SessionId(row.sessionId().toString()), row.createdAt().toInstant(), currentJob,
                         row.selectedModel());
@@ -749,7 +824,8 @@ public final class PostgresConversationStore implements ConversationStore {
 
     private static RuntimeException translate(RuntimeException exception) {
         if (exception instanceof ConversationStoreFailure || exception instanceof StaleWorkClaimException
-                || exception instanceof MessageConflictException || exception instanceof ModelRouteMismatchException) {
+                || exception instanceof MessageConflictException || exception instanceof ModelRouteMismatchException
+                || exception instanceof JobCancellationRequestedException) {
             return exception;
         }
         if (isTransient(exception)) {

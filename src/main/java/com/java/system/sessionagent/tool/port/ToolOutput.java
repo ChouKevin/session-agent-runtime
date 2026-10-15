@@ -13,7 +13,9 @@ public record ToolOutput(boolean isError, Object result) {
             "TOOL_TIMEOUT",
             "TOOL_CONNECTION_FAILED",
             "TOOL_NOT_AVAILABLE",
-            "TOOL_PROTOCOL_ERROR");
+            "TOOL_PROTOCOL_ERROR",
+            "TOOL_NOT_EXECUTED",
+            "TOOL_CANCELLED");
 
     public static ToolOutput runtimeFailure(String code, String safeMessage) {
         Assert.isTrue(RUNTIME_FAILURE_CODES.contains(code), "Unsupported runtime tool failure code");

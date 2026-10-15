@@ -322,7 +322,7 @@ public interface SlackDatabaseMapper extends BaseMapper<SlackDatabaseMapper.Deli
             join session_message terminal on terminal.session_id = job.session_id and terminal.message_job_id = job.message_job_id
             left join assistant_message assistant on assistant.session_id = terminal.session_id and assistant.sequence = terminal.sequence
             left join runtime_message runtime on runtime.session_id = terminal.session_id and runtime.sequence = terminal.sequence
-            where job.status = 'DONE' and terminal.role in ('ASSISTANT', 'RUNTIME')
+            where job.status in ('DONE', 'CANCELLED') and terminal.role in ('ASSISTANT', 'RUNTIME')
               and (case terminal.role when 'ASSISTANT' then assistant.message else runtime.message end) ~ '[^[:space:]]'
               and terminal.sequence = (select max(later.sequence) from session_message later
                   where later.session_id = job.session_id and later.message_job_id = job.message_job_id)

@@ -1,6 +1,7 @@
 package com.java.system.sessionagent.web.adapter.http;
 
 import com.java.system.sessionagent.bootstrap.configuration.RuntimeConfiguration;
+import com.java.system.sessionagent.conversation.application.JobCancellationService;
 import com.java.system.sessionagent.conversation.domain.AssistantMessage;
 import com.java.system.sessionagent.conversation.domain.AssistantToolCallsMessage;
 import com.java.system.sessionagent.conversation.domain.IncomingMessage;
@@ -19,11 +20,13 @@ import com.java.system.sessionagent.conversation.domain.ToolCallId;
 import com.java.system.sessionagent.conversation.domain.ToolRequest;
 import com.java.system.sessionagent.conversation.domain.UserMessage;
 import com.java.system.sessionagent.conversation.port.in.ConversationQueryPort;
+import com.java.system.sessionagent.conversation.port.out.ConversationStore;
 import com.java.system.sessionagent.conversation.port.in.ExternalSessionReferenceQueryPort;
 import com.java.system.sessionagent.conversation.port.in.MessageIntakePort;
 import com.java.system.sessionagent.conversation.port.in.QueueFullException;
 import com.java.system.sessionagent.conversation.port.in.SessionModelPort;
 import com.java.system.sessionagent.conversation.port.in.MessageJobView;
+import com.java.system.sessionagent.conversation.port.in.MessageJobCancellationPort;
 import com.java.system.sessionagent.conversation.port.in.SessionDetailView;
 import com.java.system.sessionagent.slack.port.out.SlackDeliveryStore;
 import com.java.system.sessionagent.slack.domain.SlackDeliveryFailureCategory;
@@ -66,6 +69,72 @@ class MessageControllerTest {
     private static final String SESSION_ID = "a1d4cefe-d5b5-4f40-b9f6-beb41a6831af";
     private static final String JOB_ID = "f47bdb7e-75c3-4dbf-bdd4-1f8681705b62";
     private static final Instant CREATED_AT = Instant.parse("2026-08-31T10:00:01Z");
+
+    @Test
+    void rejects_malformed_job_cancellation_before_submission() throws Exception {
+        MessageIntakePort intake = mock(MessageIntakePort.class);
+        ConversationQueryPort queries = mock(ConversationQueryPort.class);
+        MessageJobCancellationPort cancellationPort = mock(MessageJobCancellationPort.class);
+        MockMvc mvc = mvc(intake, queries, cancellationPort);
+
+        mvc.perform(post("/internal/message-jobs/not-a-uuid/cancel"))
+                .andExpect(status().isBadRequest());
+
+        verifyNoInteractions(intake, queries, cancellationPort);
+    }
+
+    @Test
+    void returns_the_working_job_snapshot_after_a_cancellation_request() throws Exception {
+        MessageIntakePort intake = mock(MessageIntakePort.class);
+        ConversationQueryPort queries = mock(ConversationQueryPort.class);
+        ConversationStore store = mock(ConversationStore.class);
+        MessageJobId jobId = new MessageJobId(JOB_ID);
+        Instant requestedAt = Instant.parse("2026-10-15T12:30:00Z");
+        when(store.requestCancellation(jobId)).thenReturn(Optional.of(new ConversationStore.MessageJobProjection(
+                jobId, new SessionId(SESSION_ID), JobStatus.WORKING, 1, 2, Optional.empty(), Optional.empty(),
+                Optional.of(requestedAt))));
+        MessageJobCancellationPort cancellationPort = new JobCancellationService(store);
+
+        mvc(intake, queries, cancellationPort).perform(post("/internal/message-jobs/{messageJobId}/cancel", JOB_ID))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.messageJobId").value(JOB_ID))
+                .andExpect(jsonPath("$.sessionId").value(SESSION_ID))
+                .andExpect(jsonPath("$.status").value("WORKING"))
+                .andExpect(jsonPath("$.retryCount").value(1))
+                .andExpect(jsonPath("$.modelCallCount").value(2))
+                .andExpect(jsonPath("$.cancellationRequestedAt").value("2026-10-15T12:30:00Z"));
+    }
+
+    @Test
+    void returns_a_terminal_job_snapshot_when_cancellation_is_already_complete() throws Exception {
+        MessageIntakePort intake = mock(MessageIntakePort.class);
+        ConversationQueryPort queries = mock(ConversationQueryPort.class);
+        MessageJobCancellationPort cancellationPort = mock(MessageJobCancellationPort.class);
+        Instant requestedAt = Instant.parse("2026-10-15T12:30:00Z");
+        when(cancellationPort.cancel(JOB_ID)).thenReturn(Optional.of(new MessageJobView(
+                JOB_ID, SESSION_ID, JobStatus.CANCELLED, 1, 2, Optional.empty(), Optional.empty(),
+                Optional.of(requestedAt))));
+
+        mvc(intake, queries, cancellationPort).perform(post("/internal/message-jobs/{messageJobId}/cancel", JOB_ID))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.messageJobId").value(JOB_ID))
+                .andExpect(jsonPath("$.status").value("CANCELLED"))
+                .andExpect(jsonPath("$.sessionId").value(SESSION_ID))
+                .andExpect(jsonPath("$.retryCount").value(1))
+                .andExpect(jsonPath("$.modelCallCount").value(2))
+                .andExpect(jsonPath("$.cancellationRequestedAt").value("2026-10-15T12:30:00Z"));
+    }
+
+    @Test
+    void returns_not_found_when_cancelling_an_unknown_job() throws Exception {
+        MessageIntakePort intake = mock(MessageIntakePort.class);
+        ConversationQueryPort queries = mock(ConversationQueryPort.class);
+        MessageJobCancellationPort cancellationPort = mock(MessageJobCancellationPort.class);
+        when(cancellationPort.cancel(JOB_ID)).thenReturn(Optional.empty());
+
+        mvc(intake, queries, cancellationPort).perform(post("/internal/message-jobs/{messageJobId}/cancel", JOB_ID))
+                .andExpect(status().isNotFound());
+    }
 
     @Test
     void serializes_each_final_history_message_with_only_its_type_specific_fields() throws Exception {
@@ -161,7 +230,8 @@ class MessageControllerTest {
         Instant phaseStartedAt = Instant.parse("2026-10-13T15:45:01Z");
         JobProgress progress = new JobProgress(JobPhase.TOOL_EXECUTION, phaseStartedAt, Optional.of("lookup"));
         MessageJobView activeJob = new MessageJobView(
-                JOB_ID, SESSION_ID, JobStatus.WORKING, 1, 2, Optional.of(progress), Optional.empty());
+                JOB_ID, SESSION_ID, JobStatus.WORKING, 1, 2, Optional.of(progress), Optional.empty(),
+                Optional.of(Instant.parse("2026-10-13T15:45:01Z")));
         when(queries.findJob(JOB_ID)).thenReturn(Optional.of(activeJob));
         when(queries.session(SESSION_ID)).thenReturn(Optional.of(new SessionDetailView(SESSION_ID, CREATED_AT,
                 Optional.of(activeJob), Optional.empty(),
@@ -177,6 +247,7 @@ class MessageControllerTest {
                 .andExpect(jsonPath("$.modelCallCount").value(2))
                 .andExpect(jsonPath("$.phase").value("TOOL_EXECUTION"))
                 .andExpect(jsonPath("$.phaseStartedAt").value("2026-10-13T15:45:01Z"))
+                .andExpect(jsonPath("$.cancellationRequestedAt").value("2026-10-13T15:45:01Z"))
                 .andExpect(jsonPath("$.currentToolName").value("lookup"))
                 .andExpect(jsonPath("$.failureCode").value(nullValue()))
                 .andExpect(jsonPath("$.failureMessage").value(nullValue()))
@@ -188,6 +259,7 @@ class MessageControllerTest {
                 .andExpect(jsonPath("$.currentJob.phaseStartedAt").value("2026-10-13T15:45:01Z"))
                 .andExpect(jsonPath("$.currentJob.currentToolName").value("lookup"))
                 .andExpect(jsonPath("$.currentJob.failureCode").value(nullValue()))
+                .andExpect(jsonPath("$.currentJob.cancellationRequestedAt").value("2026-10-13T15:45:01Z"))
                 .andExpect(jsonPath("$.currentJob.failureMessage").value(nullValue()));
     }
 
@@ -197,7 +269,7 @@ class MessageControllerTest {
         ConversationQueryPort queries = mock(ConversationQueryPort.class);
         JobFailure failure = JobFailure.MODEL_UNAVAILABLE;
         when(queries.findJob(JOB_ID)).thenReturn(Optional.of(new MessageJobView(
-                JOB_ID, SESSION_ID, JobStatus.DONE, 1, 2, Optional.empty(), Optional.of(failure))));
+                JOB_ID, SESSION_ID, JobStatus.DONE, 1, 2, Optional.empty(), Optional.of(failure), Optional.empty())));
 
         mvc(intake, queries).perform(get("/internal/message-jobs/{messageJobId}", JOB_ID))
                 .andExpect(status().isOk())
@@ -206,7 +278,8 @@ class MessageControllerTest {
                 .andExpect(jsonPath("$.phaseStartedAt").value(nullValue()))
                 .andExpect(jsonPath("$.currentToolName").value(nullValue()))
                 .andExpect(jsonPath("$.failureCode").value(failure.name()))
-                .andExpect(jsonPath("$.failureMessage").value(failure.message()));
+                .andExpect(jsonPath("$.failureMessage").value(failure.message()))
+                .andExpect(jsonPath("$.cancellationRequestedAt").value(nullValue()));
     }
 
     @Test
@@ -369,7 +442,7 @@ class MessageControllerTest {
         ExternalSessionReferenceQueryPort referenceQueries = mock(ExternalSessionReferenceQueryPort.class);
         when(queries.session(SESSION_ID)).thenReturn(Optional.of(new SessionDetailView(SESSION_ID, CREATED_AT,
                 Optional.of(new MessageJobView(JOB_ID, SESSION_ID, JobStatus.DONE, 1, 2, Optional.empty(),
-                        Optional.of(JobFailure.MODEL_OUTPUT_INVALID))),
+                        Optional.of(JobFailure.MODEL_OUTPUT_INVALID), Optional.empty())),
                 Optional.of(new SessionDetailView.CompactionBoundaryView(2, 4, "THRESHOLD", CREATED_AT)),
                 new SessionDetailView.ContextUsageView("gemini-3.1-flash-lite", 1_048_576, 512, 0.00048828125,
                         ContextEstimate.Basis.PROVIDER_PLUS_TRAILING_ESTIMATE))));
@@ -386,6 +459,7 @@ class MessageControllerTest {
                 .andExpect(jsonPath("$.currentJob.phaseStartedAt").value(nullValue()))
                 .andExpect(jsonPath("$.currentJob.currentToolName").value(nullValue()))
                 .andExpect(jsonPath("$.currentJob.failureCode").value(JobFailure.MODEL_OUTPUT_INVALID.name()))
+                .andExpect(jsonPath("$.currentJob.cancellationRequestedAt").value(nullValue()))
                 .andExpect(jsonPath("$.currentJob.failureMessage").value(JobFailure.MODEL_OUTPUT_INVALID.message()))
                 .andExpect(jsonPath("$.currentJob.retryCount").doesNotExist())
                 .andExpect(jsonPath("$.latestCompaction.coveredThrough").value(4))
@@ -423,6 +497,14 @@ class MessageControllerTest {
                 .andExpect(status().isBadRequest());
     }
 
+    private static MockMvc mvc(
+            MessageIntakePort intake,
+            ConversationQueryPort queries,
+            MessageJobCancellationPort cancellationPort) {
+        return mvc(intake, queries, mock(ExternalSessionReferenceQueryPort.class), mock(SessionModelPort.class),
+                mock(SlackDeliveryStore.class), cancellationPort);
+    }
+
     private static MockMvc mvc(MessageIntakePort intake, ConversationQueryPort queries) {
         return mvc(intake, queries, mock(ExternalSessionReferenceQueryPort.class));
     }
@@ -448,9 +530,21 @@ class MessageControllerTest {
             ExternalSessionReferenceQueryPort referenceQueries,
             SessionModelPort sessionModels,
             SlackDeliveryStore slackDeliveryStore) {
+        return mvc(intake, queries, referenceQueries, sessionModels, slackDeliveryStore,
+                mock(MessageJobCancellationPort.class));
+    }
+
+    private static MockMvc mvc(
+            MessageIntakePort intake,
+            ConversationQueryPort queries,
+            ExternalSessionReferenceQueryPort referenceQueries,
+            SessionModelPort sessionModels,
+            SlackDeliveryStore slackDeliveryStore,
+            MessageJobCancellationPort cancellationPort) {
         JsonMapper.Builder builder = JsonMapper.builder();
         new RuntimeConfiguration().strictJsonMapper().customize(builder);
-        return MockMvcBuilders.standaloneSetup(new MessageController(intake, queries, referenceQueries, sessionModels, slackDeliveryStore))
+        return MockMvcBuilders.standaloneSetup(new MessageController(intake, queries, cancellationPort, referenceQueries,
+                sessionModels, slackDeliveryStore))
                 .setMessageConverters(new JacksonJsonHttpMessageConverter(builder))
                 .setControllerAdvice(new WebErrorHandler()).build();
     }

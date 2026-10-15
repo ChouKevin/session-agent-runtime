@@ -16,6 +16,7 @@ import com.java.system.sessionagent.worker.configuration.WorkerProperties;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.EnumSource;
 import org.slf4j.LoggerFactory;
 
 import java.time.Clock;
@@ -80,13 +81,14 @@ class MessageJobWorkerTest {
         verify(renewal).cancel(false);
     }
 
-    @Test
-    void does_not_start_a_second_local_workflow_for_an_occupied_session() throws Exception {
+    @ParameterizedTest
+    @EnumSource(value = MessageJobProcessingResult.class, names = {"COMPLETED", "CANCELLED"})
+    void keeps_local_occupancy_until_processing_returns_then_releases_it(MessageJobProcessingResult outcome) throws Exception {
         ConversationStore store = mock(ConversationStore.class);
         MessageWorkClaim firstClaim = claim("first", "session");
         MessageWorkClaim secondClaim = claim("second", "session");
         when(store.claimNext(any(String.class), any(Duration.class), org.mockito.ArgumentMatchers.<Set<SessionId>>any()))
-                .thenReturn(Optional.of(firstClaim), Optional.of(secondClaim));
+                .thenReturn(Optional.of(firstClaim), Optional.of(secondClaim), Optional.of(secondClaim));
         ScheduledExecutorService scheduler = mock(ScheduledExecutorService.class);
         ScheduledFuture<?> renewal = mock(ScheduledFuture.class);
         org.mockito.Mockito.doReturn(renewal).when(scheduler).scheduleAtFixedRate(any(Runnable.class),
@@ -108,7 +110,7 @@ class MessageJobWorkerTest {
                 }
             }
             activeWorkflows.decrementAndGet();
-            return MessageJobProcessingResult.COMPLETED;
+            return outcome;
         };
         MessageJobWorker worker = worker(store, jobs, scheduler);
         ExecutorService executor = Executors.newFixedThreadPool(2);
@@ -122,6 +124,9 @@ class MessageJobWorkerTest {
 
             releaseFirst.countDown();
             assertThat(first.get(5, TimeUnit.SECONDS)).isTrue();
+            assertThat(worker.poll()).isTrue();
+            assertThat(activeWorkflows).hasValue(0);
+            assertThat(maximumActiveWorkflows).hasValue(1);
         } finally {
             releaseFirst.countDown();
             executor.shutdownNow();
@@ -539,7 +544,7 @@ class MessageJobWorkerTest {
         }).when(jobs).process(org.mockito.Mockito.eq(claim), any());
         when(store.readJob(claim.messageJobId())).thenReturn(Optional.of(new ConversationStore.MessageJobProjection(
                 claim.messageJobId(), claim.sessionId(), com.java.system.sessionagent.conversation.domain.JobStatus.DONE,
-                1, 1, Optional.empty(), Optional.empty())));
+                1, 1, Optional.empty(), Optional.empty(), Optional.empty())));
         Logger logger = (Logger) LoggerFactory.getLogger(MessageJobWorker.class);
         ListAppender<ILoggingEvent> appender = new ListAppender<>();
         appender.start();
@@ -563,6 +568,7 @@ class MessageJobWorkerTest {
     @ParameterizedTest
     @CsvSource({
             "RETRY_SCHEDULED, message_job_processing_finished, RETRY_SCHEDULED, message_job_completed",
+            "CANCELLED, message_job_cancelled, CANCELLED, message_job_completed",
             "COMPLETED, message_job_completed, DONE, message_job_processing_finished"
     })
     void reports_the_processing_outcome_without_rereading_mutable_job_state(

@@ -4,5 +4,10 @@ public enum JobStatus {
     PENDING,
     WORKING,
     RETRY,
-    DONE
+    DONE,
+    CANCELLED;
+
+    public boolean isTerminal() {
+        return this == DONE || this == CANCELLED;
+    }
 }

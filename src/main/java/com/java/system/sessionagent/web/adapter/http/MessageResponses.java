@@ -71,12 +71,14 @@ public final class MessageResponses {
             Instant phaseStartedAt,
             String currentToolName,
             String failureCode,
-            String failureMessage) {
+            String failureMessage,
+            Instant cancellationRequestedAt) {
         static CurrentJobSummaryResponse from(MessageJobView view) {
             JobProgressFields progressFields = JobProgressFields.from(view);
             return new CurrentJobSummaryResponse(view.messageJobId(), view.status().name(), view.modelCallCount(),
                     progressFields.phase(), progressFields.phaseStartedAt(), progressFields.currentToolName(),
-                    progressFields.failureCode(), progressFields.failureMessage());
+                    progressFields.failureCode(), progressFields.failureMessage(),
+                    view.cancellationRequestedAt().orElse(null));
         }
     }
 
@@ -90,12 +92,14 @@ public final class MessageResponses {
             Instant phaseStartedAt,
             String currentToolName,
             String failureCode,
-            String failureMessage) {
+            String failureMessage,
+            Instant cancellationRequestedAt) {
         static MessageJobResponse from(MessageJobView view) {
             JobProgressFields progressFields = JobProgressFields.from(view);
             return new MessageJobResponse(view.messageJobId(), view.sessionId(), view.status().name(), view.retryCount(),
                     view.modelCallCount(), progressFields.phase(), progressFields.phaseStartedAt(),
-                    progressFields.currentToolName(), progressFields.failureCode(), progressFields.failureMessage());
+                    progressFields.currentToolName(), progressFields.failureCode(), progressFields.failureMessage(),
+                    view.cancellationRequestedAt().orElse(null));
         }
     }
 

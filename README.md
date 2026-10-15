@@ -58,6 +58,7 @@ Submit a message, poll its job, then read the complete session history:
 ```text
 POST /internal/messages
 GET  /internal/message-jobs/{messageJobId}
+POST /internal/message-jobs/{messageJobId}/cancel
 GET  /internal/sessions/{sessionId}
 GET  /internal/sessions/{sessionId}/messages
 PUT  /internal/sessions/{sessionId}/model
@@ -67,9 +68,9 @@ GET  /internal/slack-deliveries?teamId=...&channelId=...&messageTs=...
 `POST /internal/messages` accepts `sessionKey`, `participantId`, `sourceMessageId`, and `message`. Reusing a nonblank `sessionKey` continues the same session. The accepted response contains `sessionId` and `messageJobId`.
 
 The job response contains its IDs, `status`, `retryCount`, and `modelCallCount`, plus
-`phase`, `phaseStartedAt`, `currentToolName`, `failureCode`, and `failureMessage`.
-`GET /internal/sessions/{sessionId}` exposes the same progress/failure fields in
-`currentJob`. Absent progress or failure values are explicit JSON `null`.
+`phase`, `phaseStartedAt`, `currentToolName`, `failureCode`, `failureMessage`, and
+`cancellationRequestedAt`. `GET /internal/sessions/{sessionId}` exposes the same
+fields in `currentJob`. Absent optional values are explicit JSON `null`.
 
 | Phase | Meaning |
 | --- | --- |
@@ -99,6 +100,34 @@ worker lease expires, polling hides stale progress and reports
 `PROCESSING_INTERRUPTED` while retaining `WORKING` until recovery claims the job.
 Reclaim initializes `PREPARING`; the old claim cannot overwrite its progress or
 history. Process restarts do not require an in-memory progress cache.
+
+`POST /internal/message-jobs/{messageJobId}/cancel` requires no request body.
+It returns `200` with the current job snapshot for a known job, `404` for an
+unknown job, or `400` for a malformed UUID. Repeating the request is idempotent:
+
+- `PENDING` and `RETRY` jobs become `CANCELLED` without starting another model request.
+- A `WORKING` job retains its current phase and records `cancellationRequestedAt`.
+  It stops at a safe point after its already-admitted model/tool request finishes
+  or times out. A cancellation request is not yet a stopped-job acknowledgement.
+- In a tool batch, obtained observations remain unchanged. Unstarted calls receive
+  explicit Runtime observations with `isError: true` and
+  `result: {code: "TOOL_CANCELLED", message: ...}`; they were **not invoked**.
+  The original assistant tool calls, all matching observations, and terminal
+  `RUNTIME` event `JOB_CANCELLED` commit atomically. No next model turn is started.
+  If a storage failure had already stopped the batch before cancellation became
+  observable, terminal recovery instead marks those unstarted calls
+  `TOOL_NOT_EXECUTED` with the storage-failure reason. A cancellation that wins
+  during that append does not rewrite the earlier stop reason or any tool result.
+- `DONE` and `CANCELLED` jobs are immutable under this endpoint. If normal completion
+  commits before cancellation, the response remains `DONE`; if cancellation wins,
+  the terminal state is `CANCELLED`, with no failure code or in-flight progress.
+
+The request timestamp survives process restart and lease reclamation. Recovery of
+a requested job does not replay model/tool work. Cancellation does not forcibly
+abort a remote OMP/MCP operation, refund reserved model calls, or roll back tool
+side effects. Results not committed before a process crash or an uncertain
+database commit cannot be promised as recovered observations; Runtime does not
+invent results or blindly replay a possibly committed batch.
 
 `PUT /internal/sessions/{sessionId}/model` accepts `{"model":"configured-key"}` and returns `200` with `{sessionId, model, effectiveFor:"NEW_MESSAGES"}`. Only messages accepted after the change use the selected model; queued, running, and retrying jobs keep the model captured when they were accepted. Selecting a configured model takes effect without restarting Runtime.
 
@@ -219,7 +248,7 @@ Do not start both deployment methods on the same ports.
 
 ## Database and local runtime
 
-The shipped database contract is a fresh schema applied through ordered Flyway migrations V1 through V5. V5 adds durable job progress and safe failure codes without rewriting conversation history; historical terminal failures are backfilled only from an allowlisted final runtime event, not an earlier recoverable failure. Existing working rows may initially have no phase until reclaimed. Compatibility with removed pre-release schemas is not supported. Do not reset or delete the current database or its data as part of starting this version. The Compose service binds the runtime HTTP port to loopback only. Required local credentials are intentionally not committed.
+The shipped database contract is a fresh schema applied through ordered Flyway migrations V1 through V6. V5 adds durable job progress and safe failure codes; historical terminal failures are backfilled only from an allowlisted final runtime event, not an earlier recoverable failure. Existing working rows may initially have no phase until reclaimed. V6 adds durable cancellation requests and the `CANCELLED` terminal state without rewriting existing history or progress. Compatibility with removed pre-release schemas is not supported. Do not reset or delete the current database or its data as part of starting this version. The Compose service binds the runtime HTTP port to loopback only. Required local credentials are intentionally not committed.
 
 Conversations and tool results are retained indefinitely. This POC adds no TTL, automatic cleanup, or backup/recovery workflow. Existing temporary continuation cleanup and Docker/host log rotation remain unchanged.
 

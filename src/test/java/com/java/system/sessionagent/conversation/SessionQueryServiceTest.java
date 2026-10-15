@@ -65,11 +65,11 @@ class SessionQueryServiceTest {
     void projects_active_context_usage_without_promoting_session_content_or_provider_metadata() {
         ConversationStore store = mock(ConversationStore.class);
         SessionId sessionId = new SessionId(SESSION_ID);
-        JobProgress activeProgress = new JobProgress(JobPhase.MODEL_CALL, Instant.parse("2026-10-13T15:45:01Z"),
-                Optional.empty());
+        Instant cancellationRequestedAt = Instant.parse("2026-10-13T15:45:01Z");
+        JobProgress activeProgress = new JobProgress(JobPhase.MODEL_CALL, cancellationRequestedAt, Optional.empty());
         when(store.readSession(sessionId)).thenReturn(Optional.of(new ConversationStore.SessionProjection(sessionId, CREATED_AT,
                 Optional.of(new ConversationStore.MessageJobProjection(new MessageJobId("f47bdb7e-75c3-4dbf-bdd4-1f8681705b62"), sessionId,
-                        JobStatus.WORKING, 1, 2, Optional.of(activeProgress), Optional.empty())), "test")));
+                        JobStatus.WORKING, 1, 2, Optional.of(activeProgress), Optional.empty(), Optional.of(cancellationRequestedAt))), "test")));
         when(store.loadHistory(sessionId)).thenReturn(List.of(new UserMessage(sessionId, new SessionSequence(1),
                 Optional.of(new MessageJobId("f47bdb7e-75c3-4dbf-bdd4-1f8681705b62")), CREATED_AT, MessageRole.USER, "U01", "private text")));
         when(store.loadCompaction(sessionId)).thenReturn(Optional.empty());
@@ -83,6 +83,7 @@ class SessionQueryServiceTest {
 
         assertThat(detail.sessionId()).isEqualTo(SESSION_ID);
         assertThat(detail.currentJob()).isPresent();
+        assertThat(detail.currentJob().orElseThrow().cancellationRequestedAt()).contains(cancellationRequestedAt);
         assertThat(detail.currentJob().orElseThrow().progress()).contains(activeProgress);
         assertThat(detail.currentJob().orElseThrow().failure()).isEmpty();
         assertThat(detail.latestCompaction()).isEmpty();
@@ -99,7 +100,7 @@ class SessionQueryServiceTest {
         SessionId sessionId = new SessionId(SESSION_ID);
         JobFailure failure = JobFailure.MODEL_UNAVAILABLE;
         when(store.readJob(jobId)).thenReturn(Optional.of(new ConversationStore.MessageJobProjection(
-                jobId, sessionId, JobStatus.RETRY, 1, 1, Optional.empty(), Optional.of(failure))));
+                jobId, sessionId, JobStatus.RETRY, 1, 1, Optional.empty(), Optional.of(failure), Optional.empty())));
         ConversationQueryService service = new ConversationQueryService(store,
                 TestConfiguredModels.withModel(model(new ModelDescriptor(new ModelRouteId("test"), "test-model", 1_000))),
                 () -> new ToolSnapshot(List.of()), new ContextUsageEstimator());
@@ -109,6 +110,26 @@ class SessionQueryServiceTest {
         assertThat(view.status()).isEqualTo(JobStatus.RETRY);
         assertThat(view.progress()).isEmpty();
         assertThat(view.failure()).contains(failure);
+        assertThat(view.cancellationRequestedAt()).isEmpty();
+    }
+
+    @Test
+    void projects_cancellation_request_timestamp_for_job_polling() {
+        ConversationStore store = mock(ConversationStore.class);
+        MessageJobId jobId = new MessageJobId("f47bdb7e-75c3-4dbf-bdd4-1f8681705b62");
+        SessionId sessionId = new SessionId(SESSION_ID);
+        Instant cancellationRequestedAt = Instant.parse("2026-10-13T15:45:01Z");
+        when(store.readJob(jobId)).thenReturn(Optional.of(new ConversationStore.MessageJobProjection(
+                jobId, sessionId, JobStatus.WORKING, 0, 0, Optional.empty(), Optional.empty(),
+                Optional.of(cancellationRequestedAt))));
+        ConversationQueryService service = new ConversationQueryService(store,
+                TestConfiguredModels.withModel(model(new ModelDescriptor(new ModelRouteId("test"), "test-model", 1_000))),
+                () -> new ToolSnapshot(List.of()), new ContextUsageEstimator());
+
+        MessageJobView view = service.findJob(jobId.value()).orElseThrow();
+
+        assertThat(view.cancellationRequestedAt()).contains(cancellationRequestedAt);
+
     }
 
 

@@ -3,6 +3,7 @@ package com.java.system.sessionagent.conversation;
 import com.java.system.sessionagent.conversation.application.MessageJobRetryPolicy;
 import com.java.system.sessionagent.conversation.application.JobProcessor;
 import com.java.system.sessionagent.conversation.domain.MessageJobId;
+import com.java.system.sessionagent.conversation.domain.JobStatus;
 import com.java.system.sessionagent.conversation.domain.MessageRole;
 import com.java.system.sessionagent.conversation.domain.MessageWorkClaim;
 import com.java.system.sessionagent.conversation.domain.ModelCallResult;
@@ -36,10 +37,30 @@ import java.util.function.Consumer;
 import java.util.function.Function;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 final class MessageJobTestFixtures {
 
     static final ModelRouteId TEST_ROUTE_ID = new ModelRouteId("test");
+
+    static ConversationStore mockStore() {
+        ConversationStore store = mock(ConversationStore.class);
+        when(store.append(any(), any(), any())).thenAnswer(invocation -> {
+            ConversationStore.MessageBatch batch = invocation.getArgument(1);
+            return appendedStatus(batch);
+        });
+        return store;
+    }
+
+    static JobStatus appendedStatus(ConversationStore.MessageBatch batch) {
+        return switch (batch.jobUpdate()) {
+            case KEEP_WORKING -> JobStatus.WORKING;
+            case COMPLETE -> JobStatus.DONE;
+            case CANCEL -> JobStatus.CANCELLED;
+        };
+    }
 
     static JobProcessor service(ConversationStore store, ConversationModel model, ToolCatalog catalog) {
         return service(store, model, catalog, 2);

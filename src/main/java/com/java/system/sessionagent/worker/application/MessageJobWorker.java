@@ -274,6 +274,10 @@ public final class MessageJobWorker implements SmartLifecycle {
                 telemetry.job("COMPLETED");
                 logJobResult("message_job_completed", claim, "DONE");
             }
+            case CANCELLED -> {
+                telemetry.job("CANCELLED");
+                logJobResult("message_job_cancelled", claim, "CANCELLED");
+            }
             case RETRY_SCHEDULED -> {
                 telemetry.job("RETRY_SCHEDULED");
                 logJobResult("message_job_processing_finished", claim, "RETRY_SCHEDULED");

@@ -4,6 +4,8 @@ import com.java.system.sessionagent.conversation.domain.MessageWorkClaim;
 import com.java.system.sessionagent.conversation.domain.JobFailure;
 import com.java.system.sessionagent.conversation.domain.JobPhase;
 import com.java.system.sessionagent.conversation.domain.JobProgress;
+import com.java.system.sessionagent.conversation.domain.JobCancellation;
+import com.java.system.sessionagent.conversation.domain.JobStatus;
 import com.java.system.sessionagent.conversation.domain.ModelReply;
 import com.java.system.sessionagent.conversation.domain.ModelCallResult;
 import com.java.system.sessionagent.conversation.domain.ContextCompaction;
@@ -28,6 +30,7 @@ import com.java.system.sessionagent.conversation.port.out.ConversationModels;
 import com.java.system.sessionagent.conversation.port.out.ConversationStore;
 import com.java.system.sessionagent.conversation.port.out.ConversationStoreFailure;
 import com.java.system.sessionagent.conversation.port.out.ConversationTelemetry;
+import com.java.system.sessionagent.conversation.port.out.JobCancellationRequestedException;
 import com.java.system.sessionagent.conversation.port.out.ModelCallFailure;
 import com.java.system.sessionagent.conversation.port.out.ModelRouteMismatchException;
 import com.java.system.sessionagent.conversation.port.out.StaleWorkClaimException;
@@ -92,16 +95,21 @@ public final class JobProcessor implements MessageJobPort {
         Assert.notNull(workGuard, "Work guard must not be null");
         ProcessingResultTracker resultTracker = new ProcessingResultTracker();
         try {
-            processClaim(claim, workGuard, resultTracker);
+            try {
+                processClaim(claim, workGuard, resultTracker);
+            } catch (ConversationStoreFailure failure) {
+                recoverStorageFailure(claim, workGuard, failure, resultTracker);
+            }
+        } catch (JobCancellationRequestedException exception) {
+            finalizeCancellation(claim, workGuard, resultTracker);
         } catch (StaleWorkClaimException exception) {
             resultTracker.ownershipLost();
-        } catch (ConversationStoreFailure failure) {
-            recoverStorageFailure(claim, workGuard, failure, resultTracker);
         }
         return resultTracker.result(workGuard);
     }
 
     private void processClaim(MessageWorkClaim claim, WorkGuard guard, ProcessingResultTracker resultTracker) {
+        checkCancellation(claim);
         Optional<ConversationModel> resolvedModel = conversationModels.resolve(claim.modelSelection());
         if (resolvedModel.isEmpty()) {
             appendRuntime(claim, guard, MODEL_UNAVAILABLE, ConversationStore.JobUpdate.COMPLETE, resultTracker);
@@ -124,6 +132,7 @@ public final class JobProcessor implements MessageJobPort {
             return;
         }
         while (guard.stillOwned()) {
+            checkCancellation(claim);
             List<SessionMessage> history = conversationStore.loadHistory(claim.sessionId());
             Map<SessionSequence, ModelContinuation> continuations = Optional.ofNullable(conversationStore.loadContinuations(claim))
                     .orElseGet(Map::of);
@@ -146,9 +155,11 @@ public final class JobProcessor implements MessageJobPort {
                 Optional<ModelContinuation> continuation;
                 ModelCallResult result;
                 long requestStartedAt = System.nanoTime();
+                checkCancellation(claim);
                 try {
                     result = conversationModel.respond(request, () -> reserveAndLogModelRequest(claim, guard, reservation,
                             activeModelDescriptor, history.size(), tools.definitions().size()), usage -> { });
+                    checkCancellation(claim);
                     reply = result.reply();
                     continuation = result.continuation();
                 } catch (BudgetExhausted exception) {
@@ -156,6 +167,7 @@ public final class JobProcessor implements MessageJobPort {
                             ConversationStore.JobUpdate.COMPLETE, resultTracker);
                     return;
                 } catch (ModelCallFailure failure) {
+                    checkCancellation(claim);
                     if (failure.kind() == ModelCallFailure.Kind.INVALID_HISTORY) {
                         logModelFailure(claim, reservation.ordinal(), failure.kind(), elapsedSince(requestStartedAt));
                         appendRuntime(claim, guard, INVALID_CONVERSATION_HISTORY,
@@ -194,13 +206,16 @@ public final class JobProcessor implements MessageJobPort {
                             ConversationStore.JobUpdate.COMPLETE, resultTracker);
                     return;
                 }
-                List<ConversationStore.MessageData> messages = toolBatch(claim, guard, ordinal, useTools, tools);
+                Optional<ConversationStore.UsageCheckpointData> usageCheckpoint = checkpoint(result, claim.modelSelection(),
+                        activeModelDescriptor, ordinal, requestShapeFingerprint,
+                        context.compaction().map(value -> value.generation()).orElse(0L));
+                List<ConversationStore.MessageData> messages = toolBatch(claim, guard, ordinal, useTools, tools,
+                        usageCheckpoint, resultTracker);
                 if (!guard.stillOwned()) {
                     return;
                 }
                 if (!appendResponse(claim, guard, messages, ConversationStore.JobUpdate.KEEP_WORKING, continuation,
-                        checkpoint(result, claim.modelSelection(), activeModelDescriptor, ordinal, requestShapeFingerprint,
-                                context.compaction().map(value -> value.generation()).orElse(0L)), resultTracker)) {
+                        usageCheckpoint, resultTracker)) {
                     return;
                 }
             }
@@ -274,6 +289,7 @@ public final class JobProcessor implements MessageJobPort {
             ContextCompaction.Reason reason,
             ProcessingResultTracker resultTracker,
             ConversationModel conversationModel) {
+        checkCancellation(claim);
         if (context.projection().isEmpty()) {
             logCompaction(claim, "compact_failure", "NO_PROJECTION", context.estimateTokens(), 0L);
             appendRuntime(claim, guard, CONTEXT_TOO_LARGE,
@@ -295,12 +311,14 @@ public final class JobProcessor implements MessageJobPort {
             summary = conversationModel.summarize(new ContextCompactionRequest(context.compaction().map(value -> value.summary()),
                     selected.history()), () -> reserveAndLogModelRequest(claim, guard, reservation, projection.model(),
                     selected.history().size(), 0));
+            checkCancellation(claim);
         } catch (BudgetExhausted exception) {
             logCompaction(claim, "compact_failure", "MODEL_LIMIT", context.estimateTokens(), projection.model().contextWindowTokens());
             appendRuntime(claim, guard, MODEL_CALL_LIMIT_REACHED,
                     ConversationStore.JobUpdate.COMPLETE, resultTracker);
             return false;
         } catch (ModelCallFailure failure) {
+            checkCancellation(claim);
             logCompaction(claim, "compact_failure", failureCategory(failure.kind()), context.estimateTokens(), projection.model().contextWindowTokens());
             return handleCompactionFailure(claim, guard, reservation, failure, resultTracker);
         }
@@ -455,6 +473,7 @@ public final class JobProcessor implements MessageJobPort {
         if (!guard.stillOwned()) {
             throw new BudgetExhausted();
         }
+        checkCancellation(claim);
         OptionalInt reserved = conversationStore.reserveModelCall(claim, maxModelCalls, clock.instant());
         if (reserved.isEmpty()) {
             throw new BudgetExhausted();
@@ -483,22 +502,37 @@ public final class JobProcessor implements MessageJobPort {
             WorkGuard guard,
             int ordinal,
             ModelReply.UseTools reply,
-            ToolSnapshot tools) {
+            ToolSnapshot tools,
+            Optional<ConversationStore.UsageCheckpointData> checkpoint,
+            ProcessingResultTracker resultTracker) {
         List<ConversationStore.MessageData> messages = new ArrayList<>();
         List<ConversationStore.ToolCallData> calls = reply.requests().stream()
                 .map(request -> new ConversationStore.ToolCallData(request.toolCallId(), request.toolName().value(), request.arguments()))
                 .toList();
         messages.add(new ConversationStore.AssistantToolCallsData(reply.message(), calls));
+        // Keep attempt-local observations reachable if a storage safe point unwinds this batch.
+        resultTracker.pendingToolBatch = Optional.of(new PendingToolBatch(messages, checkpoint));
+        boolean cancelled = false;
         for (ToolRequest request : reply.requests()) {
             if (!guard.confirmOwnership()) {
                 return List.of();
             }
-            conversationStore.updateProgress(claim,
-                    new JobProgress(JobPhase.TOOL_EXECUTION, clock.instant(), Optional.of(request.toolName().value())));
+            if (!cancelled) {
+                try {
+                    checkCancellation(claim);
+                    conversationStore.updateProgress(claim,
+                            new JobProgress(JobPhase.TOOL_EXECUTION, clock.instant(), Optional.of(request.toolName().value())));
+                } catch (JobCancellationRequestedException exception) {
+                    cancelled = true;
+                }
+            }
             if (!guard.stillOwned()) {
                 return List.of();
             }
-            messages.add(executeTool(claim, ordinal, tools, request));
+            messages.add(cancelled
+                    ? new ConversationStore.ToolObservationData(request.toolCallId(), request.toolName().value(),
+                            ToolOutput.runtimeFailure(JobCancellation.TOOL_CODE, JobCancellation.TOOL_MESSAGE).asStructuredValue())
+                    : executeTool(claim, ordinal, tools, request));
         }
         return List.copyOf(messages);
     }
@@ -558,6 +592,7 @@ public final class JobProcessor implements MessageJobPort {
             resultTracker.ownershipLost();
             return false;
         }
+        checkCancellation(claim);
         Optional<ConversationStore.MessageJobProjection> job = conversationStore.readJob(claim.messageJobId());
         if (job.isEmpty() || job.orElseThrow().retryCount() >= retryPolicy.transientRetries()) {
             return false;
@@ -592,16 +627,29 @@ public final class JobProcessor implements MessageJobPort {
             resultTracker.ownershipLost();
             return false;
         }
+        checkCancellation(claim);
         try {
             conversationStore.updateProgress(claim, new JobProgress(JobPhase.HISTORY_COMMIT, clock.instant(), Optional.empty()));
             ConversationStore.RuntimeData message = new ConversationStore.RuntimeData(failure.name(), failure.message());
-            conversationStore.append(claim, new ConversationStore.MessageBatch(List.of(message), update,
-                    Optional.empty(), Optional.empty(), Optional.of(failure)), clock.instant());
-            if (update == ConversationStore.JobUpdate.COMPLETE) {
-                resultTracker.completed();
+            Optional<PendingToolBatch> pending = resultTracker.pendingToolBatch;
+            List<ConversationStore.MessageData> messages;
+            if (pending.isPresent()) {
+                List<ConversationStore.MessageData> observations = pending.orElseThrow().messages();
+                messages = new ArrayList<>(observations.size() + 1);
+                messages.addAll(observations);
+                messages.add(message);
+            } else {
+                messages = List.of(message);
             }
-            telemetry.feedback(failure.name());
-            return guard.stillOwned();
+            ConversationStore.MessageBatch batch = new ConversationStore.MessageBatch(messages, update,
+                    Optional.empty(), pending.flatMap(PendingToolBatch::checkpoint), Optional.of(failure));
+            resultTracker.appendOutcomeUncertain = true;
+            JobStatus status = conversationStore.append(claim, batch, clock.instant());
+            resultTracker.committed(status);
+            if (status != JobStatus.CANCELLED) {
+                telemetry.feedback(failure.name());
+            }
+            return !status.isTerminal() && guard.stillOwned();
         } catch (StaleWorkClaimException exception) {
             resultTracker.ownershipLost();
             return false;
@@ -617,12 +665,21 @@ public final class JobProcessor implements MessageJobPort {
             return false;
         }
         try {
-            conversationStore.updateProgress(claim, new JobProgress(JobPhase.HISTORY_COMMIT, clock.instant(), Optional.empty()));
-            conversationStore.append(claim, new ConversationStore.MessageBatch(messages, update, continuation, checkpoint), clock.instant());
-            if (update == ConversationStore.JobUpdate.COMPLETE) {
-                resultTracker.completed();
+            boolean cancelled = conversationStore.isCancellationRequested(claim);
+            if (cancelled) {
+                update = ConversationStore.JobUpdate.CANCEL;
+                continuation = Optional.empty();
+                if (!(messages.getFirst() instanceof ConversationStore.AssistantToolCallsData)) {
+                    messages = cancellationMessages();
+                    checkpoint = Optional.empty();
+                }
             }
-            return guard.stillOwned();
+            conversationStore.updateProgress(claim, new JobProgress(JobPhase.HISTORY_COMMIT, clock.instant(), Optional.empty()));
+            ConversationStore.MessageBatch batch = new ConversationStore.MessageBatch(messages, update, continuation, checkpoint);
+            resultTracker.appendOutcomeUncertain = true;
+            JobStatus status = conversationStore.append(claim, batch, clock.instant());
+            resultTracker.committed(status);
+            return !status.isTerminal() && guard.stillOwned();
         } catch (StaleWorkClaimException exception) {
             resultTracker.ownershipLost();
             return false;
@@ -638,12 +695,20 @@ public final class JobProcessor implements MessageJobPort {
             resultTracker.ownershipLost();
             return;
         }
-        if (failure.kind() == ConversationStoreFailure.Kind.INVALID_HISTORY) {
-            appendRuntime(claim, guard, INVALID_CONVERSATION_HISTORY,
-                    ConversationStore.JobUpdate.COMPLETE, resultTracker);
+        if (resultTracker.appendOutcomeUncertain) {
+            // An append may have committed before its response failed. Never resend or replace that batch.
+            resultTracker.stateUnconfirmed();
             return;
         }
+        // Storage stopped admission before cancellation was observed; preserve that actual stop reason.
+        resultTracker.pendingToolBatch.ifPresent(PendingToolBatch::stopForStorageFailure);
         try {
+            checkCancellation(claim);
+            if (failure.kind() == ConversationStoreFailure.Kind.INVALID_HISTORY) {
+                appendRuntime(claim, guard, INVALID_CONVERSATION_HISTORY,
+                        ConversationStore.JobUpdate.COMPLETE, resultTracker);
+                return;
+            }
             Optional<ConversationStore.MessageJobProjection> job = conversationStore.readJob(claim.messageJobId());
             if (failure.kind() != ConversationStoreFailure.Kind.CONTRACT
                     && job.isPresent()
@@ -662,7 +727,34 @@ public final class JobProcessor implements MessageJobPort {
             }
             appendRuntime(claim, guard, JobFailure.STORAGE_UNAVAILABLE,
                     ConversationStore.JobUpdate.COMPLETE, resultTracker);
+        } catch (JobCancellationRequestedException exception) {
+            throw exception;
+        } catch (StaleWorkClaimException exception) {
+            resultTracker.ownershipLost();
         } catch (RuntimeException ignored) {
+            resultTracker.stateUnconfirmed();
+        }
+    }
+
+    private void checkCancellation(MessageWorkClaim claim) {
+        if (conversationStore.isCancellationRequested(claim)) {
+            throw new JobCancellationRequestedException();
+        }
+    }
+
+    private static List<ConversationStore.MessageData> cancellationMessages() {
+        return List.of(new ConversationStore.RuntimeData(JobCancellation.CODE, JobCancellation.MESSAGE));
+    }
+
+    private void finalizeCancellation(MessageWorkClaim claim, WorkGuard guard, ProcessingResultTracker resultTracker) {
+        try {
+            Optional<PendingToolBatch> pending = resultTracker.pendingToolBatch;
+            List<ConversationStore.MessageData> messages = pending.map(PendingToolBatch::cancelUnstarted).orElseGet(JobProcessor::cancellationMessages);
+            appendResponse(claim, guard, messages, ConversationStore.JobUpdate.CANCEL,
+                    Optional.empty(), pending.flatMap(PendingToolBatch::checkpoint), resultTracker);
+        } catch (StaleWorkClaimException exception) {
+            resultTracker.ownershipLost();
+        } catch (ConversationStoreFailure failure) {
             resultTracker.stateUnconfirmed();
         }
     }
@@ -783,12 +875,43 @@ public final class JobProcessor implements MessageJobPort {
     private record CompactionBoundary(SessionSequence boundary, List<SessionMessage> history, List<SessionMessage> suffix) {
     }
 
+    private record PendingToolBatch(
+            List<ConversationStore.MessageData> messages,
+            Optional<ConversationStore.UsageCheckpointData> checkpoint) {
+
+        private List<ConversationStore.MessageData> cancelUnstarted() {
+            markUnstarted(JobCancellation.TOOL_CODE, JobCancellation.TOOL_MESSAGE);
+            return List.copyOf(messages);
+        }
+
+        private void stopForStorageFailure() {
+            markUnstarted("TOOL_NOT_EXECUTED", "Tool was not executed because Runtime storage failed.");
+        }
+
+        private void markUnstarted(String code, String message) {
+            ConversationStore.AssistantToolCallsData assistant = (ConversationStore.AssistantToolCallsData) messages.getFirst();
+            for (int index = messages.size() - 1; index < assistant.calls().size(); index++) {
+                ConversationStore.ToolCallData call = assistant.calls().get(index);
+                messages.add(new ConversationStore.ToolObservationData(call.toolCallId(), call.toolName(),
+                        ToolOutput.runtimeFailure(code, message).asStructuredValue()));
+            }
+        }
+    }
+
     private static final class ProcessingResultTracker {
 
         private Optional<MessageJobProcessingResult> result = Optional.empty();
+        private Optional<PendingToolBatch> pendingToolBatch = Optional.empty();
+        private boolean appendOutcomeUncertain;
 
-        private void completed() {
-            result = Optional.of(MessageJobProcessingResult.COMPLETED);
+        private void committed(JobStatus status) {
+            appendOutcomeUncertain = false;
+            pendingToolBatch = Optional.empty();
+            if (status == JobStatus.CANCELLED) {
+                result = Optional.of(MessageJobProcessingResult.CANCELLED);
+            } else if (status == JobStatus.DONE) {
+                result = Optional.of(MessageJobProcessingResult.COMPLETED);
+            }
         }
 
         private void retryScheduled() {

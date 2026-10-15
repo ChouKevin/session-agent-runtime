@@ -2,6 +2,8 @@ package com.java.system.sessionagent.storage.adapter.postgres;
 
 import com.java.system.sessionagent.conversation.domain.IncomingMessage;
 import com.java.system.sessionagent.conversation.domain.JobStatus;
+import com.java.system.sessionagent.conversation.domain.JobCancellation;
+import com.java.system.sessionagent.conversation.domain.JobFailure;
 import com.java.system.sessionagent.conversation.domain.JobPhase;
 import com.java.system.sessionagent.conversation.domain.JobProgress;
 import com.java.system.sessionagent.conversation.domain.MessageRole;
@@ -133,6 +135,42 @@ class PostgresConversationCommitPostgresIT {
         assertThat(roleChecks).contains("USER", "TOOL", "ASSISTANT", "ASSISTANT_TOOL_CALLS", "RUNTIME").doesNotContain("FEEDBACK");
         assertThat(jobChecks).contains("model_calls >= 0").doesNotContain("between 0 and 12");
         assertThat(compactionChecks).contains("THRESHOLD", "OVERFLOW").doesNotContain("PROACTIVE");
+    }
+
+    @Test
+    void cancellation_retains_complete_tool_batches_and_their_usage_boundary_but_discards_continuations() {
+        ConversationStore store = store();
+        MessageReceipt receipt = receive(store, new IncomingMessage("cancel-thread", "alice", "batch", "hello"));
+        MessageWorkClaim claim = store.claimNext("worker", Duration.ofSeconds(30)).orElseThrow();
+        ModelContinuation continuation = new ModelContinuation(new ModelRouteId("test"), "opaque", new byte[] {1});
+        store.append(claim, new ConversationStore.MessageBatch(List.of(
+                new ConversationStore.AssistantToolCallsData(Optional.empty(), List.of(
+                        new ConversationStore.ToolCallData(new ToolCallId("prior"), "first", Map.of()))),
+                new ConversationStore.ToolObservationData(new ToolCallId("prior"), "first", Map.of("result", "prior"))),
+                ConversationStore.JobUpdate.KEEP_WORKING, Optional.of(continuation)), NOW);
+        store.requestCancellation(receipt.messageJobId());
+        ModelDescriptor descriptor = new ModelDescriptor(new ModelRouteId("test"), "fake", 32_000);
+        String shape = "b".repeat(64);
+
+        assertThat(store.append(claim, new ConversationStore.MessageBatch(List.of(
+                new ConversationStore.AssistantToolCallsData(Optional.of("batch text"), List.of(
+                        new ConversationStore.ToolCallData(new ToolCallId("current"), "second", Map.of()))),
+                new ConversationStore.ToolObservationData(new ToolCallId("current"), "second", Map.of("result", "actual")),
+                new ConversationStore.RuntimeData("MODEL_UNAVAILABLE", "superseded failure")),
+                ConversationStore.JobUpdate.KEEP_WORKING, Optional.of(continuation), Optional.of(
+                        new ConversationStore.UsageCheckpointData(TEST_SELECTION, descriptor, 2, 20, 10, 30, shape, 0)),
+                Optional.of(JobFailure.MODEL_UNAVAILABLE)), NOW))
+                .isEqualTo(JobStatus.CANCELLED);
+
+        List<SessionMessage> history = store().loadHistory(receipt.sessionId());
+        assertThat(history).extracting(SessionMessage::role).containsExactly(MessageRole.USER,
+                MessageRole.ASSISTANT_TOOL_CALLS, MessageRole.TOOL, MessageRole.ASSISTANT_TOOL_CALLS,
+                MessageRole.TOOL, MessageRole.RUNTIME);
+        assertThat(((RuntimeMessage) history.getLast()).code()).isEqualTo(JobCancellation.CODE);
+        assertThat(store.loadUsageCheckpoint(receipt.sessionId(), TEST_SELECTION, descriptor, shape, 0))
+                .hasValueSatisfying(checkpoint -> assertThat(checkpoint.responseBoundary()).isEqualTo(history.get(3).sequence()));
+        assertThat(jdbcTemplate.queryForObject("select count(*) from model_continuation", Integer.class)).isZero();
+        assertThat(store.readJob(receipt.messageJobId()).orElseThrow().failure()).isEmpty();
     }
 
     @Test

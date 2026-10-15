@@ -57,7 +57,7 @@ class MessageJobRecoveryTest {
 
     @Test
     void does_not_invoke_a_tool_when_ownership_is_revoked_during_progress_publication() {
-        ConversationStore store = mock(ConversationStore.class);
+        ConversationStore store = mockStore();
         MessageWorkClaim claim = claim();
         when(store.loadHistory(claim.sessionId())).thenReturn(List.of(user()));
         when(store.reserveModelCall(eq(claim), eq(2), any(Instant.class))).thenReturn(OptionalInt.of(1));
@@ -88,7 +88,7 @@ class MessageJobRecoveryTest {
 
     @Test
     void does_not_call_the_provider_when_reservation_returns_after_ownership_is_revoked() throws Exception {
-        ConversationStore store = mock(ConversationStore.class);
+        ConversationStore store = mockStore();
         MessageWorkClaim claim = claim();
         when(store.loadHistory(claim.sessionId())).thenReturn(List.of(user()));
         CountDownLatch reservationStarted = new CountDownLatch(1);
@@ -130,7 +130,7 @@ class MessageJobRecoveryTest {
 
     @Test
     void completes_invalid_history_without_a_reservation_or_reclaimable_work() {
-        ConversationStore store = mock(ConversationStore.class);
+        ConversationStore store = mockStore();
         MessageWorkClaim claim = claim();
         when(store.loadHistory(claim.sessionId())).thenReturn(List.of(user()));
         ConversationModel model = model(TEST_ROUTE_ID, (request, reservation, usage) -> { throw ModelCallFailure.invalidHistory(); });
@@ -144,7 +144,7 @@ class MessageJobRecoveryTest {
 
     @Test
     void completes_invalid_persisted_native_history_without_reserving_or_calling_the_provider() {
-        ConversationStore store = mock(ConversationStore.class);
+        ConversationStore store = mockStore();
         MessageWorkClaim claim = claim();
         when(store.loadHistory(claim.sessionId())).thenThrow(ConversationStoreFailure.invalidHistory(
                 new IllegalArgumentException("Malformed native call history")));
@@ -161,12 +161,12 @@ class MessageJobRecoveryTest {
 
     @Test
     void does_not_report_a_storage_retry_when_the_claim_guarded_transition_is_rejected() {
-        ConversationStore store = mock(ConversationStore.class);
+        ConversationStore store = mockStore();
         MessageWorkClaim claim = claim();
         when(store.loadHistory(claim.sessionId())).thenThrow(ConversationStoreFailure.transientFailure(
                 new IllegalStateException("storage unavailable")));
         when(store.readJob(claim.messageJobId())).thenReturn(Optional.of(new ConversationStore.MessageJobProjection(
-                claim.messageJobId(), claim.sessionId(), JobStatus.WORKING, 0, 0, Optional.empty(), Optional.empty())));
+                claim.messageJobId(), claim.sessionId(), JobStatus.WORKING, 0, 0, Optional.empty(), Optional.empty(), Optional.empty())));
         when(store.scheduleRetry(eq(claim), any(Duration.class), eq(JobFailure.STORAGE_UNAVAILABLE))).thenReturn(false);
         ConversationModel model = model(TEST_ROUTE_ID, (request, reservation, usage) -> {
             throw new AssertionError("Provider must not be called after the storage failure");
@@ -190,12 +190,12 @@ class MessageJobRecoveryTest {
 
     @Test
     void reports_retry_scheduled_only_after_the_claim_guarded_storage_transition_succeeds() {
-        ConversationStore store = mock(ConversationStore.class);
+        ConversationStore store = mockStore();
         MessageWorkClaim claim = claim();
         when(store.loadHistory(claim.sessionId())).thenThrow(ConversationStoreFailure.transientFailure(
                 new IllegalStateException("storage unavailable")));
         when(store.readJob(claim.messageJobId())).thenReturn(Optional.of(new ConversationStore.MessageJobProjection(
-                claim.messageJobId(), claim.sessionId(), JobStatus.WORKING, 0, 0, Optional.empty(), Optional.empty())));
+                claim.messageJobId(), claim.sessionId(), JobStatus.WORKING, 0, 0, Optional.empty(), Optional.empty(), Optional.empty())));
         when(store.scheduleRetry(eq(claim), any(Duration.class), eq(JobFailure.STORAGE_UNAVAILABLE))).thenReturn(true);
         ConversationModel model = model(TEST_ROUTE_ID, (request, reservation, usage) -> {
             throw new AssertionError("Provider must not be called after the storage failure");
@@ -209,7 +209,7 @@ class MessageJobRecoveryTest {
 
     @Test
     void reports_ownership_lost_when_the_claim_fence_is_stale_before_processing() {
-        ConversationStore store = mock(ConversationStore.class);
+        ConversationStore store = mockStore();
         MessageWorkClaim claim = claim();
         ConversationModel model = model(TEST_ROUTE_ID, (request, reservation, usage) -> {
             throw new AssertionError("Provider must not be called for a stale claim");
@@ -224,7 +224,7 @@ class MessageJobRecoveryTest {
 
     @Test
     void completes_model_unavailable_without_provider_or_tool_calls_when_the_job_route_differs() {
-        ConversationStore store = mock(ConversationStore.class);
+        ConversationStore store = mockStore();
         MessageWorkClaim claim = claim();
         ConversationModel model = mock(ConversationModel.class);
         when(model.routeId()).thenReturn(new ModelRouteId("codex-primary"));
@@ -242,7 +242,7 @@ class MessageJobRecoveryTest {
 
     @Test
     void completes_model_unavailable_without_provider_or_tool_calls_when_the_persisted_fingerprint_is_no_longer_configured() {
-        ConversationStore store = mock(ConversationStore.class);
+        ConversationStore store = mockStore();
         MessageWorkClaim claim = claim();
         ConversationModels models = new ConversationModels() {
             @Override
@@ -275,7 +275,7 @@ class MessageJobRecoveryTest {
 
     @Test
     void completes_model_unavailable_without_provider_or_tool_calls_when_a_loaded_continuation_route_differs() {
-        ConversationStore store = mock(ConversationStore.class);
+        ConversationStore store = mockStore();
         MessageWorkClaim claim = claim();
         ConversationModel model = mock(ConversationModel.class);
         ModelRouteId routeId = new ModelRouteId("codex-primary");
@@ -296,7 +296,7 @@ class MessageJobRecoveryTest {
 
     @Test
     void completes_model_unavailable_without_tools_or_persisting_a_returned_foreign_continuation() {
-        ConversationStore store = mock(ConversationStore.class);
+        ConversationStore store = mockStore();
         MessageWorkClaim claim = claim();
         ConversationModel model = mock(ConversationModel.class);
         ModelRouteId routeId = new ModelRouteId("codex-primary");
@@ -328,7 +328,7 @@ class MessageJobRecoveryTest {
 
     @Test
     void completes_terminal_continuation_replay_failure_once_without_reserving_or_executing_tools() {
-        ConversationStore store = mock(ConversationStore.class);
+        ConversationStore store = mockStore();
         MessageWorkClaim claim = claim();
         when(store.loadHistory(claim.sessionId())).thenReturn(List.of(user()));
         ConversationModel model = model(TEST_ROUTE_ID, (request, reservation, usage) -> { throw ModelCallFailure.terminal(); });

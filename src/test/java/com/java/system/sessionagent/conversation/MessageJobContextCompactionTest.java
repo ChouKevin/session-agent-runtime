@@ -44,7 +44,6 @@ import static com.java.system.sessionagent.conversation.MessageJobTestFixtures.*
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -52,7 +51,7 @@ class MessageJobContextCompactionTest {
 
     @Test
     void compacts_a_complete_tool_batch_before_the_ordinary_request_and_keeps_raw_history() {
-        ConversationStore store = mock(ConversationStore.class);
+        ConversationStore store = mockStore();
         MessageWorkClaim claim = claim();
         List<SessionMessage> rawHistory = List.of(
                 new UserMessage(claim.sessionId(), new SessionSequence(1), Optional.of(new MessageJobId("job-old")), Instant.EPOCH,
@@ -107,7 +106,7 @@ class MessageJobContextCompactionTest {
 
     @Test
     void completes_context_too_large_without_persisting_a_threshold_compaction_when_its_summary_remains_oversized() {
-        ConversationStore store = mock(ConversationStore.class);
+        ConversationStore store = mockStore();
         MessageWorkClaim claim = claim();
         List<SessionMessage> history = List.of(
                 new UserMessage(claim.sessionId(), new SessionSequence(1), Optional.of(new MessageJobId("job-old")), Instant.EPOCH,
@@ -153,7 +152,7 @@ class MessageJobContextCompactionTest {
 
     @Test
     void compacts_the_current_jobs_complete_tool_batch_before_continuing() {
-        ConversationStore store = mock(ConversationStore.class);
+        ConversationStore store = mockStore();
         MessageWorkClaim claim = claim();
         ModelContinuation continuation = new ModelContinuation(TEST_ROUTE_ID, "opaque-v1", new byte[] {1, 2, 3});
         UserMessage currentUser = user();
@@ -177,7 +176,7 @@ class MessageJobContextCompactionTest {
         Mockito.doAnswer(invocation -> {
             ConversationStore.MessageBatch batch = invocation.getArgument(1);
             continuations.set(batch.continuation().map(value -> Map.of(new SessionSequence(2), value)).orElseGet(Map::of));
-            return null;
+            return appendedStatus(batch);
         }).when(store).append(eq(claim), any(ConversationStore.MessageBatch.class), any(Instant.class));
         Mockito.doAnswer(invocation -> {
             ConversationStore.CompactionData data = invocation.getArgument(1);
@@ -231,7 +230,7 @@ class MessageJobContextCompactionTest {
 
     @Test
     void does_not_compact_an_incomplete_current_job_tool_batch() {
-        ConversationStore store = mock(ConversationStore.class);
+        ConversationStore store = mockStore();
         MessageWorkClaim claim = claim();
         List<SessionMessage> incompleteHistory = List.of(
                 user(),
@@ -266,7 +265,7 @@ class MessageJobContextCompactionTest {
 
     @Test
     void recovers_one_context_overflow_with_a_persisted_compaction_then_retries_once() {
-        ConversationStore store = mock(ConversationStore.class);
+        ConversationStore store = mockStore();
         MessageWorkClaim claim = claim();
         List<SessionMessage> history = List.of(
                 new UserMessage(claim.sessionId(), new SessionSequence(1), Optional.of(new MessageJobId("job-old")), Instant.EPOCH,
