@@ -7,6 +7,9 @@ import com.java.system.sessionagent.conversation.domain.AssistantMessage;
 import com.java.system.sessionagent.conversation.domain.AssistantToolCallsMessage;
 import com.java.system.sessionagent.conversation.domain.IncomingMessage;
 import com.java.system.sessionagent.conversation.domain.JobStatus;
+import com.java.system.sessionagent.conversation.domain.JobFailure;
+import com.java.system.sessionagent.conversation.domain.JobPhase;
+import com.java.system.sessionagent.conversation.domain.JobProgress;
 import com.java.system.sessionagent.conversation.domain.MessageJobId;
 import com.java.system.sessionagent.conversation.domain.MessageReceipt;
 import com.java.system.sessionagent.conversation.domain.MessageRole;
@@ -396,7 +399,7 @@ public final class PostgresConversationStore implements ConversationStore {
                     requiredCompaction.model().contextWindowTokens(), requiredCompaction.requestShapeFingerprint(),
                     requiredCompaction.estimateBeforeTokens(), requiredCompaction.estimateAfterTokens(), timestamp(requiredCreatedAt));
             mapper.deleteCoveredContinuations(messageJobId(requiredClaim), sessionId, requiredCompaction.coveredThrough().value());
-            requireLiveClaim(requiredClaim);
+            updateProgress(requiredClaim, new JobProgress(JobPhase.PREPARING, clock.instant(), Optional.empty()));
             return Boolean.TRUE;
         });
     }
@@ -453,8 +456,24 @@ public final class PostgresConversationStore implements ConversationStore {
         Objects.requireNonNull(now, "Current time must not be null");
         try {
             return mapper.reserveModelCall(messageJobId(requiredClaim), sessionId(requiredClaim), requiredClaim.workerId(),
-                    requiredClaim.claimNumber(), maxModelCalls).stream().findFirst().map(value -> OptionalInt.of(value))
+                    requiredClaim.claimNumber(), maxModelCalls, timestamp(now)).stream().findFirst().map(value -> OptionalInt.of(value))
                     .orElseGet(OptionalInt::empty);
+        } catch (RuntimeException exception) {
+            throw translate(exception);
+        }
+    }
+
+    @Override
+    public void updateProgress(MessageWorkClaim claim, JobProgress progress) {
+        MessageWorkClaim requiredClaim = Objects.requireNonNull(claim, "Message work claim must not be null");
+        JobProgress requiredProgress = Objects.requireNonNull(progress, "Job progress must not be null");
+        try {
+            int rows = mapper.updateProgress(messageJobId(requiredClaim), sessionId(requiredClaim),
+                    requiredClaim.workerId(), requiredClaim.claimNumber(), requiredProgress.phase().name(),
+                    timestamp(requiredProgress.startedAt()), requiredProgress.toolName().orElse(null));
+            if (rows != 1) {
+                throw new StaleWorkClaimException();
+            }
         } catch (RuntimeException exception) {
             throw translate(exception);
         }
@@ -509,20 +528,28 @@ public final class PostgresConversationStore implements ConversationStore {
             }
             if (requiredBatch.jobUpdate() == JobUpdate.COMPLETE) {
                 mapper.deleteContinuations(messageJobId(requiredClaim), sessionId);
-                completeJob(requiredClaim, clock.instant());
+                completeJob(requiredClaim, clock.instant(), requiredBatch.failure());
+            } else {
+                int rows = mapper.finishWorkingBatch(messageJobId(requiredClaim), sessionId,
+                        requiredClaim.workerId(), requiredClaim.claimNumber(), timestamp(clock.instant()),
+                        requiredBatch.failure().map(JobFailure::name).orElse(null));
+                if (rows != 1) {
+                    throw new StaleWorkClaimException();
+                }
             }
             return Boolean.TRUE;
         });
     }
 
     @Override
-    public boolean scheduleRetry(MessageWorkClaim claim, Duration retryDelay) {
+    public boolean scheduleRetry(MessageWorkClaim claim, Duration retryDelay, JobFailure failure) {
         MessageWorkClaim requiredClaim = Objects.requireNonNull(claim, "Message work claim must not be null");
         Duration requiredDelay = Objects.requireNonNull(retryDelay, "Retry delay must not be null");
+        JobFailure requiredFailure = Objects.requireNonNull(failure, "Job failure must not be null");
         Assert.isTrue(!requiredDelay.isNegative(), "Retry delay must not be negative");
         try {
             return mapper.scheduleRetry(requiredDelay.toMillis(), messageJobId(requiredClaim), sessionId(requiredClaim),
-                    requiredClaim.workerId(), requiredClaim.claimNumber()) == 1;
+                    requiredClaim.workerId(), requiredClaim.claimNumber(), requiredFailure.name()) == 1;
         } catch (RuntimeException exception) {
             throw translate(exception);
         }
@@ -550,9 +577,9 @@ public final class PostgresConversationStore implements ConversationStore {
         mapper.insertSessionMessage(sessionId, sequence, jobId, role, timestamp(createdAt));
     }
 
-    private void completeJob(MessageWorkClaim claim, Instant completedAt) {
+    private void completeJob(MessageWorkClaim claim, Instant completedAt, Optional<JobFailure> failure) {
         int rows = mapper.completeJob(timestamp(completedAt), messageJobId(claim), sessionId(claim), claim.workerId(),
-                claim.claimNumber());
+                claim.claimNumber(), failure.map(JobFailure::name).orElse(null));
         if (rows != 1) {
             throw new StaleWorkClaimException();
         }
@@ -614,10 +641,12 @@ public final class PostgresConversationStore implements ConversationStore {
     public Optional<MessageJobProjection> readJob(MessageJobId messageJobId) {
         MessageJobId requiredMessageJobId = Objects.requireNonNull(messageJobId, "Message job ID must not be null");
         try {
-            PostgresConversationMapper.MessageJobEntity job = mapper.selectById(UUID.fromString(requiredMessageJobId.value()));
-            return Optional.ofNullable(job).map(value -> new MessageJobProjection(
-                    new MessageJobId(value.getMessageJobId().toString()), new SessionId(value.getSessionId().toString()),
-                    JobStatus.valueOf(value.getStatus()), value.getRetryCount(), value.getModelCalls()));
+            return mapper.readJob(UUID.fromString(requiredMessageJobId.value())).stream().findFirst()
+                    .map(row -> new MessageJobProjection(
+                            new MessageJobId(row.messageJobId().toString()), new SessionId(row.sessionId().toString()),
+                            JobStatus.valueOf(row.status()), row.retryCount(), row.modelCalls(),
+                            storedProgress(row.phase(), row.phaseStartedAt(), row.currentToolName()),
+                            Optional.ofNullable(row.failureCode()).map(JobFailure::valueOf)));
         } catch (RuntimeException exception) {
             throw translate(exception);
         }
@@ -633,7 +662,8 @@ public final class PostgresConversationStore implements ConversationStore {
                 if (storedJobId.isPresent()) {
                     currentJob = Optional.of(new MessageJobProjection(new MessageJobId(storedJobId.orElseThrow().toString()),
                             new SessionId(row.sessionId().toString()), JobStatus.valueOf(row.status()), row.retryCount(),
-                            row.modelCalls()));
+                            row.modelCalls(), storedProgress(row.phase(), row.phaseStartedAt(), row.currentToolName()),
+                            Optional.ofNullable(row.failureCode()).map(JobFailure::valueOf)));
                 }
                 return new SessionProjection(new SessionId(row.sessionId().toString()), row.createdAt().toInstant(), currentJob,
                         row.selectedModel());
@@ -641,6 +671,11 @@ public final class PostgresConversationStore implements ConversationStore {
         } catch (RuntimeException exception) {
             throw translate(exception);
         }
+    }
+
+    private static Optional<JobProgress> storedProgress(String phase, OffsetDateTime startedAt, String toolName) {
+        return Optional.ofNullable(phase).map(value -> new JobProgress(
+                JobPhase.valueOf(value), startedAt.toInstant(), Optional.ofNullable(toolName)));
     }
 
     private UUID messageJobId(MessageWorkClaim claim) {

@@ -2,6 +2,8 @@ package com.java.system.sessionagent.storage.adapter.postgres;
 
 import com.java.system.sessionagent.conversation.domain.IncomingMessage;
 import com.java.system.sessionagent.conversation.domain.JobStatus;
+import com.java.system.sessionagent.conversation.domain.JobPhase;
+import com.java.system.sessionagent.conversation.domain.JobProgress;
 import com.java.system.sessionagent.conversation.domain.MessageRole;
 import com.java.system.sessionagent.conversation.domain.MessageReceipt;
 import com.java.system.sessionagent.conversation.domain.MessageWorkClaim;
@@ -126,7 +128,8 @@ class PostgresConversationCommitPostgresIT {
                 "context_usage_checkpoint", "session_compaction", "slack_thread_binding", "slack_event_receipt", "slack_message_receipt",
                 "slack_delivery", "slack_delivery_part");
         assertThat(observationColumns).containsExactlyInAnyOrder("session_id", "sequence", "role", "tool_call_id", "tool_name", "output");
-        assertThat(jobColumns).contains("model_route_id").doesNotContain("reply_sequence");
+        assertThat(jobColumns).contains("model_route_id", "phase", "phase_started_at", "current_tool_name", "failure_code")
+                .doesNotContain("reply_sequence");
         assertThat(roleChecks).contains("USER", "TOOL", "ASSISTANT", "ASSISTANT_TOOL_CALLS", "RUNTIME").doesNotContain("FEEDBACK");
         assertThat(jobChecks).contains("model_calls >= 0").doesNotContain("between 0 and 12");
         assertThat(compactionChecks).contains("THRESHOLD", "OVERFLOW").doesNotContain("PROACTIVE");
@@ -228,10 +231,15 @@ class PostgresConversationCommitPostgresIT {
         ConversationStore.CompactionData compact = new ConversationStore.CompactionData(1,
                 com.java.system.sessionagent.conversation.domain.ContextCompaction.Reason.OVERFLOW, "historical summary",
                 new SessionSequence(1), descriptor, "a".repeat(64), 100, 10);
+        store.updateProgress(claim, new JobProgress(JobPhase.HISTORY_COMMIT, NOW, Optional.empty()));
+        assertThat(store().readJob(receipt.messageJobId()).orElseThrow().progress())
+                .contains(new JobProgress(JobPhase.HISTORY_COMMIT, NOW, Optional.empty()));
 
         store.compact(claim, compact, NOW);
 
         ConversationStore restarted = store();
+        assertThat(restarted.readJob(receipt.messageJobId()).orElseThrow().progress())
+                .contains(new JobProgress(JobPhase.PREPARING, NOW, Optional.empty()));
         assertThat(restarted.loadHistory(receipt.sessionId())).extracting(message -> message.sequence().value()).containsExactly(1L);
         assertThat(restarted.loadCompaction(receipt.sessionId())).hasValueSatisfying(value -> {
             assertThat(value.summary().text()).isEqualTo("historical summary");

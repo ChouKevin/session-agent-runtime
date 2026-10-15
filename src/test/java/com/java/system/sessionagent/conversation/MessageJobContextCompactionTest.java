@@ -148,9 +148,7 @@ class MessageJobContextCompactionTest {
         verify(store, Mockito.never()).compact(any(), any(), any());
         ArgumentCaptor<ConversationStore.MessageBatch> batch = ArgumentCaptor.forClass(ConversationStore.MessageBatch.class);
         verify(store).append(eq(claim), batch.capture(), any(Instant.class));
-        assertThat(batch.getValue()).isEqualTo(new ConversationStore.MessageBatch(List.of(
-                new ConversationStore.RuntimeData("CONTEXT_TOO_LARGE", "Runtime model context is too large.")),
-                ConversationStore.JobUpdate.COMPLETE));
+        assertTerminalFailure(batch.getValue(), "CONTEXT_TOO_LARGE");
     }
 
     @Test
@@ -263,9 +261,7 @@ class MessageJobContextCompactionTest {
         verify(store, Mockito.never()).compact(any(), any(), any());
         ArgumentCaptor<ConversationStore.MessageBatch> batch = ArgumentCaptor.forClass(ConversationStore.MessageBatch.class);
         verify(store).append(eq(claim), batch.capture(), any(Instant.class));
-        assertThat(batch.getValue()).isEqualTo(new ConversationStore.MessageBatch(List.of(
-                new ConversationStore.RuntimeData("CONTEXT_TOO_LARGE", "Runtime model context is too large.")),
-                ConversationStore.JobUpdate.COMPLETE));
+        assertTerminalFailure(batch.getValue(), "CONTEXT_TOO_LARGE");
     }
 
     @Test

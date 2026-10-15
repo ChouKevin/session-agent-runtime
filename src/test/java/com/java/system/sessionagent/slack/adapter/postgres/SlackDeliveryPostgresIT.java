@@ -448,9 +448,26 @@ class SlackDeliveryPostgresIT {
         IncomingMessage message = new IncomingMessage(IncomingMessageSource.SLACK, "v2-session", "U1", "v2-source",
                 "v2 request");
         MessageReceipt receipt = conversationStore.receive(message, models.defaultSelection(), models);
-        completeNextWithTerminalRuntime(conversationStore);
         UUID sessionId = UUID.fromString(receipt.sessionId().value());
         UUID messageJobId = UUID.fromString(receipt.messageJobId().value());
+        // Seed the V2 contract directly; current job processing requires the latest schema.
+        jdbcTemplate.update("""
+                with allocated as (
+                    update conversation_session set next_sequence = next_sequence + 1
+                    where session_id = ?
+                    returning session_id, next_sequence - 1 as sequence
+                ), event as (
+                    insert into session_message(session_id, sequence, message_job_id, role, created_at)
+                    select session_id, sequence, ?, 'RUNTIME', clock_timestamp() from allocated
+                    returning session_id, sequence
+                )
+                insert into runtime_message(session_id, sequence, code, message)
+                select session_id, sequence, 'MODEL_UNAVAILABLE', 'Runtime terminal response.' from event
+                """, sessionId, messageJobId);
+        jdbcTemplate.update("""
+                update message_job set status = 'DONE', completed_at = clock_timestamp()
+                where message_job_id = ?
+                """, messageJobId);
         Long terminalSequence = jdbcTemplate.queryForObject("""
                 select sequence from session_message
                 where session_id = ? and message_job_id = ? and role = 'RUNTIME'

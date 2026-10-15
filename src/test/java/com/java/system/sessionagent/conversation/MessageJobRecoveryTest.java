@@ -5,6 +5,9 @@ import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
 import com.java.system.sessionagent.conversation.application.JobProcessor;
 import com.java.system.sessionagent.conversation.domain.JobStatus;
+import com.java.system.sessionagent.conversation.domain.JobFailure;
+import com.java.system.sessionagent.conversation.domain.JobPhase;
+import com.java.system.sessionagent.conversation.domain.JobProgress;
 import com.java.system.sessionagent.conversation.domain.MessageWorkClaim;
 import com.java.system.sessionagent.conversation.domain.ModelCallResult;
 import com.java.system.sessionagent.conversation.domain.ModelContinuation;
@@ -51,6 +54,37 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class MessageJobRecoveryTest {
+
+    @Test
+    void does_not_invoke_a_tool_when_ownership_is_revoked_during_progress_publication() {
+        ConversationStore store = mock(ConversationStore.class);
+        MessageWorkClaim claim = claim();
+        when(store.loadHistory(claim.sessionId())).thenReturn(List.of(user()));
+        when(store.reserveModelCall(eq(claim), eq(2), any(Instant.class))).thenReturn(OptionalInt.of(1));
+        AtomicBoolean owned = new AtomicBoolean(true);
+        Mockito.doAnswer(invocation -> {
+            JobProgress progress = invocation.getArgument(1);
+            if (progress.phase() == JobPhase.TOOL_EXECUTION) {
+                owned.set(false);
+            }
+            return null;
+        }).when(store).updateProgress(eq(claim), any(JobProgress.class));
+        ConversationModel model = model(TEST_ROUTE_ID, (request, reservation, usage) -> {
+            reservation.reserve();
+            return result(new ModelReply.UseTools(Optional.empty(), List.of(request("call-1", "first"))));
+        });
+        AtomicInteger toolCalls = new AtomicInteger();
+        ToolCatalog catalog = () -> new ToolSnapshot(List.of(binding("first", arguments -> {
+            toolCalls.incrementAndGet();
+            return new ToolOutput(false, Map.of("value", 1));
+        })));
+
+        MessageJobProcessingResult result = service(store, model, catalog).process(claim, owned::get);
+
+        assertThat(result).isEqualTo(MessageJobProcessingResult.OWNERSHIP_LOST);
+        assertThat(toolCalls).hasValue(0);
+        verify(store, Mockito.never()).append(any(), any(), any());
+    }
 
     @Test
     void does_not_call_the_provider_when_reservation_returns_after_ownership_is_revoked() throws Exception {
@@ -105,9 +139,7 @@ class MessageJobRecoveryTest {
 
         ArgumentCaptor<ConversationStore.MessageBatch> batch = ArgumentCaptor.forClass(ConversationStore.MessageBatch.class);
         verify(store).append(eq(claim), batch.capture(), any(Instant.class));
-        assertThat(batch.getValue()).isEqualTo(new ConversationStore.MessageBatch(List.of(
-                new ConversationStore.RuntimeData("INVALID_CONVERSATION_HISTORY", "Runtime conversation history is invalid.")),
-                ConversationStore.JobUpdate.COMPLETE));
+        assertTerminalFailure(batch.getValue(), "INVALID_CONVERSATION_HISTORY");
     }
 
     @Test
@@ -124,9 +156,7 @@ class MessageJobRecoveryTest {
         verify(store).append(eq(claim), batch.capture(), any(Instant.class));
         verify(store, Mockito.never()).reserveModelCall(any(), any(Integer.class), any(Instant.class));
         verify(model, Mockito.never()).respond(any(), any(), any());
-        assertThat(batch.getValue()).isEqualTo(new ConversationStore.MessageBatch(List.of(
-                new ConversationStore.RuntimeData("INVALID_CONVERSATION_HISTORY", "Runtime conversation history is invalid.")),
-                ConversationStore.JobUpdate.COMPLETE));
+        assertTerminalFailure(batch.getValue(), "INVALID_CONVERSATION_HISTORY");
     }
 
     @Test
@@ -136,8 +166,8 @@ class MessageJobRecoveryTest {
         when(store.loadHistory(claim.sessionId())).thenThrow(ConversationStoreFailure.transientFailure(
                 new IllegalStateException("storage unavailable")));
         when(store.readJob(claim.messageJobId())).thenReturn(Optional.of(new ConversationStore.MessageJobProjection(
-                claim.messageJobId(), claim.sessionId(), JobStatus.WORKING, 0, 0)));
-        when(store.scheduleRetry(eq(claim), any(Duration.class))).thenReturn(false);
+                claim.messageJobId(), claim.sessionId(), JobStatus.WORKING, 0, 0, Optional.empty(), Optional.empty())));
+        when(store.scheduleRetry(eq(claim), any(Duration.class), eq(JobFailure.STORAGE_UNAVAILABLE))).thenReturn(false);
         ConversationModel model = model(TEST_ROUTE_ID, (request, reservation, usage) -> {
             throw new AssertionError("Provider must not be called after the storage failure");
         });
@@ -153,7 +183,7 @@ class MessageJobRecoveryTest {
             appender.stop();
         }
 
-        verify(store).scheduleRetry(eq(claim), any(Duration.class));
+        verify(store).scheduleRetry(eq(claim), any(Duration.class), eq(JobFailure.STORAGE_UNAVAILABLE));
         assertThat(result).isEqualTo(MessageJobProcessingResult.OWNERSHIP_LOST);
         assertThat(appender.list).noneMatch(event -> "message_job_retry".equals(keyValue(event, "event")));
     }
@@ -165,8 +195,8 @@ class MessageJobRecoveryTest {
         when(store.loadHistory(claim.sessionId())).thenThrow(ConversationStoreFailure.transientFailure(
                 new IllegalStateException("storage unavailable")));
         when(store.readJob(claim.messageJobId())).thenReturn(Optional.of(new ConversationStore.MessageJobProjection(
-                claim.messageJobId(), claim.sessionId(), JobStatus.WORKING, 0, 0)));
-        when(store.scheduleRetry(eq(claim), any(Duration.class))).thenReturn(true);
+                claim.messageJobId(), claim.sessionId(), JobStatus.WORKING, 0, 0, Optional.empty(), Optional.empty())));
+        when(store.scheduleRetry(eq(claim), any(Duration.class), eq(JobFailure.STORAGE_UNAVAILABLE))).thenReturn(true);
         ConversationModel model = model(TEST_ROUTE_ID, (request, reservation, usage) -> {
             throw new AssertionError("Provider must not be called after the storage failure");
         });
@@ -174,7 +204,7 @@ class MessageJobRecoveryTest {
         MessageJobProcessingResult result = service(store, model, catalog()).process(claim, () -> true);
 
         assertThat(result).isEqualTo(MessageJobProcessingResult.RETRY_SCHEDULED);
-        verify(store).scheduleRetry(eq(claim), any(Duration.class));
+        verify(store).scheduleRetry(eq(claim), any(Duration.class), eq(JobFailure.STORAGE_UNAVAILABLE));
     }
 
     @Test
@@ -207,9 +237,7 @@ class MessageJobRecoveryTest {
         verify(store).append(eq(claim), batch.capture(), any(Instant.class));
         verify(store, Mockito.never()).loadHistory(any());
         verify(model, Mockito.never()).respond(any(), any(), any());
-        assertThat(batch.getValue()).isEqualTo(new ConversationStore.MessageBatch(List.of(
-                new ConversationStore.RuntimeData("MODEL_UNAVAILABLE", "Runtime model is unavailable.")),
-                ConversationStore.JobUpdate.COMPLETE));
+        assertTerminalFailure(batch.getValue(), "MODEL_UNAVAILABLE");
     }
 
     @Test
@@ -242,9 +270,7 @@ class MessageJobRecoveryTest {
         ArgumentCaptor<ConversationStore.MessageBatch> batch = ArgumentCaptor.forClass(ConversationStore.MessageBatch.class);
         verify(store).append(eq(claim), batch.capture(), any(Instant.class));
         verify(store, Mockito.never()).loadHistory(any());
-        assertThat(batch.getValue()).isEqualTo(new ConversationStore.MessageBatch(List.of(
-                new ConversationStore.RuntimeData("MODEL_UNAVAILABLE", "Runtime model is unavailable.")),
-                ConversationStore.JobUpdate.COMPLETE));
+        assertTerminalFailure(batch.getValue(), "MODEL_UNAVAILABLE");
     }
 
     @Test
@@ -265,9 +291,7 @@ class MessageJobRecoveryTest {
         verify(store).append(eq(claim), batch.capture(), any(Instant.class));
         verify(model, Mockito.never()).respond(any(), any(), any());
         verify(store, Mockito.never()).reserveModelCall(any(), any(Integer.class), any(Instant.class));
-        assertThat(batch.getValue()).isEqualTo(new ConversationStore.MessageBatch(List.of(
-                new ConversationStore.RuntimeData("MODEL_UNAVAILABLE", "Runtime model is unavailable.")),
-                ConversationStore.JobUpdate.COMPLETE));
+        assertTerminalFailure(batch.getValue(), "MODEL_UNAVAILABLE");
     }
 
     @Test
@@ -298,9 +322,7 @@ class MessageJobRecoveryTest {
         verify(store).append(eq(claim), batch.capture(), any(Instant.class));
         verify(model).respond(any(), any(), any());
         assertThat(toolInvoked).isFalse();
-        assertThat(batch.getValue()).isEqualTo(new ConversationStore.MessageBatch(List.of(
-                new ConversationStore.RuntimeData("MODEL_UNAVAILABLE", "Runtime model is unavailable.")),
-                ConversationStore.JobUpdate.COMPLETE));
+        assertTerminalFailure(batch.getValue(), "MODEL_UNAVAILABLE");
         assertThat(batch.getValue().continuation()).isEmpty();
     }
 
@@ -322,9 +344,7 @@ class MessageJobRecoveryTest {
         verify(store).append(eq(claim), batch.capture(), any(Instant.class));
         verify(store, Mockito.never()).reserveModelCall(any(), any(Integer.class), any(Instant.class));
         assertThat(toolInvoked).isFalse();
-        assertThat(batch.getValue()).isEqualTo(new ConversationStore.MessageBatch(List.of(
-                new ConversationStore.RuntimeData("MODEL_UNAVAILABLE", "Runtime model is unavailable.")),
-                ConversationStore.JobUpdate.COMPLETE));
+        assertTerminalFailure(batch.getValue(), "MODEL_UNAVAILABLE");
     }
 
     private static Object keyValue(ILoggingEvent event, String key) {

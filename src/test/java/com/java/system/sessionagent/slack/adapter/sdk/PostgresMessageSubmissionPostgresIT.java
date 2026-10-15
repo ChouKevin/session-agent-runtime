@@ -29,6 +29,7 @@ import com.java.system.sessionagent.conversation.application.MessageJobRetryPoli
 import com.java.system.sessionagent.conversation.TestConfiguredModels;
 import com.java.system.sessionagent.conversation.domain.IncomingMessage;
 import com.java.system.sessionagent.conversation.domain.IncomingMessageSource;
+import com.java.system.sessionagent.conversation.domain.JobFailure;
 import com.java.system.sessionagent.conversation.domain.ModelCallResult;
 import com.java.system.sessionagent.conversation.domain.ModelDescriptor;
 import com.java.system.sessionagent.conversation.domain.ModelReply;
@@ -256,7 +257,7 @@ class PostgresMessageSubmissionPostgresIT {
         assertThatThrownBy(() -> receive(conversationStore, incoming("pending"))).isInstanceOf(QueueFullException.class);
         MessageWorkClaim workingClaim = conversationStore.claimNext("worker", Duration.ofSeconds(30)).orElseThrow();
         assertThatThrownBy(() -> receive(conversationStore, incoming("working"))).isInstanceOf(QueueFullException.class);
-        assertThat(conversationStore.scheduleRetry(workingClaim, Duration.ZERO)).isTrue();
+        assertThat(conversationStore.scheduleRetry(workingClaim, Duration.ZERO, JobFailure.MODEL_UNAVAILABLE)).isTrue();
         assertThatThrownBy(() -> receive(conversationStore, incoming("retry"))).isInstanceOf(QueueFullException.class);
         MessageWorkClaim retryClaim = conversationStore.claimNext("worker", Duration.ofSeconds(30)).orElseThrow();
         conversationStore.append(retryClaim, new ConversationStore.MessageBatch(List.of(new ConversationStore.AssistantData("done")),

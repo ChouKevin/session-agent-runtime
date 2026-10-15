@@ -2,6 +2,8 @@ package com.java.system.sessionagent.conversation.port.out;
 
 import com.java.system.sessionagent.conversation.domain.IncomingMessage;
 import com.java.system.sessionagent.conversation.domain.JobStatus;
+import com.java.system.sessionagent.conversation.domain.JobFailure;
+import com.java.system.sessionagent.conversation.domain.JobProgress;
 import com.java.system.sessionagent.conversation.domain.MessageJobId;
 import com.java.system.sessionagent.conversation.domain.MessageReceipt;
 import com.java.system.sessionagent.conversation.domain.MessageWorkClaim;
@@ -97,9 +99,11 @@ public interface ConversationStore {
 
     OptionalInt reserveModelCall(MessageWorkClaim claim, int maxModelCalls, Instant now);
 
+    void updateProgress(MessageWorkClaim claim, JobProgress progress);
+
     void append(MessageWorkClaim claim, MessageBatch batch, Instant createdAt);
 
-    boolean scheduleRetry(MessageWorkClaim claim, Duration retryDelay);
+    boolean scheduleRetry(MessageWorkClaim claim, Duration retryDelay, JobFailure failure);
 
     Optional<MessageJobProjection> readJob(MessageJobId messageJobId);
 
@@ -112,7 +116,9 @@ public interface ConversationStore {
             SessionId sessionId,
             JobStatus status,
             int retryCount,
-            int modelCallCount) {
+            int modelCallCount,
+            Optional<JobProgress> progress,
+            Optional<JobFailure> failure) {
     }
 
     record SessionProjection(SessionId sessionId, Instant createdAt, Optional<MessageJobProjection> currentJob, String selectedModel) {
@@ -215,7 +221,7 @@ public interface ConversationStore {
     }
 
     record MessageBatch(List<MessageData> messages, JobUpdate jobUpdate, Optional<ModelContinuation> continuation,
-                        Optional<UsageCheckpointData> usageCheckpoint) {
+                        Optional<UsageCheckpointData> usageCheckpoint, Optional<JobFailure> failure) {
 
         public MessageBatch {
             Assert.notEmpty(messages, "Message batch must not be empty");
@@ -223,17 +229,23 @@ public interface ConversationStore {
             Assert.notNull(jobUpdate, "Job update must not be null");
             Assert.notNull(continuation, "Model continuation must not be null");
             Assert.notNull(usageCheckpoint, "Usage checkpoint must not be null");
+            Assert.notNull(failure, "Job failure must not be null");
             long toolCallEvents = messages.stream().filter(AssistantToolCallsData.class::isInstance).count();
             Assert.isTrue(continuation.isEmpty() || (jobUpdate == JobUpdate.KEEP_WORKING && toolCallEvents == 1),
                     "Model continuation requires one working assistant tool call event");
         }
 
         public MessageBatch(List<MessageData> messages, JobUpdate jobUpdate) {
-            this(messages, jobUpdate, Optional.empty(), Optional.empty());
+            this(messages, jobUpdate, Optional.empty(), Optional.empty(), Optional.empty());
         }
 
         public MessageBatch(List<MessageData> messages, JobUpdate jobUpdate, Optional<ModelContinuation> continuation) {
-            this(messages, jobUpdate, continuation, Optional.empty());
+            this(messages, jobUpdate, continuation, Optional.empty(), Optional.empty());
+        }
+
+        public MessageBatch(List<MessageData> messages, JobUpdate jobUpdate, Optional<ModelContinuation> continuation,
+                Optional<UsageCheckpointData> usageCheckpoint) {
+            this(messages, jobUpdate, continuation, usageCheckpoint, Optional.empty());
         }
     }
 }

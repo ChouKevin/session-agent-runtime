@@ -35,6 +35,8 @@ import java.util.Optional;
 import java.util.function.Consumer;
 import java.util.function.Function;
 
+import static org.assertj.core.api.Assertions.assertThat;
+
 final class MessageJobTestFixtures {
 
     static final ModelRouteId TEST_ROUTE_ID = new ModelRouteId("test");
@@ -93,6 +95,13 @@ final class MessageJobTestFixtures {
     static UserMessage user() {
         return new UserMessage(new SessionId("session-1"), new SessionSequence(1), Optional.of(new MessageJobId("job-1")), Instant.EPOCH,
                 MessageRole.USER, "alice", "hello");
+    }
+
+    static void assertTerminalFailure(ConversationStore.MessageBatch batch, String code) {
+        assertThat(batch.jobUpdate()).isEqualTo(ConversationStore.JobUpdate.COMPLETE);
+        assertThat(batch.failure().map(Enum::name)).contains(code);
+        assertThat(batch.messages()).singleElement().isInstanceOfSatisfying(ConversationStore.RuntimeData.class,
+                event -> assertThat(event.code()).isEqualTo(code));
     }
 
     interface ModelResponder {

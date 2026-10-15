@@ -3,6 +3,8 @@ package com.java.system.sessionagent.web.adapter.http;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.java.system.sessionagent.conversation.port.in.SessionDetailView;
+import com.java.system.sessionagent.conversation.domain.JobFailure;
+import com.java.system.sessionagent.conversation.domain.JobProgress;
 import com.java.system.sessionagent.conversation.domain.AssistantMessage;
 import com.java.system.sessionagent.conversation.domain.AssistantToolCallsMessage;
 import com.java.system.sessionagent.conversation.domain.RuntimeMessage;
@@ -61,9 +63,20 @@ public final class MessageResponses {
         }
     }
 
-    public record CurrentJobSummaryResponse(String messageJobId, String status, int modelCallCount) {
+    public record CurrentJobSummaryResponse(
+            String messageJobId,
+            String status,
+            int modelCallCount,
+            String phase,
+            Instant phaseStartedAt,
+            String currentToolName,
+            String failureCode,
+            String failureMessage) {
         static CurrentJobSummaryResponse from(MessageJobView view) {
-            return new CurrentJobSummaryResponse(view.messageJobId(), view.status().name(), view.modelCallCount());
+            JobProgressFields progressFields = JobProgressFields.from(view);
+            return new CurrentJobSummaryResponse(view.messageJobId(), view.status().name(), view.modelCallCount(),
+                    progressFields.phase(), progressFields.phaseStartedAt(), progressFields.currentToolName(),
+                    progressFields.failureCode(), progressFields.failureMessage());
         }
     }
 
@@ -72,10 +85,33 @@ public final class MessageResponses {
             String sessionId,
             String status,
             int retryCount,
-            int modelCallCount) {
+            int modelCallCount,
+            String phase,
+            Instant phaseStartedAt,
+            String currentToolName,
+            String failureCode,
+            String failureMessage) {
         static MessageJobResponse from(MessageJobView view) {
+            JobProgressFields progressFields = JobProgressFields.from(view);
             return new MessageJobResponse(view.messageJobId(), view.sessionId(), view.status().name(), view.retryCount(),
-                    view.modelCallCount());
+                    view.modelCallCount(), progressFields.phase(), progressFields.phaseStartedAt(),
+                    progressFields.currentToolName(), progressFields.failureCode(), progressFields.failureMessage());
+        }
+    }
+
+    private record JobProgressFields(
+            String phase,
+            Instant phaseStartedAt,
+            String currentToolName,
+            String failureCode,
+            String failureMessage) {
+        private static JobProgressFields from(MessageJobView view) {
+            return new JobProgressFields(
+                    view.progress().map(progress -> progress.phase().name()).orElse(null),
+                    view.progress().map(JobProgress::startedAt).orElse(null),
+                    view.progress().flatMap(JobProgress::toolName).orElse(null),
+                    view.failure().map(JobFailure::name).orElse(null),
+                    view.failure().map(JobFailure::message).orElse(null));
         }
     }
 

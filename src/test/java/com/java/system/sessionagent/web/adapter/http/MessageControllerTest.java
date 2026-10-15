@@ -4,6 +4,9 @@ import com.java.system.sessionagent.bootstrap.configuration.RuntimeConfiguration
 import com.java.system.sessionagent.conversation.domain.AssistantMessage;
 import com.java.system.sessionagent.conversation.domain.AssistantToolCallsMessage;
 import com.java.system.sessionagent.conversation.domain.IncomingMessage;
+import com.java.system.sessionagent.conversation.domain.JobFailure;
+import com.java.system.sessionagent.conversation.domain.JobPhase;
+import com.java.system.sessionagent.conversation.domain.JobProgress;
 import com.java.system.sessionagent.conversation.domain.JobStatus;
 import com.java.system.sessionagent.conversation.domain.MessageJobId;
 import com.java.system.sessionagent.conversation.domain.MessageReceipt;
@@ -46,6 +49,7 @@ import java.util.Map;
 import java.util.stream.Stream;
 import java.util.UUID;
 
+import static org.hamcrest.Matchers.nullValue;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.clearInvocations;
@@ -151,19 +155,58 @@ class MessageControllerTest {
     }
 
     @Test
-    void polls_the_job_status_and_counts_without_a_reply_sequence() throws Exception {
+    void polls_job_progress_and_serializes_absent_failure_fields_as_null() throws Exception {
         MessageIntakePort intake = mock(MessageIntakePort.class);
         ConversationQueryPort queries = mock(ConversationQueryPort.class);
-        when(queries.findJob(JOB_ID)).thenReturn(Optional.of(new MessageJobView(JOB_ID, SESSION_ID, JobStatus.DONE, 1, 2)));
+        Instant phaseStartedAt = Instant.parse("2026-10-13T15:45:01Z");
+        JobProgress progress = new JobProgress(JobPhase.TOOL_EXECUTION, phaseStartedAt, Optional.of("lookup"));
+        MessageJobView activeJob = new MessageJobView(
+                JOB_ID, SESSION_ID, JobStatus.WORKING, 1, 2, Optional.of(progress), Optional.empty());
+        when(queries.findJob(JOB_ID)).thenReturn(Optional.of(activeJob));
+        when(queries.session(SESSION_ID)).thenReturn(Optional.of(new SessionDetailView(SESSION_ID, CREATED_AT,
+                Optional.of(activeJob), Optional.empty(),
+                new SessionDetailView.ContextUsageView("test-model", 1_000, 10, 0.01, ContextEstimate.Basis.FULL_ESTIMATE))));
 
-        mvc(intake, queries).perform(get("/internal/message-jobs/{messageJobId}", JOB_ID))
+        MockMvc mvc = mvc(intake, queries);
+        mvc.perform(get("/internal/message-jobs/{messageJobId}", JOB_ID))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.messageJobId").value(JOB_ID))
                 .andExpect(jsonPath("$.sessionId").value(SESSION_ID))
-                .andExpect(jsonPath("$.status").value("DONE"))
+                .andExpect(jsonPath("$.status").value("WORKING"))
                 .andExpect(jsonPath("$.retryCount").value(1))
                 .andExpect(jsonPath("$.modelCallCount").value(2))
+                .andExpect(jsonPath("$.phase").value("TOOL_EXECUTION"))
+                .andExpect(jsonPath("$.phaseStartedAt").value("2026-10-13T15:45:01Z"))
+                .andExpect(jsonPath("$.currentToolName").value("lookup"))
+                .andExpect(jsonPath("$.failureCode").value(nullValue()))
+                .andExpect(jsonPath("$.failureMessage").value(nullValue()))
                 .andExpect(jsonPath("$.replySequence").doesNotExist());
+        mvc.perform(get("/internal/sessions/{sessionId}", SESSION_ID))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.currentJob.status").value("WORKING"))
+                .andExpect(jsonPath("$.currentJob.phase").value("TOOL_EXECUTION"))
+                .andExpect(jsonPath("$.currentJob.phaseStartedAt").value("2026-10-13T15:45:01Z"))
+                .andExpect(jsonPath("$.currentJob.currentToolName").value("lookup"))
+                .andExpect(jsonPath("$.currentJob.failureCode").value(nullValue()))
+                .andExpect(jsonPath("$.currentJob.failureMessage").value(nullValue()));
+    }
+
+    @Test
+    void polls_a_safe_job_failure_without_live_progress_or_provider_details() throws Exception {
+        MessageIntakePort intake = mock(MessageIntakePort.class);
+        ConversationQueryPort queries = mock(ConversationQueryPort.class);
+        JobFailure failure = JobFailure.MODEL_UNAVAILABLE;
+        when(queries.findJob(JOB_ID)).thenReturn(Optional.of(new MessageJobView(
+                JOB_ID, SESSION_ID, JobStatus.DONE, 1, 2, Optional.empty(), Optional.of(failure))));
+
+        mvc(intake, queries).perform(get("/internal/message-jobs/{messageJobId}", JOB_ID))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("DONE"))
+                .andExpect(jsonPath("$.phase").value(nullValue()))
+                .andExpect(jsonPath("$.phaseStartedAt").value(nullValue()))
+                .andExpect(jsonPath("$.currentToolName").value(nullValue()))
+                .andExpect(jsonPath("$.failureCode").value(failure.name()))
+                .andExpect(jsonPath("$.failureMessage").value(failure.message()));
     }
 
     @Test
@@ -325,7 +368,8 @@ class MessageControllerTest {
         ConversationQueryPort queries = mock(ConversationQueryPort.class);
         ExternalSessionReferenceQueryPort referenceQueries = mock(ExternalSessionReferenceQueryPort.class);
         when(queries.session(SESSION_ID)).thenReturn(Optional.of(new SessionDetailView(SESSION_ID, CREATED_AT,
-                Optional.of(new MessageJobView(JOB_ID, SESSION_ID, JobStatus.DONE, 1, 2)),
+                Optional.of(new MessageJobView(JOB_ID, SESSION_ID, JobStatus.DONE, 1, 2, Optional.empty(),
+                        Optional.of(JobFailure.MODEL_OUTPUT_INVALID))),
                 Optional.of(new SessionDetailView.CompactionBoundaryView(2, 4, "THRESHOLD", CREATED_AT)),
                 new SessionDetailView.ContextUsageView("gemini-3.1-flash-lite", 1_048_576, 512, 0.00048828125,
                         ContextEstimate.Basis.PROVIDER_PLUS_TRAILING_ESTIMATE))));
@@ -338,6 +382,11 @@ class MessageControllerTest {
                 .andExpect(jsonPath("$.sessionId").value(SESSION_ID))
                 .andExpect(jsonPath("$.slack.channelId").value("C01ABCDEF"))
                 .andExpect(jsonPath("$.currentJob.status").value("DONE"))
+                .andExpect(jsonPath("$.currentJob.phase").value(nullValue()))
+                .andExpect(jsonPath("$.currentJob.phaseStartedAt").value(nullValue()))
+                .andExpect(jsonPath("$.currentJob.currentToolName").value(nullValue()))
+                .andExpect(jsonPath("$.currentJob.failureCode").value(JobFailure.MODEL_OUTPUT_INVALID.name()))
+                .andExpect(jsonPath("$.currentJob.failureMessage").value(JobFailure.MODEL_OUTPUT_INVALID.message()))
                 .andExpect(jsonPath("$.currentJob.retryCount").doesNotExist())
                 .andExpect(jsonPath("$.latestCompaction.coveredThrough").value(4))
                 .andExpect(jsonPath("$.context.modelId").value("gemini-3.1-flash-lite"))

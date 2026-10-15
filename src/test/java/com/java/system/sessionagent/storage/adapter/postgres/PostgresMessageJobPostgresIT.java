@@ -2,6 +2,12 @@ package com.java.system.sessionagent.storage.adapter.postgres;
 
 import com.java.system.sessionagent.conversation.domain.IncomingMessage;
 import com.java.system.sessionagent.conversation.domain.JobStatus;
+import com.java.system.sessionagent.conversation.domain.JobFailure;
+import com.java.system.sessionagent.conversation.domain.JobPhase;
+import com.java.system.sessionagent.conversation.domain.JobProgress;
+import com.java.system.sessionagent.conversation.domain.ModelReply;
+import com.java.system.sessionagent.conversation.domain.MessageRole;
+import com.java.system.sessionagent.conversation.TestConfiguredModels;
 import com.java.system.sessionagent.conversation.domain.MessageReceipt;
 import com.java.system.sessionagent.conversation.domain.MessageWorkClaim;
 import com.java.system.sessionagent.conversation.domain.ModelCallResult;
@@ -12,6 +18,7 @@ import com.java.system.sessionagent.conversation.domain.ModelRouteId;
 import com.java.system.sessionagent.conversation.domain.ModelSelection;
 import com.java.system.sessionagent.conversation.domain.ModelUsage;
 import com.java.system.sessionagent.conversation.domain.SessionId;
+import com.java.system.sessionagent.conversation.domain.SessionMessage;
 import com.java.system.sessionagent.conversation.domain.ToolCallId;
 import com.java.system.sessionagent.conversation.domain.ToolRequest;
 import com.java.system.sessionagent.conversation.application.JobProcessor;
@@ -92,13 +99,363 @@ class PostgresMessageJobPostgresIT {
     }
 
     @Test
+    void exposes_reserved_model_work_without_publishing_partial_history() {
+        ConversationStore store = store();
+        MessageReceipt receipt = receive(store, new IncomingMessage("progress-thread", "alice", "progress-source", "hello"));
+        MessageWorkClaim claim = store.claimNext("worker", Duration.ofSeconds(30)).orElseThrow();
+
+        assertThat(store.readJob(receipt.messageJobId()).orElseThrow().progress()).hasValueSatisfying(value -> {
+            assertThat(value.phase()).isEqualTo(JobPhase.PREPARING);
+            assertThat(value.toolName()).isEmpty();
+        });
+        assertThat(store.reserveModelCall(claim, 12, NOW)).hasValue(1);
+
+        Map<String, Object> progress = jdbcTemplate.queryForMap("""
+                select to_jsonb(job)->>'phase' as phase,
+                       to_jsonb(job)->>'phase_started_at' as phase_started_at,
+                       to_jsonb(job)->>'current_tool_name' as current_tool_name
+                from message_job job where message_job_id = ?
+                """, UUID.fromString(receipt.messageJobId().value()));
+        assertThat(progress.get("phase")).isEqualTo("MODEL_CALL");
+        assertThat(progress.get("phase_started_at")).isNotNull();
+        assertThat(progress.get("current_tool_name")).isNull();
+        assertThat(store().readJob(receipt.messageJobId()).orElseThrow().progress())
+                .contains(new JobProgress(JobPhase.MODEL_CALL, NOW, Optional.empty()));
+        assertThat(store.readSession(receipt.sessionId()).orElseThrow().currentJob())
+                .contains(store.readJob(receipt.messageJobId()).orElseThrow());
+        assertThat(store.loadHistory(receipt.sessionId())).extracting(message -> message.sequence().value())
+                .containsExactly(1L);
+    }
+
+    @Test
+    void publishes_processor_phases_while_model_tools_and_atomic_history_commit_are_blocked() throws Exception {
+        ConversationStore store = store();
+        MessageReceipt receipt = receive(store, new IncomingMessage("thread", "alice", "gated", "hello"));
+        MessageWorkClaim claim = store.claimNext("worker", Duration.ofMinutes(2)).orElseThrow();
+        CountDownLatch modelStarted = new CountDownLatch(1);
+        CountDownLatch releaseModel = new CountDownLatch(1);
+        CountDownLatch firstToolStarted = new CountDownLatch(1);
+        CountDownLatch releaseFirstTool = new CountDownLatch(1);
+        CountDownLatch secondToolStarted = new CountDownLatch(1);
+        CountDownLatch releaseSecondTool = new CountDownLatch(1);
+        CountDownLatch finalModelStarted = new CountDownLatch(1);
+        CountDownLatch releaseFinalModel = new CountDownLatch(1);
+        AtomicInteger turns = new AtomicInteger();
+        ConversationModel model = new ConversationModel() {
+            @Override
+            public ModelRouteId routeId() {
+                return new ModelRouteId("test");
+            }
+
+            @Override
+            public ModelCallResult respond(ModelRequest request, ModelCallReservation reservation,
+                    Consumer<ModelUsage> usageObserver) {
+                reservation.reserve();
+                if (turns.incrementAndGet() == 1) {
+                    modelStarted.countDown();
+                    awaitGate(releaseModel);
+                    return new ModelCallResult(new UseTools(Optional.of("checking"), List.of(
+                            new ToolRequest(new ToolCallId("first"), new ToolName("first"), Map.of()),
+                            new ToolRequest(new ToolCallId("second"), new ToolName("second"), Map.of()))), Optional.empty());
+                }
+                finalModelStarted.countDown();
+                awaitGate(releaseFinalModel);
+                return new ModelCallResult(new ModelReply.Text("done"), Optional.empty());
+            }
+        };
+        ToolCatalog tools = () -> new ToolSnapshot(List.of(
+                new ToolBinding(new ToolDefinition(new ToolName("first"), "first", Map.of()), arguments -> {
+                    firstToolStarted.countDown();
+                    awaitGate(releaseFirstTool);
+                    return new ToolOutput(false, Map.of("result", "first"));
+                }),
+                new ToolBinding(new ToolDefinition(new ToolName("second"), "second", Map.of()), arguments -> {
+                    secondToolStarted.countDown();
+                    awaitGate(releaseSecondTool);
+                    return new ToolOutput(true, Map.of("error", "ordinary tool failure"));
+                })));
+        JobProcessor processor = new JobProcessor(store, TestConfiguredModels.withModel(model), tools, Clock.systemUTC(), 3,
+                new MessageJobRetryPolicy(3, Duration.ofSeconds(60)), new NoOpConversationTelemetry());
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        try {
+            Future<MessageJobProcessingResult> result = executor.submit(() -> processor.process(claim, () -> true));
+            assertThat(modelStarted.await(5, TimeUnit.SECONDS)).isTrue();
+            assertLivePhase(receipt, JobPhase.MODEL_CALL, Optional.empty());
+            assertThat(store().loadHistory(receipt.sessionId())).hasSize(1);
+            releaseModel.countDown();
+            assertThat(firstToolStarted.await(5, TimeUnit.SECONDS)).isTrue();
+            assertLivePhase(receipt, JobPhase.TOOL_EXECUTION, Optional.of("first"));
+            assertThat(store().loadHistory(receipt.sessionId())).hasSize(1);
+            releaseFirstTool.countDown();
+            assertThat(secondToolStarted.await(5, TimeUnit.SECONDS)).isTrue();
+            assertLivePhase(receipt, JobPhase.TOOL_EXECUTION, Optional.of("second"));
+            assertThat(store().loadHistory(receipt.sessionId())).hasSize(1);
+
+            try (Connection connection = dataSource().getConnection();
+                    PreparedStatement lock = connection.prepareStatement(
+                            "select session_id from conversation_session where session_id = ? for update")) {
+                connection.setAutoCommit(false);
+                lock.setObject(1, UUID.fromString(receipt.sessionId().value()));
+                lock.executeQuery();
+                releaseSecondTool.countDown();
+                awaitDatabaseLockWaiter("next_sequence = next_sequence + 1");
+                assertLivePhase(receipt, JobPhase.HISTORY_COMMIT, Optional.empty());
+                assertThat(store().loadHistory(receipt.sessionId())).hasSize(1);
+                connection.rollback();
+            }
+            assertThat(finalModelStarted.await(5, TimeUnit.SECONDS)).isTrue();
+            assertLivePhase(receipt, JobPhase.MODEL_CALL, Optional.empty());
+            assertThat(store().loadHistory(receipt.sessionId())).extracting(message -> message.role())
+                    .containsExactly(MessageRole.USER, MessageRole.ASSISTANT_TOOL_CALLS, MessageRole.TOOL, MessageRole.TOOL);
+            releaseFinalModel.countDown();
+            assertThat(result.get(5, TimeUnit.SECONDS)).isEqualTo(MessageJobProcessingResult.COMPLETED);
+            assertThat(store().readJob(receipt.messageJobId()).orElseThrow()).satisfies(job -> {
+                assertThat(job.status()).isEqualTo(JobStatus.DONE);
+                assertThat(job.progress()).isEmpty();
+                assertThat(job.failure()).isEmpty();
+                assertThat(job.modelCallCount()).isEqualTo(2);
+            });
+            assertThat(store().loadHistory(receipt.sessionId())).extracting(message -> message.role())
+                    .containsExactly(MessageRole.USER, MessageRole.ASSISTANT_TOOL_CALLS, MessageRole.TOOL,
+                            MessageRole.TOOL, MessageRole.ASSISTANT);
+        } finally {
+            releaseModel.countDown();
+            releaseFirstTool.countDown();
+            releaseSecondTool.countDown();
+            releaseFinalModel.countDown();
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    void clears_tool_progress_on_retry_reclaim_and_success_and_persists_safe_terminal_outcome() {
+        ConversationStore store = store();
+        MessageReceipt receipt = receive(store, new IncomingMessage("thread", "alice", "retry", "hello"));
+        MessageWorkClaim claim = store.claimNext("worker", Duration.ofSeconds(30)).orElseThrow();
+        store.updateProgress(claim, new JobProgress(JobPhase.TOOL_EXECUTION, NOW, Optional.of("lookup")));
+
+        assertThat(store.scheduleRetry(claim, Duration.ZERO, JobFailure.STORAGE_UNAVAILABLE)).isTrue();
+        assertThat(store().readJob(receipt.messageJobId()).orElseThrow()).satisfies(job -> {
+            assertThat(job.status()).isEqualTo(JobStatus.RETRY);
+            assertThat(job.progress()).isEmpty();
+            assertThat(job.failure()).contains(JobFailure.STORAGE_UNAVAILABLE);
+        });
+        MessageWorkClaim retry = store.claimNext("worker", Duration.ofSeconds(30)).orElseThrow();
+        assertLivePhase(receipt, JobPhase.PREPARING, Optional.empty());
+        store.updateProgress(retry, new JobProgress(JobPhase.HISTORY_COMMIT, NOW, Optional.empty()));
+        store.append(retry, new ConversationStore.MessageBatch(List.of(new ConversationStore.AssistantData("intermediate")),
+                ConversationStore.JobUpdate.KEEP_WORKING), NOW);
+        assertLivePhase(receipt, JobPhase.PREPARING, Optional.empty());
+        store.append(retry, new ConversationStore.MessageBatch(
+                List.of(new ConversationStore.RuntimeData(JobFailure.MODEL_OUTPUT_INVALID.name(),
+                        JobFailure.MODEL_OUTPUT_INVALID.message())),
+                ConversationStore.JobUpdate.KEEP_WORKING, Optional.empty(), Optional.empty(),
+                Optional.of(JobFailure.MODEL_OUTPUT_INVALID)), NOW);
+        assertThat(store().readJob(receipt.messageJobId()).orElseThrow()).satisfies(job -> {
+            assertThat(job.progress()).contains(new JobProgress(JobPhase.PREPARING, NOW, Optional.empty()));
+            assertThat(job.failure()).contains(JobFailure.MODEL_OUTPUT_INVALID);
+        });
+        assertThat(store.reserveModelCall(retry, 3, NOW)).hasValue(1);
+        assertLivePhase(receipt, JobPhase.MODEL_CALL, Optional.empty());
+        store.append(retry, new ConversationStore.MessageBatch(List.of(new ConversationStore.AssistantData("done")),
+                ConversationStore.JobUpdate.COMPLETE), NOW);
+        assertThat(store().readJob(receipt.messageJobId()).orElseThrow()).satisfies(job -> {
+            assertThat(job.progress()).isEmpty();
+            assertThat(job.failure()).isEmpty();
+        });
+
+        MessageReceipt failed = receive(store, new IncomingMessage("thread", "alice", "terminal", "again"));
+        MessageWorkClaim failedClaim = store.claimNext("worker", Duration.ofSeconds(30)).orElseThrow();
+        JobFailure failure = JobFailure.MODEL_OUTPUT_INVALID;
+        store.updateProgress(failedClaim, new JobProgress(JobPhase.HISTORY_COMMIT, NOW, Optional.empty()));
+        store.append(failedClaim, new ConversationStore.MessageBatch(
+                List.of(new ConversationStore.RuntimeData(failure.name(), failure.message())),
+                ConversationStore.JobUpdate.COMPLETE, Optional.empty(), Optional.empty(), Optional.of(failure)), NOW);
+        ConversationStore.MessageJobProjection persisted = store().readJob(failed.messageJobId()).orElseThrow();
+        assertThat(persisted.status()).isEqualTo(JobStatus.DONE);
+        assertThat(persisted.progress()).isEmpty();
+        assertThat(persisted.failure()).contains(failure);
+        assertThat(store().readSession(failed.sessionId()).orElseThrow().currentJob()).contains(persisted);
+        assertThat(jdbcTemplate.queryForObject("select failure_code from message_job where message_job_id = ?",
+                String.class, UUID.fromString(failed.messageJobId().value()))).isEqualTo(failure.name());
+        assertThatThrownBy(() -> jdbcTemplate.update("update message_job set failure_code = ? where message_job_id = ?",
+                "raw provider error: secret", UUID.fromString(failed.messageJobId().value())))
+                .isInstanceOf(RuntimeException.class);
+    }
+
+    @Test
+    void suppresses_expired_progress_using_database_time_and_fences_writers_before_and_after_reclaim() {
+        ConversationStore store = store();
+        MessageReceipt receipt = receive(store, new IncomingMessage("thread", "alice", "expiry", "hello"));
+        MessageWorkClaim original = store.claimNext("same-worker", Duration.ofSeconds(30)).orElseThrow();
+        JobProgress tool = new JobProgress(JobPhase.TOOL_EXECUTION, NOW, Optional.of("lookup"));
+        store.updateProgress(original, tool);
+        jdbcTemplate.update("update message_job set locked_until = clock_timestamp() - interval '1 millisecond' where message_job_id = ?",
+                UUID.fromString(receipt.messageJobId().value()));
+
+        ConversationStore.MessageJobProjection expired = store().readJob(receipt.messageJobId()).orElseThrow();
+        assertThat(expired.status()).isEqualTo(JobStatus.WORKING);
+        assertThat(expired.progress()).isEmpty();
+        assertThat(expired.failure()).contains(JobFailure.PROCESSING_INTERRUPTED);
+        assertThat(store().readSession(receipt.sessionId()).orElseThrow().currentJob()).contains(expired);
+        assertThatThrownBy(() -> store.updateProgress(original, tool)).isExactlyInstanceOf(StaleWorkClaimException.class);
+        assertThat(store.scheduleRetry(original, Duration.ZERO, JobFailure.MODEL_UNAVAILABLE)).isFalse();
+        assertThat(store.reserveModelCall(original, 3, NOW)).isEmpty();
+        assertThatThrownBy(() -> store.append(original, new ConversationStore.MessageBatch(
+                List.of(new ConversationStore.AssistantData("stale")), ConversationStore.JobUpdate.COMPLETE), NOW))
+                .isExactlyInstanceOf(StaleWorkClaimException.class);
+
+        MessageWorkClaim recovered = store.claimNext("same-worker", Duration.ofSeconds(30)).orElseThrow();
+        assertThat(recovered.claimNumber()).isGreaterThan(original.claimNumber());
+        assertLivePhase(receipt, JobPhase.PREPARING, Optional.empty());
+        assertThatThrownBy(() -> store.updateProgress(original, tool)).isExactlyInstanceOf(StaleWorkClaimException.class);
+        assertThat(store.scheduleRetry(original, Duration.ZERO, JobFailure.MODEL_UNAVAILABLE)).isFalse();
+        assertThat(store.reserveModelCall(original, 3, NOW)).isEmpty();
+        assertThat(store().loadHistory(receipt.sessionId())).hasSize(1);
+    }
+
+    @Test
+    void migrates_existing_working_and_pending_rows_without_inventing_progress_and_initializes_reclaimed_work() {
+        flyway().clean();
+        Flyway.configure().dataSource(dataSource()).target("4").load().migrate();
+        ConversationStore store = store();
+        MessageReceipt active = receive(store, new IncomingMessage("active-thread", "alice", "old-active", "hello"));
+        MessageReceipt expired = receive(store, new IncomingMessage("expired-thread", "alice", "old-expired", "hello"));
+        MessageReceipt pending = receive(store, new IncomingMessage("pending-thread", "alice", "old-pending", "hello"));
+        jdbcTemplate.update("""
+                update message_job set status = 'WORKING', worker_id = 'old-worker', claim_number = 1,
+                    locked_until = clock_timestamp() + interval '1 hour'
+                where message_job_id = ?
+                """, UUID.fromString(active.messageJobId().value()));
+        jdbcTemplate.update("""
+                update message_job set status = 'WORKING', worker_id = 'old-worker', claim_number = 1,
+                    locked_until = clock_timestamp() - interval '1 second', available_at = clock_timestamp() - interval '1 hour'
+                where message_job_id = ?
+                """, UUID.fromString(expired.messageJobId().value()));
+
+        flyway().migrate();
+
+        assertThat(store.readJob(active.messageJobId()).orElseThrow()).satisfies(job -> {
+            assertThat(job.status()).isEqualTo(JobStatus.WORKING);
+            assertThat(job.progress()).isEmpty();
+            assertThat(job.failure()).isEmpty();
+        });
+        assertThat(store.readJob(pending.messageJobId()).orElseThrow()).satisfies(job -> {
+            assertThat(job.status()).isEqualTo(JobStatus.PENDING);
+            assertThat(job.progress()).isEmpty();
+            assertThat(job.failure()).isEmpty();
+        });
+        assertThat(store.readJob(expired.messageJobId()).orElseThrow().failure())
+                .contains(JobFailure.PROCESSING_INTERRUPTED);
+        MessageWorkClaim recovered = store.claimNext("new-worker", Duration.ofSeconds(30)).orElseThrow();
+        assertThat(recovered.messageJobId()).isEqualTo(expired.messageJobId());
+        assertLivePhase(expired, JobPhase.PREPARING, Optional.empty());
+        assertThat(store().loadHistory(expired.sessionId())).hasSize(1);
+        assertThatThrownBy(() -> jdbcTemplate.update("""
+                update message_job set phase = 'MODEL_CALL', phase_started_at = clock_timestamp()
+                where message_job_id = ?
+                """, UUID.fromString(pending.messageJobId().value()))).isInstanceOf(RuntimeException.class);
+        assertThatThrownBy(() -> jdbcTemplate.update("""
+                update message_job set current_tool_name = 'lookup' where message_job_id = ?
+                """, UUID.fromString(expired.messageJobId().value()))).isInstanceOf(RuntimeException.class);
+        assertThatThrownBy(() -> jdbcTemplate.update("""
+                update message_job set phase_started_at = null where message_job_id = ?
+                """, UUID.fromString(expired.messageJobId().value()))).isInstanceOf(RuntimeException.class);
+    }
+
+    @Test
+    void backfills_only_allowlisted_terminal_runtime_failures_and_preserves_recovered_jobs_on_migration() {
+        flyway().clean();
+        Flyway.configure().dataSource(dataSource()).target("4").load().migrate();
+        ConversationStore store = store();
+        MessageReceipt failed = receive(store, new IncomingMessage("failed-thread", "alice", "legacy-failed", "hello"));
+        MessageReceipt recovered = receive(store, new IncomingMessage("recovered-thread", "alice", "legacy-recovered", "hello"));
+        MessageReceipt unknown = receive(store, new IncomingMessage("unknown-thread", "alice", "legacy-unknown", "hello"));
+        seedLegacyTerminalHistory(failed, JobFailure.MODEL_UNAVAILABLE.name(), false);
+        seedLegacyTerminalHistory(recovered, JobFailure.MODEL_OUTPUT_INVALID.name(), true);
+        seedLegacyTerminalHistory(unknown, "UNKNOWN_LEGACY_CODE", false);
+        List<SessionMessage> failedHistory = store.loadHistory(failed.sessionId());
+        List<SessionMessage> recoveredHistory = store.loadHistory(recovered.sessionId());
+        List<SessionMessage> unknownHistory = store.loadHistory(unknown.sessionId());
+
+        flyway().migrate();
+
+        assertThat(store().readJob(failed.messageJobId()).orElseThrow()).satisfies(job -> {
+            assertThat(job.status()).isEqualTo(JobStatus.DONE);
+            assertThat(job.progress()).isEmpty();
+            assertThat(job.failure()).contains(JobFailure.MODEL_UNAVAILABLE);
+        });
+        assertThat(store().readJob(recovered.messageJobId()).orElseThrow().failure()).isEmpty();
+        assertThat(store().readJob(unknown.messageJobId()).orElseThrow().failure()).isEmpty();
+        assertThat(store().loadHistory(failed.sessionId())).isEqualTo(failedHistory);
+        assertThat(store().loadHistory(recovered.sessionId())).isEqualTo(recoveredHistory);
+        assertThat(store().loadHistory(unknown.sessionId())).isEqualTo(unknownHistory);
+        assertThat(store().readSession(failed.sessionId()).orElseThrow().currentJob())
+                .contains(store().readJob(failed.messageJobId()).orElseThrow());
+    }
+
+    private void seedLegacyTerminalHistory(MessageReceipt receipt, String runtimeCode, boolean recovered) {
+        UUID sessionId = UUID.fromString(receipt.sessionId().value());
+        UUID jobId = UUID.fromString(receipt.messageJobId().value());
+        jdbcTemplate.update("""
+                with event as (
+                    insert into session_message(session_id, sequence, message_job_id, role, created_at)
+                    values (?, 2, ?, 'RUNTIME', clock_timestamp())
+                    returning session_id, sequence)
+                insert into runtime_message(session_id, sequence, code, message)
+                select session_id, sequence, ?, 'legacy runtime event' from event
+                """, sessionId, jobId, runtimeCode);
+        jdbcTemplate.update("update conversation_session set next_sequence = next_sequence + 1 where session_id = ?",
+                sessionId);
+        if (recovered) {
+            jdbcTemplate.update("""
+                    with event as (
+                        insert into session_message(session_id, sequence, message_job_id, role, created_at)
+                        values (?, 3, ?, 'ASSISTANT', clock_timestamp())
+                        returning session_id, sequence)
+                    insert into assistant_message(session_id, sequence, message)
+                    select session_id, sequence, 'successful recovery' from event
+                    """, sessionId, jobId);
+            jdbcTemplate.update("update conversation_session set next_sequence = next_sequence + 1 where session_id = ?",
+                    sessionId);
+        }
+        jdbcTemplate.update("""
+                update message_job set status = 'DONE', completed_at = clock_timestamp()
+                where message_job_id = ?
+                """, jobId);
+    }
+
+    private void assertLivePhase(MessageReceipt receipt, JobPhase phase, Optional<String> toolName) {
+        ConversationStore fresh = store();
+        ConversationStore.MessageJobProjection job = fresh.readJob(receipt.messageJobId()).orElseThrow();
+        assertThat(job.progress()).hasValueSatisfying(progress -> {
+            assertThat(progress.phase()).isEqualTo(phase);
+            assertThat(progress.startedAt()).isNotNull();
+            assertThat(progress.toolName()).isEqualTo(toolName);
+        });
+        assertThat(job.failure()).isEmpty();
+        assertThat(fresh.readSession(receipt.sessionId()).orElseThrow().currentJob()).contains(job);
+    }
+
+    private static void awaitGate(CountDownLatch gate) {
+        try {
+            if (!gate.await(10, TimeUnit.SECONDS)) {
+                throw new AssertionError("Timed out waiting for controlled processing gate");
+            }
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException(exception);
+        }
+    }
+
+    @Test
     void keeps_committed_history_visible_across_retry_and_global_job_ordering() {
         ConversationStore store = store();
         MessageReceipt first = receive(store, new IncomingMessage("thread", "alice", "first", "one"));
         MessageWorkClaim firstClaim = store.claimNext("worker", Duration.ofSeconds(30)).orElseThrow();
         store.append(firstClaim, new ConversationStore.MessageBatch(List.of(new ConversationStore.AssistantData("working")),
                 ConversationStore.JobUpdate.KEEP_WORKING), NOW);
-        assertThat(store.scheduleRetry(firstClaim, Duration.ZERO)).isTrue();
+        assertThat(store.scheduleRetry(firstClaim, Duration.ZERO, JobFailure.MODEL_UNAVAILABLE)).isTrue();
         assertThat(store.loadHistory(first.sessionId())).extracting(message -> message.sequence().value()).containsExactly(1L, 2L);
         MessageWorkClaim reclaimed = store.claimNext("worker", Duration.ofSeconds(30)).orElseThrow();
         assertThat(store.loadHistory(first.sessionId())).extracting(message -> message.sequence().value())
@@ -352,7 +709,7 @@ class PostgresMessageJobPostgresIT {
                 "v2:openai-b", messageJobId)).isInstanceOf(RuntimeException.class);
 
         MessageWorkClaim claim = store.claimNext("worker", Duration.ofSeconds(30)).orElseThrow();
-        assertThat(store.scheduleRetry(claim, Duration.ZERO)).isTrue();
+        assertThat(store.scheduleRetry(claim, Duration.ZERO, JobFailure.MODEL_UNAVAILABLE)).isTrue();
         MessageWorkClaim retry = store.claimNext("worker", Duration.ofSeconds(30)).orElseThrow();
         store.append(retry, new ConversationStore.MessageBatch(List.of(new ConversationStore.AssistantData("done")),
                 ConversationStore.JobUpdate.COMPLETE), NOW);
@@ -369,7 +726,7 @@ class PostgresMessageJobPostgresIT {
                 model -> selection(model, first, second));
         MessageWorkClaim originalClaim = store.claimNext("worker", Duration.ofSeconds(30)).orElseThrow();
         assertThat(originalClaim.modelSelection()).isEqualTo(first);
-        assertThat(store.scheduleRetry(originalClaim, Duration.ZERO)).isTrue();
+        assertThat(store.scheduleRetry(originalClaim, Duration.ZERO, JobFailure.MODEL_UNAVAILABLE)).isTrue();
 
         assertThat(store.selectModel(original.sessionId(), first)).contains(first);
         assertThat(jdbcTemplate.queryForObject("select count(*) from message_job", Integer.class)).isEqualTo(1);

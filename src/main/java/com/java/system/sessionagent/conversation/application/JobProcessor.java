@@ -1,6 +1,9 @@
 package com.java.system.sessionagent.conversation.application;
 
 import com.java.system.sessionagent.conversation.domain.MessageWorkClaim;
+import com.java.system.sessionagent.conversation.domain.JobFailure;
+import com.java.system.sessionagent.conversation.domain.JobPhase;
+import com.java.system.sessionagent.conversation.domain.JobProgress;
 import com.java.system.sessionagent.conversation.domain.ModelReply;
 import com.java.system.sessionagent.conversation.domain.ModelCallResult;
 import com.java.system.sessionagent.conversation.domain.ContextCompaction;
@@ -27,7 +30,6 @@ import com.java.system.sessionagent.conversation.port.out.ConversationStoreFailu
 import com.java.system.sessionagent.conversation.port.out.ConversationTelemetry;
 import com.java.system.sessionagent.conversation.port.out.ModelCallFailure;
 import com.java.system.sessionagent.conversation.port.out.ModelRouteMismatchException;
-import com.java.system.sessionagent.conversation.port.out.NoOpConversationTelemetry;
 import com.java.system.sessionagent.conversation.port.out.StaleWorkClaimException;
 import com.java.system.sessionagent.tool.port.ToolCatalog;
 import com.java.system.sessionagent.tool.port.ToolOutput;
@@ -46,15 +48,16 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalInt;
 
+import static com.java.system.sessionagent.conversation.domain.JobFailure.COMPACTION_FAILED;
+import static com.java.system.sessionagent.conversation.domain.JobFailure.CONTEXT_TOO_LARGE;
+import static com.java.system.sessionagent.conversation.domain.JobFailure.INVALID_CONVERSATION_HISTORY;
+import static com.java.system.sessionagent.conversation.domain.JobFailure.MODEL_CALL_LIMIT_REACHED;
+import static com.java.system.sessionagent.conversation.domain.JobFailure.MODEL_OUTPUT_INVALID;
+import static com.java.system.sessionagent.conversation.domain.JobFailure.MODEL_UNAVAILABLE;
+
 public final class JobProcessor implements MessageJobPort {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(JobProcessor.class);
-    private static final String MODEL_CALL_LIMIT_REACHED = "MODEL_CALL_LIMIT_REACHED";
-    private static final String MODEL_OUTPUT_INVALID = "MODEL_OUTPUT_INVALID";
-    private static final String MODEL_UNAVAILABLE = "MODEL_UNAVAILABLE";
-    private static final String CONTEXT_TOO_LARGE = "CONTEXT_TOO_LARGE";
-    private static final String COMPACTION_FAILED = "COMPACTION_FAILED";
-    private static final String INVALID_CONVERSATION_HISTORY = "INVALID_CONVERSATION_HISTORY";
 
     private final ConversationStore conversationStore;
     private final ConversationModels conversationModels;
@@ -101,7 +104,7 @@ public final class JobProcessor implements MessageJobPort {
     private void processClaim(MessageWorkClaim claim, WorkGuard guard, ProcessingResultTracker resultTracker) {
         Optional<ConversationModel> resolvedModel = conversationModels.resolve(claim.modelSelection());
         if (resolvedModel.isEmpty()) {
-            appendRuntime(claim, guard, List.of(runtime(MODEL_UNAVAILABLE)), ConversationStore.JobUpdate.COMPLETE, resultTracker);
+            appendRuntime(claim, guard, MODEL_UNAVAILABLE, ConversationStore.JobUpdate.COMPLETE, resultTracker);
             return;
         }
         ConversationModel conversationModel = resolvedModel.orElseThrow();
@@ -117,7 +120,7 @@ public final class JobProcessor implements MessageJobPort {
         try {
             conversationStore.bindModelRoute(claim, routeId);
         } catch (ModelRouteMismatchException exception) {
-            appendRuntime(claim, guard, List.of(runtime(MODEL_UNAVAILABLE)), ConversationStore.JobUpdate.COMPLETE, resultTracker);
+            appendRuntime(claim, guard, MODEL_UNAVAILABLE, ConversationStore.JobUpdate.COMPLETE, resultTracker);
             return;
         }
         while (guard.stillOwned()) {
@@ -125,7 +128,7 @@ public final class JobProcessor implements MessageJobPort {
             Map<SessionSequence, ModelContinuation> continuations = Optional.ofNullable(conversationStore.loadContinuations(claim))
                     .orElseGet(Map::of);
             if (hasContinuationForAnotherRoute(continuations, routeId)) {
-                appendRuntime(claim, guard, List.of(runtime(MODEL_UNAVAILABLE)), ConversationStore.JobUpdate.COMPLETE, resultTracker);
+                appendRuntime(claim, guard, MODEL_UNAVAILABLE, ConversationStore.JobUpdate.COMPLETE, resultTracker);
                 return;
             }
             try (ToolSnapshot tools = toolCatalog.snapshot()) {
@@ -149,13 +152,13 @@ public final class JobProcessor implements MessageJobPort {
                     reply = result.reply();
                     continuation = result.continuation();
                 } catch (BudgetExhausted exception) {
-                    appendRuntime(claim, guard, List.of(runtime(MODEL_CALL_LIMIT_REACHED)),
+                    appendRuntime(claim, guard, MODEL_CALL_LIMIT_REACHED,
                             ConversationStore.JobUpdate.COMPLETE, resultTracker);
                     return;
                 } catch (ModelCallFailure failure) {
                     if (failure.kind() == ModelCallFailure.Kind.INVALID_HISTORY) {
                         logModelFailure(claim, reservation.ordinal(), failure.kind(), elapsedSince(requestStartedAt));
-                        appendRuntime(claim, guard, List.of(runtime(INVALID_CONVERSATION_HISTORY)),
+                        appendRuntime(claim, guard, INVALID_CONVERSATION_HISTORY,
                                 ConversationStore.JobUpdate.COMPLETE, resultTracker);
                         return;
                     }
@@ -170,7 +173,7 @@ public final class JobProcessor implements MessageJobPort {
                     return;
                 }
                 if (continuation.isPresent() && !routeId.equals(continuation.orElseThrow().modelRouteId())) {
-                    appendRuntime(claim, guard, List.of(runtime(MODEL_UNAVAILABLE)),
+                    appendRuntime(claim, guard, MODEL_UNAVAILABLE,
                             ConversationStore.JobUpdate.COMPLETE, resultTracker);
                     return;
                 }
@@ -187,7 +190,7 @@ public final class JobProcessor implements MessageJobPort {
                 }
                 ModelReply.UseTools useTools = (ModelReply.UseTools) reply;
                 if (ordinal == maxModelCalls) {
-                    appendRuntime(claim, guard, List.of(runtime(MODEL_CALL_LIMIT_REACHED)),
+                    appendRuntime(claim, guard, MODEL_CALL_LIMIT_REACHED,
                             ConversationStore.JobUpdate.COMPLETE, resultTracker);
                     return;
                 }
@@ -256,7 +259,7 @@ public final class JobProcessor implements MessageJobPort {
             ConversationModel conversationModel) {
         logModelFailure(claim, reservation.ordinal(), ModelCallFailure.Kind.CONTEXT_TOO_LARGE, duration);
         if (conversationStore.hasOverflowCompaction(claim.messageJobId())) {
-            appendRuntime(claim, guard, List.of(runtime(CONTEXT_TOO_LARGE)),
+            appendRuntime(claim, guard, CONTEXT_TOO_LARGE,
                     ConversationStore.JobUpdate.COMPLETE, resultTracker);
             return false;
         }
@@ -273,7 +276,7 @@ public final class JobProcessor implements MessageJobPort {
             ConversationModel conversationModel) {
         if (context.projection().isEmpty()) {
             logCompaction(claim, "compact_failure", "NO_PROJECTION", context.estimateTokens(), 0L);
-            appendRuntime(claim, guard, List.of(runtime(CONTEXT_TOO_LARGE)),
+            appendRuntime(claim, guard, CONTEXT_TOO_LARGE,
                     ConversationStore.JobUpdate.COMPLETE, resultTracker);
             return false;
         }
@@ -281,7 +284,7 @@ public final class JobProcessor implements MessageJobPort {
         Optional<CompactionBoundary> boundary = selectBoundary(claim, context, projection.model(), conversationModel);
         if (boundary.isEmpty()) {
             logCompaction(claim, "compact_failure", "NO_BOUNDARY", context.estimateTokens(), projection.model().contextWindowTokens());
-            appendRuntime(claim, guard, List.of(runtime(CONTEXT_TOO_LARGE)),
+            appendRuntime(claim, guard, CONTEXT_TOO_LARGE,
                     ConversationStore.JobUpdate.COMPLETE, resultTracker);
             return false;
         }
@@ -294,7 +297,7 @@ public final class JobProcessor implements MessageJobPort {
                     selected.history().size(), 0));
         } catch (BudgetExhausted exception) {
             logCompaction(claim, "compact_failure", "MODEL_LIMIT", context.estimateTokens(), projection.model().contextWindowTokens());
-            appendRuntime(claim, guard, List.of(runtime(MODEL_CALL_LIMIT_REACHED)),
+            appendRuntime(claim, guard, MODEL_CALL_LIMIT_REACHED,
                     ConversationStore.JobUpdate.COMPLETE, resultTracker);
             return false;
         } catch (ModelCallFailure failure) {
@@ -309,7 +312,7 @@ public final class JobProcessor implements MessageJobPort {
             compactedSummary = new ContextSummary(summary);
         } catch (IllegalArgumentException exception) {
             logCompaction(claim, "compact_failure", "SUMMARY_INVALID", context.estimateTokens(), projection.model().contextWindowTokens());
-            appendRuntime(claim, guard, List.of(runtime(COMPACTION_FAILED)),
+            appendRuntime(claim, guard, COMPACTION_FAILED,
                     ConversationStore.JobUpdate.COMPLETE, resultTracker);
             return false;
         }
@@ -319,11 +322,12 @@ public final class JobProcessor implements MessageJobPort {
         long afterEstimate = contextUsageEstimator.estimate(afterProjection, Optional.empty()).tokens();
         if (afterEstimate >= fourFifths(projection.model().contextWindowTokens())) {
             logCompaction(claim, "compact_failure", "SUMMARY_TOO_LARGE", afterEstimate, projection.model().contextWindowTokens());
-            appendRuntime(claim, guard, List.of(runtime(CONTEXT_TOO_LARGE)),
+            appendRuntime(claim, guard, CONTEXT_TOO_LARGE,
                     ConversationStore.JobUpdate.COMPLETE, resultTracker);
             return false;
         }
         try {
+            conversationStore.updateProgress(claim, new JobProgress(JobPhase.HISTORY_COMMIT, clock.instant(), Optional.empty()));
             conversationStore.compact(claim, new ConversationStore.CompactionData(
                     context.compaction().map(value -> value.generation()).orElse(0L) + 1, reason, compactedSummary.text(),
                     selected.boundary(), projection.model(), context.requestShapeFingerprint(), context.estimateTokens(), afterEstimate), clock.instant());
@@ -347,7 +351,7 @@ public final class JobProcessor implements MessageJobPort {
                 && scheduleRetry(claim, guard, resultTracker)) {
             return false;
         }
-        appendRuntime(claim, guard, List.of(runtime(COMPACTION_FAILED)),
+        appendRuntime(claim, guard, COMPACTION_FAILED,
                 ConversationStore.JobUpdate.COMPLETE, resultTracker);
         return false;
     }
@@ -489,6 +493,11 @@ public final class JobProcessor implements MessageJobPort {
             if (!guard.confirmOwnership()) {
                 return List.of();
             }
+            conversationStore.updateProgress(claim,
+                    new JobProgress(JobPhase.TOOL_EXECUTION, clock.instant(), Optional.of(request.toolName().value())));
+            if (!guard.stillOwned()) {
+                return List.of();
+            }
             messages.add(executeTool(claim, ordinal, tools, request));
         }
         return List.copyOf(messages);
@@ -527,11 +536,11 @@ public final class JobProcessor implements MessageJobPort {
         if (failure.kind() == ModelCallFailure.Kind.CORRECTABLE) {
             ConversationStore.JobUpdate update = ordinal < maxModelCalls
                     ? ConversationStore.JobUpdate.KEEP_WORKING : ConversationStore.JobUpdate.COMPLETE;
-            return appendRuntime(claim, guard, List.of(runtime(MODEL_OUTPUT_INVALID)), update, resultTracker)
+            return appendRuntime(claim, guard, MODEL_OUTPUT_INVALID, update, resultTracker)
                     && update == ConversationStore.JobUpdate.KEEP_WORKING;
         }
         if (failure.kind() == ModelCallFailure.Kind.CONTEXT_TOO_LARGE) {
-            appendRuntime(claim, guard, List.of(runtime(CONTEXT_TOO_LARGE)),
+            appendRuntime(claim, guard, CONTEXT_TOO_LARGE,
                     ConversationStore.JobUpdate.COMPLETE, resultTracker);
             return false;
         }
@@ -539,7 +548,7 @@ public final class JobProcessor implements MessageJobPort {
                 && scheduleRetry(claim, guard, resultTracker)) {
             return false;
         }
-        appendRuntime(claim, guard, List.of(runtime(MODEL_UNAVAILABLE)),
+        appendRuntime(claim, guard, MODEL_UNAVAILABLE,
                 ConversationStore.JobUpdate.COMPLETE, resultTracker);
         return false;
     }
@@ -554,7 +563,7 @@ public final class JobProcessor implements MessageJobPort {
             return false;
         }
         Duration delay = retryDelay(job.orElseThrow().retryCount());
-        boolean scheduled = conversationStore.scheduleRetry(claim, delay);
+        boolean scheduled = conversationStore.scheduleRetry(claim, delay, MODEL_UNAVAILABLE);
         if (scheduled) {
             resultTracker.retryScheduled();
             telemetry.retry("MODEL", delay);
@@ -576,33 +585,22 @@ public final class JobProcessor implements MessageJobPort {
     private boolean appendRuntime(
             MessageWorkClaim claim,
             WorkGuard guard,
-            List<ConversationStore.MessageData> messages,
+            JobFailure failure,
             ConversationStore.JobUpdate update,
-            ProcessingResultTracker resultTracker) {
-        return appendRuntime(claim, guard, messages, update, Optional.empty(), resultTracker);
-    }
-
-    private boolean appendRuntime(
-            MessageWorkClaim claim,
-            WorkGuard guard,
-            List<ConversationStore.MessageData> messages,
-            ConversationStore.JobUpdate update,
-            Optional<ModelContinuation> continuation,
             ProcessingResultTracker resultTracker) {
         if (!guard.stillOwned()) {
             resultTracker.ownershipLost();
             return false;
         }
         try {
-            conversationStore.append(claim, new ConversationStore.MessageBatch(messages, update, continuation), clock.instant());
+            conversationStore.updateProgress(claim, new JobProgress(JobPhase.HISTORY_COMMIT, clock.instant(), Optional.empty()));
+            ConversationStore.RuntimeData message = new ConversationStore.RuntimeData(failure.name(), failure.message());
+            conversationStore.append(claim, new ConversationStore.MessageBatch(List.of(message), update,
+                    Optional.empty(), Optional.empty(), Optional.of(failure)), clock.instant());
             if (update == ConversationStore.JobUpdate.COMPLETE) {
                 resultTracker.completed();
             }
-            for (ConversationStore.MessageData message : messages) {
-                if (message instanceof ConversationStore.RuntimeData runtime) {
-                    telemetry.feedback(runtime.code());
-                }
-            }
+            telemetry.feedback(failure.name());
             return guard.stillOwned();
         } catch (StaleWorkClaimException exception) {
             resultTracker.ownershipLost();
@@ -619,6 +617,7 @@ public final class JobProcessor implements MessageJobPort {
             return false;
         }
         try {
+            conversationStore.updateProgress(claim, new JobProgress(JobPhase.HISTORY_COMMIT, clock.instant(), Optional.empty()));
             conversationStore.append(claim, new ConversationStore.MessageBatch(messages, update, continuation, checkpoint), clock.instant());
             if (update == ConversationStore.JobUpdate.COMPLETE) {
                 resultTracker.completed();
@@ -640,7 +639,7 @@ public final class JobProcessor implements MessageJobPort {
             return;
         }
         if (failure.kind() == ConversationStoreFailure.Kind.INVALID_HISTORY) {
-            appendRuntime(claim, guard, List.of(runtime(INVALID_CONVERSATION_HISTORY)),
+            appendRuntime(claim, guard, INVALID_CONVERSATION_HISTORY,
                     ConversationStore.JobUpdate.COMPLETE, resultTracker);
             return;
         }
@@ -651,7 +650,7 @@ public final class JobProcessor implements MessageJobPort {
                     && job.orElseThrow().modelCallCount() < maxModelCalls
                     && job.orElseThrow().retryCount() < retryPolicy.transientRetries()) {
                 Duration delay = retryDelay(job.orElseThrow().retryCount());
-                boolean scheduled = conversationStore.scheduleRetry(claim, delay);
+                boolean scheduled = conversationStore.scheduleRetry(claim, delay, JobFailure.STORAGE_UNAVAILABLE);
                 if (scheduled) {
                     resultTracker.retryScheduled();
                     telemetry.retry("STORAGE", delay);
@@ -661,23 +660,11 @@ public final class JobProcessor implements MessageJobPort {
                 }
                 return;
             }
-            appendRuntime(claim, guard, List.of(runtime(MODEL_UNAVAILABLE)),
+            appendRuntime(claim, guard, JobFailure.STORAGE_UNAVAILABLE,
                     ConversationStore.JobUpdate.COMPLETE, resultTracker);
         } catch (RuntimeException ignored) {
             resultTracker.stateUnconfirmed();
         }
-    }
-
-    private static ConversationStore.RuntimeData runtime(String code) {
-        return switch (code) {
-            case MODEL_CALL_LIMIT_REACHED -> new ConversationStore.RuntimeData(code, "Runtime model call limit reached.");
-            case MODEL_OUTPUT_INVALID -> new ConversationStore.RuntimeData(code, "Runtime model output is invalid.");
-            case MODEL_UNAVAILABLE -> new ConversationStore.RuntimeData(code, "Runtime model is unavailable.");
-            case CONTEXT_TOO_LARGE -> new ConversationStore.RuntimeData(code, "Runtime model context is too large.");
-            case COMPACTION_FAILED -> new ConversationStore.RuntimeData(code, "Runtime context compaction failed.");
-            case INVALID_CONVERSATION_HISTORY -> new ConversationStore.RuntimeData(code, "Runtime conversation history is invalid.");
-            default -> throw new IllegalArgumentException("Unsupported runtime code");
-        };
     }
 
     private static void logModelRequest(

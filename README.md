@@ -58,12 +58,47 @@ Submit a message, poll its job, then read the complete session history:
 ```text
 POST /internal/messages
 GET  /internal/message-jobs/{messageJobId}
+GET  /internal/sessions/{sessionId}
 GET  /internal/sessions/{sessionId}/messages
 PUT  /internal/sessions/{sessionId}/model
 GET  /internal/slack-deliveries?teamId=...&channelId=...&messageTs=...
 ```
 
-`POST /internal/messages` accepts `sessionKey`, `participantId`, `sourceMessageId`, and `message`. Reusing a nonblank `sessionKey` continues the same session. The accepted response contains `sessionId` and `messageJobId`. The job response contains its IDs, `status`, `retryCount`, and `modelCallCount`.
+`POST /internal/messages` accepts `sessionKey`, `participantId`, `sourceMessageId`, and `message`. Reusing a nonblank `sessionKey` continues the same session. The accepted response contains `sessionId` and `messageJobId`.
+
+The job response contains its IDs, `status`, `retryCount`, and `modelCallCount`, plus
+`phase`, `phaseStartedAt`, `currentToolName`, `failureCode`, and `failureMessage`.
+`GET /internal/sessions/{sessionId}` exposes the same progress/failure fields in
+`currentJob`. Absent progress or failure values are explicit JSON `null`.
+
+| Phase | Meaning |
+| --- | --- |
+| `PREPARING` | Claimed work is preparing the next turn or continuing after a committed batch. |
+| `MODEL_CALL` | A counted model request is in progress, including context compaction requests. |
+| `TOOL_EXECUTION` | The tool identified by `currentToolName` is running. |
+| `HISTORY_COMMIT` | Runtime is committing history or compaction; this does not expose uncommitted events. |
+
+`phaseStartedAt` is the start time of the current phase, not a heartbeat or progress
+percentage. `currentToolName` is populated only during `TOOL_EXECUTION`. Phases are
+durable snapshots, not an event stream; polling can miss short transitions.
+Assistant tool calls and all matching tool observations still become visible as
+one atomic history batch.
+
+`DONE` means processing has ended, not necessarily that it succeeded. Inspect
+`failureCode` and the final history event to distinguish outcomes. Failure messages
+are fixed safe text, never raw provider exceptions. Codes are
+`MODEL_CALL_LIMIT_REACHED`, `MODEL_OUTPUT_INVALID`, `MODEL_UNAVAILABLE`,
+`CONTEXT_TOO_LARGE`, `COMPACTION_FAILED`, `INVALID_CONVERSATION_HISTORY`,
+`STORAGE_UNAVAILABLE`, and `PROCESSING_INTERRUPTED`.
+An ordinary tool error remains that tool's observation and does not, by itself,
+mark the entire job as failed.
+
+Retry and completion clear in-flight phase/tool fields. A fresh claim or model
+reservation clears the previous failure; successful completion does too. When a
+worker lease expires, polling hides stale progress and reports
+`PROCESSING_INTERRUPTED` while retaining `WORKING` until recovery claims the job.
+Reclaim initializes `PREPARING`; the old claim cannot overwrite its progress or
+history. Process restarts do not require an in-memory progress cache.
 
 `PUT /internal/sessions/{sessionId}/model` accepts `{"model":"configured-key"}` and returns `200` with `{sessionId, model, effectiveFor:"NEW_MESSAGES"}`. Only messages accepted after the change use the selected model; queued, running, and retrying jobs keep the model captured when they were accepted. Selecting a configured model takes effect without restarting Runtime.
 
@@ -121,9 +156,9 @@ Startup is safe with no configured connections or when every configured server i
 
 ## Limits, retries, and recovery
 
-`session-agent.model.max-model-calls-per-message` controls the maximum provider requests for one user message. Its environment form is `SESSION_AGENT_MAX_MODEL_CALLS_PER_MESSAGE`; the default is 12. The count is reserved immediately before each real provider request, including failed attempts. On the final allowed call, a direct answer completes normally; tool requests are not run and the runtime appends `MODEL_CALL_LIMIT_REACHED`.
+`session-agent.model.max-model-calls-per-message` limits Runtime model requests for one user message. Its environment form is `SESSION_AGENT_MAX_MODEL_CALLS_PER_MESSAGE`; the default is 12. The count is reserved immediately before each adapter request, including failed attempts. On the final allowed call, a direct answer completes normally; tool requests are not run and the runtime appends `MODEL_CALL_LIMIT_REACHED`.
 
-Spring AI retries are disabled with `spring.ai.retry.max-attempts=1`. Retrying transient provider failures is owned by the runtime's conversation-job loop, which preserves the already-counted model call and avoids duplicate history.
+Spring AI retries are disabled with `spring.ai.retry.max-attempts=1`. Retrying transient provider failures is owned by the runtime's conversation-job loop, which preserves the already-counted model call and avoids duplicate history. With a direct provider connection, each reservation corresponds to a provider request; when a gateway retries internally, it does not bound the gateway's underlying provider attempts.
 
 Tool execution has no runtime deduplication layer. A read-only tool can run again if the process crashes after execution and before its observation batch commits. Any future side-effecting tool must provide idempotency at its adapter or external-service boundary.
 
@@ -162,6 +197,19 @@ login, refresh, and provider-protocol conversion. An OAuth access token is not a
 drop-in replacement for an OpenAI API key. Keep these provider details outside
 the conversation and MCP contracts.
 
+The currently pinned host-local OMP gateway does not run the OMP agent loop or add
+its agent prompt, skills, or conversation history. It translates the caller's
+messages/tools into the Codex protocol, manages OAuth and transport, and can apply
+protocol/history normalization and internal retries. It is not a byte-for-byte
+relay. Runtime's `modelCallCount` counts requests to that gateway, not all
+underlying Codex attempts.
+
+For this pinned Codex route, the gateway does not forward the OpenAI
+`max_tokens`/`max_completion_tokens`, temperature, or top-p settings. Configuring
+Runtime `max-output-tokens` is therefore not a guaranteed provider-side output
+cap on this route. Recheck these boundaries when upgrading or replacing OMP;
+this feature does not change gateway behavior.
+
 On a workstation with the separately installed OMP-backed MVP deployment, use
 `~/.local/bin/session-agent-mvp check|start|stop|restart|status|logs`. Its private
 configuration, pinned artifacts, and operating instructions live outside the
@@ -171,7 +219,7 @@ Do not start both deployment methods on the same ports.
 
 ## Database and local runtime
 
-The shipped database contract is a fresh schema applied through ordered Flyway migrations V1 through V4. Compatibility with removed pre-release schemas is not supported. Do not reset or delete the current database or its data as part of starting this version. The Compose service binds the runtime HTTP port to loopback only. Required local credentials are intentionally not committed.
+The shipped database contract is a fresh schema applied through ordered Flyway migrations V1 through V5. V5 adds durable job progress and safe failure codes without rewriting conversation history; historical terminal failures are backfilled only from an allowlisted final runtime event, not an earlier recoverable failure. Existing working rows may initially have no phase until reclaimed. Compatibility with removed pre-release schemas is not supported. Do not reset or delete the current database or its data as part of starting this version. The Compose service binds the runtime HTTP port to loopback only. Required local credentials are intentionally not committed.
 
 Conversations and tool results are retained indefinitely. This POC adds no TTL, automatic cleanup, or backup/recovery workflow. Existing temporary continuation cleanup and Docker/host log rotation remain unchanged.
 

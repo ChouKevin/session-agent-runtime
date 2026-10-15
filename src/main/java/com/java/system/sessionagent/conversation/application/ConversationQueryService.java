@@ -44,7 +44,7 @@ public final class ConversationQueryService implements ConversationQueryPort {
     public Optional<MessageJobView> findJob(String messageJobId) {
         return conversationStore.readJob(new MessageJobId(messageJobId)).map(projection -> new MessageJobView(
                 projection.messageJobId().value(), projection.sessionId().value(), projection.status(), projection.retryCount(),
-                projection.modelCallCount()));
+                projection.modelCallCount(), projection.progress(), projection.failure()));
     }
 
     @Override
@@ -94,7 +94,7 @@ public final class ConversationQueryService implements ConversationQueryPort {
 
     private MessageJobView toJobView(ConversationStore.MessageJobProjection projection) {
         return new MessageJobView(projection.messageJobId().value(), projection.sessionId().value(), projection.status(), projection.retryCount(),
-                projection.modelCallCount());
+                projection.modelCallCount(), projection.progress(), projection.failure());
     }
 
     private static Optional<SessionDetailView.CompactionBoundaryView> compactionBoundary(Optional<ContextCompaction> compaction) {

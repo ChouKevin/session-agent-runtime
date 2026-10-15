@@ -312,9 +312,7 @@ class MessageJobToolExecutionTest {
         ArgumentCaptor<ConversationStore.MessageBatch> batch = ArgumentCaptor.forClass(ConversationStore.MessageBatch.class);
         verify(store).append(eq(claim), batch.capture(), any(Instant.class));
         assertThat(invoked).isFalse();
-        assertThat(batch.getValue()).isEqualTo(new ConversationStore.MessageBatch(List.of(
-                new ConversationStore.RuntimeData("MODEL_CALL_LIMIT_REACHED", "Runtime model call limit reached.")),
-                ConversationStore.JobUpdate.COMPLETE));
+        assertTerminalFailure(batch.getValue(), "MODEL_CALL_LIMIT_REACHED");
     }
 
     @Test

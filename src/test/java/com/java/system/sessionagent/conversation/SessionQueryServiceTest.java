@@ -2,6 +2,10 @@ package com.java.system.sessionagent.conversation;
 
 import com.java.system.sessionagent.conversation.application.ConversationQueryService;
 import com.java.system.sessionagent.conversation.domain.ContextUsageEstimator;
+import com.java.system.sessionagent.conversation.domain.JobFailure;
+import com.java.system.sessionagent.conversation.domain.JobPhase;
+import com.java.system.sessionagent.conversation.domain.JobProgress;
+import com.java.system.sessionagent.conversation.domain.JobStatus;
 import com.java.system.sessionagent.conversation.domain.MessageJobId;
 import com.java.system.sessionagent.conversation.domain.MessageRole;
 import com.java.system.sessionagent.conversation.domain.ModelDescriptor;
@@ -9,6 +13,7 @@ import com.java.system.sessionagent.conversation.domain.ModelRouteId;
 import com.java.system.sessionagent.conversation.domain.SessionId;
 import com.java.system.sessionagent.conversation.domain.SessionSequence;
 import com.java.system.sessionagent.conversation.domain.UserMessage;
+import com.java.system.sessionagent.conversation.port.in.MessageJobView;
 import com.java.system.sessionagent.conversation.port.in.SessionDetailView;
 import com.java.system.sessionagent.conversation.port.out.ConversationModel;
 import com.java.system.sessionagent.conversation.port.out.ConversationStore;
@@ -60,9 +65,11 @@ class SessionQueryServiceTest {
     void projects_active_context_usage_without_promoting_session_content_or_provider_metadata() {
         ConversationStore store = mock(ConversationStore.class);
         SessionId sessionId = new SessionId(SESSION_ID);
+        JobProgress activeProgress = new JobProgress(JobPhase.MODEL_CALL, Instant.parse("2026-10-13T15:45:01Z"),
+                Optional.empty());
         when(store.readSession(sessionId)).thenReturn(Optional.of(new ConversationStore.SessionProjection(sessionId, CREATED_AT,
                 Optional.of(new ConversationStore.MessageJobProjection(new MessageJobId("f47bdb7e-75c3-4dbf-bdd4-1f8681705b62"), sessionId,
-                        com.java.system.sessionagent.conversation.domain.JobStatus.DONE, 1, 2)), "test")));
+                        JobStatus.WORKING, 1, 2, Optional.of(activeProgress), Optional.empty())), "test")));
         when(store.loadHistory(sessionId)).thenReturn(List.of(new UserMessage(sessionId, new SessionSequence(1),
                 Optional.of(new MessageJobId("f47bdb7e-75c3-4dbf-bdd4-1f8681705b62")), CREATED_AT, MessageRole.USER, "U01", "private text")));
         when(store.loadCompaction(sessionId)).thenReturn(Optional.empty());
@@ -76,12 +83,34 @@ class SessionQueryServiceTest {
 
         assertThat(detail.sessionId()).isEqualTo(SESSION_ID);
         assertThat(detail.currentJob()).isPresent();
+        assertThat(detail.currentJob().orElseThrow().progress()).contains(activeProgress);
+        assertThat(detail.currentJob().orElseThrow().failure()).isEmpty();
         assertThat(detail.latestCompaction()).isEmpty();
         assertThat(detail.context().modelId()).isEqualTo("gemini-3.1-flash-lite");
         assertThat(detail.context().capacityTokens()).isEqualTo(1_048_576);
         assertThat(detail.context().estimatedUsedTokens()).isPositive();
         assertThat(detail.context().basis().name()).isEqualTo("FULL_ESTIMATE");
     }
+
+    @Test
+    void projects_safe_job_failure_without_live_progress_for_polling() {
+        ConversationStore store = mock(ConversationStore.class);
+        MessageJobId jobId = new MessageJobId("f47bdb7e-75c3-4dbf-bdd4-1f8681705b62");
+        SessionId sessionId = new SessionId(SESSION_ID);
+        JobFailure failure = JobFailure.MODEL_UNAVAILABLE;
+        when(store.readJob(jobId)).thenReturn(Optional.of(new ConversationStore.MessageJobProjection(
+                jobId, sessionId, JobStatus.RETRY, 1, 1, Optional.empty(), Optional.of(failure))));
+        ConversationQueryService service = new ConversationQueryService(store,
+                TestConfiguredModels.withModel(model(new ModelDescriptor(new ModelRouteId("test"), "test-model", 1_000))),
+                () -> new ToolSnapshot(List.of()), new ContextUsageEstimator());
+
+        MessageJobView view = service.findJob(jobId.value()).orElseThrow();
+
+        assertThat(view.status()).isEqualTo(JobStatus.RETRY);
+        assertThat(view.progress()).isEmpty();
+        assertThat(view.failure()).contains(failure);
+    }
+
 
     private static ConversationModel model(ModelDescriptor descriptor) {
         return new ConversationModel() {

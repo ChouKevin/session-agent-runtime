@@ -151,7 +151,8 @@ public interface PostgresConversationMapper extends BaseMapper<PostgresConversat
                 order by candidate.available_at, candidate.created_at, candidate.message_job_id
                 for update skip locked limit 1)
             update message_job job set status = 'WORKING', worker_id = #{workerId},
-                locked_until = clock_timestamp() + (#{leaseMilliseconds} * interval '1 millisecond'), claim_number = job.claim_number + 1
+                locked_until = clock_timestamp() + (#{leaseMilliseconds} * interval '1 millisecond'), claim_number = job.claim_number + 1,
+                phase = 'PREPARING', phase_started_at = clock_timestamp(), current_tool_name = null, failure_code = null
             from candidate where job.message_job_id = candidate.message_job_id and job.session_id = candidate.session_id
             returning job.message_job_id, job.session_id, job.model_key, job.model_fingerprint, job.worker_id, job.claim_number, job.locked_until,
                 clock_timestamp() as claimed_at
@@ -347,7 +348,8 @@ public interface PostgresConversationMapper extends BaseMapper<PostgresConversat
             @Param("coveredThrough") long coveredThrough);
 
     @Select(value = """
-            update message_job set model_calls = model_calls + 1
+            update message_job set model_calls = model_calls + 1,
+                phase = 'MODEL_CALL', phase_started_at = #{startedAt}, current_tool_name = null, failure_code = null
             where message_job_id = #{messageJobId} and session_id = #{sessionId} and status = 'WORKING' and worker_id = #{workerId}
               and claim_number = #{claimNumber} and locked_until > clock_timestamp() and model_calls < #{maxModelCalls}
             returning model_calls
@@ -358,7 +360,23 @@ public interface PostgresConversationMapper extends BaseMapper<PostgresConversat
             @Param("sessionId") UUID sessionId,
             @Param("workerId") String workerId,
             @Param("claimNumber") long claimNumber,
-            @Param("maxModelCalls") int maxModelCalls);
+            @Param("maxModelCalls") int maxModelCalls,
+            @Param("startedAt") OffsetDateTime startedAt);
+
+    @Update("""
+            update message_job set phase = #{phase}, phase_started_at = #{startedAt},
+                current_tool_name = #{toolName,jdbcType=VARCHAR}, failure_code = null
+            where message_job_id = #{messageJobId} and session_id = #{sessionId} and status = 'WORKING' and worker_id = #{workerId}
+              and claim_number = #{claimNumber} and locked_until > clock_timestamp()
+            """)
+    int updateProgress(
+            @Param("messageJobId") UUID messageJobId,
+            @Param("sessionId") UUID sessionId,
+            @Param("workerId") String workerId,
+            @Param("claimNumber") long claimNumber,
+            @Param("phase") String phase,
+            @Param("startedAt") OffsetDateTime startedAt,
+            @Param("toolName") String toolName);
 
     @Insert("""
             insert into session_message(session_id, sequence, message_job_id, role, created_at)
@@ -440,7 +458,8 @@ public interface PostgresConversationMapper extends BaseMapper<PostgresConversat
 
     @Update("""
             update message_job set status = 'RETRY', retry_count = retry_count + 1,
-                available_at = clock_timestamp() + (#{retryMilliseconds} * interval '1 millisecond'), worker_id = null, locked_until = null
+                available_at = clock_timestamp() + (#{retryMilliseconds} * interval '1 millisecond'), worker_id = null, locked_until = null,
+                phase = null, phase_started_at = null, current_tool_name = null, failure_code = #{failureCode}
             where message_job_id = #{messageJobId} and session_id = #{sessionId} and status = 'WORKING' and worker_id = #{workerId}
               and claim_number = #{claimNumber} and locked_until > clock_timestamp()
             """)
@@ -449,7 +468,8 @@ public interface PostgresConversationMapper extends BaseMapper<PostgresConversat
             @Param("messageJobId") UUID messageJobId,
             @Param("sessionId") UUID sessionId,
             @Param("workerId") String workerId,
-            @Param("claimNumber") long claimNumber);
+            @Param("claimNumber") long claimNumber,
+            @Param("failureCode") String failureCode);
 
     @Update("""
             update message_job set locked_until = locked_until
@@ -463,7 +483,22 @@ public interface PostgresConversationMapper extends BaseMapper<PostgresConversat
             @Param("claimNumber") long claimNumber);
 
     @Update("""
-            update message_job set status = 'DONE', completed_at = #{completedAt}, worker_id = null, locked_until = null
+            update message_job set phase = 'PREPARING', phase_started_at = #{startedAt}, current_tool_name = null,
+                failure_code = #{failureCode,jdbcType=VARCHAR}
+            where message_job_id = #{messageJobId} and session_id = #{sessionId} and status = 'WORKING' and worker_id = #{workerId}
+              and claim_number = #{claimNumber} and locked_until > clock_timestamp()
+            """)
+    int finishWorkingBatch(
+            @Param("messageJobId") UUID messageJobId,
+            @Param("sessionId") UUID sessionId,
+            @Param("workerId") String workerId,
+            @Param("claimNumber") long claimNumber,
+            @Param("startedAt") OffsetDateTime startedAt,
+            @Param("failureCode") String failureCode);
+
+    @Update("""
+            update message_job set status = 'DONE', completed_at = #{completedAt}, worker_id = null, locked_until = null,
+                phase = null, phase_started_at = null, current_tool_name = null, failure_code = #{failureCode,jdbcType=VARCHAR}
             where message_job_id = #{messageJobId} and session_id = #{sessionId} and status = 'WORKING' and worker_id = #{workerId}
               and claim_number = #{claimNumber} and locked_until > clock_timestamp()
             """)
@@ -472,13 +507,32 @@ public interface PostgresConversationMapper extends BaseMapper<PostgresConversat
             @Param("messageJobId") UUID messageJobId,
             @Param("sessionId") UUID sessionId,
             @Param("workerId") String workerId,
-            @Param("claimNumber") long claimNumber);
+            @Param("claimNumber") long claimNumber,
+            @Param("failureCode") String failureCode);
 
     @Select("""
-            select session.session_id, session.created_at, session.selected_model, job.message_job_id, job.status, job.retry_count, job.model_calls
+            select message_job_id, session_id, status, retry_count, model_calls,
+                case when status = 'WORKING' and locked_until > statement_timestamp() then phase end as phase,
+                case when status = 'WORKING' and locked_until > statement_timestamp() then phase_started_at end as phase_started_at,
+                case when status = 'WORKING' and locked_until > statement_timestamp() then current_tool_name end as current_tool_name,
+                case when status = 'WORKING' and locked_until <= statement_timestamp() then 'PROCESSING_INTERRUPTED'
+                    else failure_code end as failure_code
+            from message_job where message_job_id = #{messageJobId}
+            """)
+    @Options(flushCache = Options.FlushCachePolicy.FALSE, useCache = false)
+    List<JobProjectionRow> readJob(@Param("messageJobId") UUID messageJobId);
+
+    @Select("""
+            select session.session_id, session.created_at, session.selected_model, job.message_job_id, job.status, job.retry_count, job.model_calls,
+                job.phase, job.phase_started_at, job.current_tool_name, job.failure_code
             from conversation_session session
             left join lateral (
-                select message_job_id, session_id, status, retry_count, model_calls
+                select message_job_id, session_id, status, retry_count, model_calls,
+                    case when status = 'WORKING' and locked_until > statement_timestamp() then phase end as phase,
+                    case when status = 'WORKING' and locked_until > statement_timestamp() then phase_started_at end as phase_started_at,
+                    case when status = 'WORKING' and locked_until > statement_timestamp() then current_tool_name end as current_tool_name,
+                    case when status = 'WORKING' and locked_until <= statement_timestamp() then 'PROCESSING_INTERRUPTED'
+                        else failure_code end as failure_code
                 from message_job where session_id = session.session_id
                 order by user_message_sequence desc, message_job_id desc limit 1
             ) job on true
@@ -716,6 +770,18 @@ public interface PostgresConversationMapper extends BaseMapper<PostgresConversat
             OffsetDateTime createdAt) {
     }
 
+    record JobProjectionRow(
+            UUID messageJobId,
+            UUID sessionId,
+            String status,
+            int retryCount,
+            int modelCalls,
+            String phase,
+            OffsetDateTime phaseStartedAt,
+            String currentToolName,
+            String failureCode) {
+    }
+
     record SessionProjectionRow(
             UUID sessionId,
             OffsetDateTime createdAt,
@@ -723,6 +789,10 @@ public interface PostgresConversationMapper extends BaseMapper<PostgresConversat
             UUID messageJobId,
             String status,
             Integer retryCount,
-            Integer modelCalls) {
+            Integer modelCalls,
+            String phase,
+            OffsetDateTime phaseStartedAt,
+            String currentToolName,
+            String failureCode) {
     }
 }
