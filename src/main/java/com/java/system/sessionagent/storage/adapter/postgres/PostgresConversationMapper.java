@@ -20,18 +20,12 @@ import java.util.UUID;
  * Typed SQL boundary for the runtime conversation tables.
  *
  * <p>The statements which coordinate leases, sequence allocation, and atomic
- * history writes intentionally remain explicit PostgreSQL SQL.  The mapper is
- * the only persistence boundary used by {@link PostgresConversationStore}; it
- * does not expose a generic SQL execution escape hatch.</p>
+ * history writes intentionally remain explicit PostgreSQL SQL. The mapper owns
+ * conversation persistence; global intake admission is shared through the JDBC
+ * capacity policy. It does not expose a generic SQL execution escape hatch.</p>
  */
 @Mapper
 public interface PostgresConversationMapper extends BaseMapper<PostgresConversationMapper.MessageJobEntity> {
-
-    @Select("select pg_advisory_xact_lock(731_937_205)")
-    String lockIntakeCapacity();
-
-    @Select("select count(*) from message_job where status in ('PENDING', 'WORKING', 'RETRY')")
-    long countUnfinishedJobs();
 
     @Select("select pg_advisory_xact_lock(#{firstLockKey}, #{secondLockKey})")
     String lockSourceIdentity(@Param("firstLockKey") int firstLockKey, @Param("secondLockKey") int secondLockKey);

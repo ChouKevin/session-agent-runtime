@@ -1,4 +1,4 @@
-package com.java.system.sessionagent.storage.adapter.postgres;
+package com.java.system.sessionagent.storage.adapter.postgres.jdbc;
 
 import org.apache.ibatis.type.BaseTypeHandler;
 import org.apache.ibatis.type.JdbcType;

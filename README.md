@@ -15,6 +15,7 @@ the [package architecture guide](docs/package-architecture.md).
 | MCP discovery, routing, connection lifecycle, or diagnostics | `src/main/java/com/java/system/sessionagent/mcp/domain`, `src/main/java/com/java/system/sessionagent/mcp/configuration`, `src/main/java/com/java/system/sessionagent/mcp/adapter/sdk`, and `src/main/java/com/java/system/sessionagent/mcp/adapter/actuator` |
 | Generic tool calls and observations | `src/main/java/com/java/system/sessionagent/tool/domain` and `src/main/java/com/java/system/sessionagent/tool/port` |
 | PostgreSQL persistence or migrations | `src/main/java/com/java/system/sessionagent/storage/adapter/postgres` and `src/main/resources/db/migration` |
+| Shared PostgreSQL intake capacity and UUID mapping | `src/main/java/com/java/system/sessionagent/storage/adapter/postgres/jdbc` |
 | Message, job, or session-history HTTP endpoints | `src/main/java/com/java/system/sessionagent/web/adapter/http` |
 | MCP actuator diagnostics | `src/main/java/com/java/system/sessionagent/mcp/adapter/actuator` |
 | Queued message-job claim, renewal, processing, and recovery | `src/main/java/com/java/system/sessionagent/worker/application` and `src/main/java/com/java/system/sessionagent/worker/configuration` |
@@ -161,6 +162,11 @@ Runtime failures retain their safe `{code, message}` result.
 The default worker configuration is `session-agent.worker.concurrency: 4`. The database queue capacity is `session-agent.worker.max-unfinished-jobs: 100`, counting all `PENDING`, `WORKING`, and `RETRY` jobs together. Terminal jobs release capacity. The database is the waiting queue: jobs in the same session run FIFO, while different sessions can run in parallel.
 
 When this unfinished-job capacity is full, a new HTTP message is rejected with `429` and `{"code":"queue_full"}`. A successful resend of an already accepted message returns its original `202` receipt instead of creating another job.
+
+HTTP and Slack intake share one PostgreSQL admission component, configured once
+at bootstrap. It owns the capacity limit, transaction-scoped advisory lock, and
+unfinished-job query. Both paths resolve duplicates before checking capacity for
+new jobs, so accepted resends still resolve to their original job when full.
 
 ## Generic MCP connections
 
@@ -314,6 +320,13 @@ When the unfinished-job capacity is full, the source is durably recorded as busy
 with (`目前工作已滿，這則訊息尚未受理，請稍後重新送出。`) and is not later
 promoted into a job by a resend. These notices are delivery status, not proof of
 job completion or a replacement for Socket Mode acknowledgement.
+
+The Slack intake transaction commits an accepted job together with its receipts,
+immutable thread binding, and queued notice, or commits BUSY receipts and a busy
+notice without creating a session or job. Its nonthrowing capacity check happens
+before nested conversation intake, so a full queue does not mark the BUSY
+transaction rollback-only. A BUSY resend stays BUSY even after capacity releases;
+delivery retries remain independent of admission and model processing.
 
 Terminal answers are persisted and delivered in parts of at most 4,000 UTF-16
 code units; retries continue with unsent parts and do not rerun the model.

@@ -48,6 +48,7 @@ import com.java.system.sessionagent.conversation.port.out.ConversationStore;
 import com.java.system.sessionagent.conversation.port.out.ModelCallReservation;
 import com.java.system.sessionagent.conversation.port.out.NoOpConversationTelemetry;
 import com.java.system.sessionagent.storage.adapter.postgres.PostgresConversationStore;
+import com.java.system.sessionagent.storage.adapter.postgres.jdbc.PostgresIntakeCapacity;
 import com.java.system.sessionagent.tool.port.ToolCatalog;
 import com.java.system.sessionagent.tool.port.ToolSnapshot;
 import com.slack.api.bolt.App;
@@ -145,6 +146,17 @@ class PostgresMessageSubmissionPostgresIT {
 
         assertThat(count(jdbcTemplate, "select count(*) from message_job")).isEqualTo(1);
         assertThat(count(jdbcTemplate, "select count(*) from conversation_session where session_key like '%2.000001'")).isZero();
+        assertThat(count(jdbcTemplate, "select count(*) from source_message")).isEqualTo(1);
+        assertThat(count(jdbcTemplate, "select count(*) from slack_thread_binding")).isEqualTo(1);
+        assertThat(count(jdbcTemplate, """
+                select count(*) from slack_message_receipt
+                where message_ts = '2.000001' and classification = 'BUSY'
+                    and session_id is null and message_job_id is null
+                """)).isEqualTo(1);
+        assertThat(count(jdbcTemplate, """
+                select count(*) from slack_event_receipt
+                where message_ts = '2.000001' and classification = 'BUSY' and correlation_id is null
+                """)).isEqualTo(2);
         assertThat(count(jdbcTemplate, "select count(*) from slack_delivery where kind = 'BUSY'")).isEqualTo(1);
         assertThat(count(jdbcTemplate, "select count(*) from slack_delivery where kind = 'QUEUED'")).isEqualTo(1);
     }
@@ -154,8 +166,18 @@ class PostgresMessageSubmissionPostgresIT {
         PostgresMessageSubmission intake = intake(1);
         MessageSubmission accepted = rootIntake("T1", "C1", "1.000001");
 
-        assertThat(intake.receive(accepted).outcome()).isEqualTo(SlackEventOutcome.ACCEPTED);
-        assertThat(intake.receive(accepted).outcome()).isEqualTo(SlackEventOutcome.ACCEPTED);
+        SlackIntakeResult first = intake.receive(accepted);
+        SlackIntakeResult eventReplay = intake.receive(accepted);
+        SlackIntakeResult logicalReplay = intake.receive(replyIntake("event-accepted-replay", "T1", "C1", "1.000001", "1.000001",
+                "U1", "hello"));
+
+        assertThat(first.outcome()).isEqualTo(SlackEventOutcome.ACCEPTED);
+        assertThat(eventReplay.disposition()).isEqualTo(SlackIntakeDisposition.DUPLICATE_ACCEPTED);
+        assertThat(logicalReplay.disposition()).isEqualTo(SlackIntakeDisposition.DUPLICATE_ACCEPTED);
+        assertThat(eventReplay.messageJobId()).isEqualTo(first.messageJobId());
+        assertThat(logicalReplay.messageJobId()).isEqualTo(first.messageJobId());
+        assertThat(eventReplay.sessionId()).isEqualTo(first.sessionId());
+        assertThat(logicalReplay.sessionId()).isEqualTo(first.sessionId());
         assertThatThrownBy(() -> intake.receive(replyIntake("event-content-conflict", "T1", "C1", "1.000001", "1.000001",
                 "U1", "changed"))).isInstanceOf(MessageConflictException.class);
         assertThat(intake.receive(rootIntake("T1", "C1", "2.000001")).outcome()).isEqualTo(SlackEventOutcome.BUSY);
@@ -164,8 +186,9 @@ class PostgresMessageSubmissionPostgresIT {
     @Test
     void retains_a_busy_outcome_after_capacity_releases_without_promoting_it_to_accepted() {
         Clock clock = Clock.fixed(Instant.parse("2026-09-06T00:00:00Z"), ZoneOffset.UTC);
-        ConversationStore conversationStore = new PostgresConversationStore(dataSource(), clock, new ObjectMapper(), 1);
-        PostgresMessageSubmission intake = intake(conversationStore, clock, 1);
+        PostgresIntakeCapacity capacity = new PostgresIntakeCapacity(dataSource(), 1);
+        ConversationStore conversationStore = new PostgresConversationStore(dataSource(), clock, new ObjectMapper(), capacity);
+        PostgresMessageSubmission intake = intake(conversationStore, clock, capacity);
         MessageSubmission busySource = rootIntake("T1", "C1", "2.000001");
 
         assertThat(intake.receive(rootIntake("T1", "C1", "1.000001")).outcome()).isEqualTo(SlackEventOutcome.ACCEPTED);
@@ -174,7 +197,12 @@ class PostgresMessageSubmissionPostgresIT {
         conversationStore.append(claim, new ConversationStore.MessageBatch(List.of(new ConversationStore.AssistantData("done")),
                 ConversationStore.JobUpdate.COMPLETE), Instant.parse("2026-09-06T00:00:01Z"));
 
-        assertThat(intake.receive(busySource).outcome()).isEqualTo(SlackEventOutcome.BUSY);
+        assertThat(intake.receive(busySource).disposition()).isEqualTo(SlackIntakeDisposition.DUPLICATE_BUSY);
+        SlackIntakeResult resent = intake.receive(replyIntake("event-busy-after-release", "T1", "C1", "2.000001", "2.000001",
+                "U1", "hello"));
+        assertThat(resent.disposition()).isEqualTo(SlackIntakeDisposition.DUPLICATE_BUSY);
+        assertThat(resent.sessionId()).isEmpty();
+        assertThat(resent.messageJobId()).isEmpty();
         assertThat(intake.receive(rootIntake("T1", "C1", "3.000001")).outcome()).isEqualTo(SlackEventOutcome.ACCEPTED);
         JdbcTemplate jdbcTemplate = new JdbcTemplate(dataSource());
         assertThat(count(jdbcTemplate, "select count(*) from message_job")).isEqualTo(2);
@@ -212,11 +240,12 @@ class PostgresMessageSubmissionPostgresIT {
     @Test
     void permits_exactly_one_of_mixed_http_and_slack_intake_at_the_final_capacity_slot() throws Exception {
         Clock clock = Clock.fixed(Instant.parse("2026-09-06T00:00:00Z"), ZoneOffset.UTC);
-        ConversationStore httpStore = new PostgresConversationStore(dataSource(), clock, new ObjectMapper(), 100);
+        PostgresIntakeCapacity capacity = new PostgresIntakeCapacity(dataSource(), 100);
+        ConversationStore httpStore = new PostgresConversationStore(dataSource(), clock, new ObjectMapper(), capacity);
         for (int index = 0; index < 99; index++) {
             receive(httpStore, new IncomingMessage("http-" + index, "alice", "http-source-" + index, "message"));
         }
-        PostgresMessageSubmission slackIntake = intake(100);
+        PostgresMessageSubmission slackIntake = intake(httpStore, clock, capacity);
         CountDownLatch ready = new CountDownLatch(2);
         CountDownLatch start = new CountDownLatch(1);
         ExecutorService executor = Executors.newFixedThreadPool(2);
@@ -251,7 +280,8 @@ class PostgresMessageSubmissionPostgresIT {
     @Test
     void counts_pending_working_and_retry_jobs_until_terminal_completion_releases_capacity() {
         ConversationStore conversationStore = new PostgresConversationStore(dataSource(),
-                Clock.fixed(Instant.parse("2026-09-06T00:00:00Z"), ZoneOffset.UTC), new ObjectMapper(), 1);
+                Clock.fixed(Instant.parse("2026-09-06T00:00:00Z"), ZoneOffset.UTC), new ObjectMapper(),
+                new PostgresIntakeCapacity(dataSource(), 1));
         receive(conversationStore, incoming("first"));
 
         assertThatThrownBy(() -> receive(conversationStore, incoming("pending"))).isInstanceOf(QueueFullException.class);
@@ -269,10 +299,12 @@ class PostgresMessageSubmissionPostgresIT {
     @Test
     void retains_existing_unfinished_jobs_when_a_reconstructed_store_has_a_lower_limit() {
         Clock clock = Clock.fixed(Instant.parse("2026-09-06T00:00:00Z"), ZoneOffset.UTC);
-        ConversationStore roomierStore = new PostgresConversationStore(dataSource(), clock, new ObjectMapper(), 2);
+        ConversationStore roomierStore = new PostgresConversationStore(dataSource(), clock, new ObjectMapper(),
+                new PostgresIntakeCapacity(dataSource(), 2));
         MessageReceipt first = receive(roomierStore, incoming("first"));
         receive(roomierStore, incoming("second"));
-        ConversationStore tightenedStore = new PostgresConversationStore(dataSource(), clock, new ObjectMapper(), 1);
+        ConversationStore tightenedStore = new PostgresConversationStore(dataSource(), clock, new ObjectMapper(),
+                new PostgresIntakeCapacity(dataSource(), 1));
 
         assertThat(receive(tightenedStore, incoming("first")).messageJobId()).isEqualTo(first.messageJobId());
         assertThatThrownBy(() -> receive(tightenedStore, incoming("third"))).isInstanceOf(QueueFullException.class);
@@ -465,7 +497,8 @@ class PostgresMessageSubmissionPostgresIT {
     void commits_a_staged_accepted_root_before_an_overlapping_ignored_representation() throws Exception {
         DriverManagerDataSource raceDataSource = dataSource();
         Clock clock = Clock.fixed(Instant.parse("2026-09-06T00:00:00Z"), ZoneOffset.UTC);
-        MessageIntakePort delegate = new MessageService(new PostgresConversationStore(raceDataSource, clock, new ObjectMapper()),
+        PostgresIntakeCapacity capacity = new PostgresIntakeCapacity(raceDataSource);
+        MessageIntakePort delegate = new MessageService(new PostgresConversationStore(raceDataSource, clock, new ObjectMapper(), capacity),
                 TestConfiguredModels.withDefault("test"), new NoOpConversationTelemetry());
         CountDownLatch acceptedMessageStaged = new CountDownLatch(1);
         CountDownLatch allowAcceptedReceipt = new CountDownLatch(1);
@@ -480,7 +513,7 @@ class PostgresMessageSubmissionPostgresIT {
             }
             return receipt;
         };
-        PostgresMessageSubmission intake = new PostgresMessageSubmission(raceDataSource, stagedAcceptedIntake, clock);
+        PostgresMessageSubmission intake = new PostgresMessageSubmission(raceDataSource, stagedAcceptedIntake, clock, capacity);
         JdbcTemplate jdbcTemplate = new JdbcTemplate(dataSource());
         MessageSubmission accepted = rootIntake("T1", "C1", "1.000001");
         MessageSubmission ignored = new MessageSubmission("event-ignored-race", "T1", "C1", "1.000001", "1.000001",
@@ -736,14 +769,15 @@ class PostgresMessageSubmissionPostgresIT {
 
     private PostgresMessageSubmission intake(int maximumUnfinishedJobs) {
         Clock clock = Clock.fixed(Instant.parse("2026-09-06T00:00:00Z"), ZoneOffset.UTC);
-        ConversationStore conversationStore = new PostgresConversationStore(dataSource(), clock, new ObjectMapper(), maximumUnfinishedJobs);
-        return intake(conversationStore, clock, maximumUnfinishedJobs);
+        PostgresIntakeCapacity capacity = new PostgresIntakeCapacity(dataSource(), maximumUnfinishedJobs);
+        ConversationStore conversationStore = new PostgresConversationStore(dataSource(), clock, new ObjectMapper(), capacity);
+        return intake(conversationStore, clock, capacity);
     }
 
-    private PostgresMessageSubmission intake(ConversationStore conversationStore, Clock clock, int maximumUnfinishedJobs) {
+    private PostgresMessageSubmission intake(ConversationStore conversationStore, Clock clock, PostgresIntakeCapacity capacity) {
         MessageIntakePort messageIntakePort = new MessageService(conversationStore, TestConfiguredModels.withDefault("test"),
                 new NoOpConversationTelemetry());
-        return new PostgresMessageSubmission(dataSource(), messageIntakePort, clock, maximumUnfinishedJobs);
+        return new PostgresMessageSubmission(dataSource(), messageIntakePort, clock, capacity);
     }
 
     private SlackBoltSocketClient socketClient() {

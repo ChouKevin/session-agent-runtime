@@ -28,7 +28,8 @@ import com.java.system.sessionagent.conversation.domain.ContextUsageEstimator;
 import com.java.system.sessionagent.model.adapter.springai.SystemPrompt;
 import com.java.system.sessionagent.storage.adapter.postgres.PostgresConversationStore;
 import com.java.system.sessionagent.storage.adapter.postgres.PostgresConversationMapper;
-import com.java.system.sessionagent.storage.adapter.postgres.PostgresUuidTypeHandler;
+import com.java.system.sessionagent.storage.adapter.postgres.jdbc.PostgresIntakeCapacity;
+import com.java.system.sessionagent.storage.adapter.postgres.jdbc.PostgresUuidTypeHandler;
 import com.java.system.sessionagent.slack.adapter.postgres.PostgresMessageSubmission;
 import com.java.system.sessionagent.slack.adapter.postgres.SlackDatabaseMapper;
 import com.java.system.sessionagent.slack.adapter.postgres.SlackPostgresDeliveryStore;
@@ -368,14 +369,18 @@ public class RuntimeConfiguration {
     }
 
     @Bean
+    PostgresIntakeCapacity postgresIntakeCapacity(DataSource dataSource, RuntimeProperties properties) {
+        return new PostgresIntakeCapacity(dataSource, properties.worker().maxUnfinishedJobs());
+    }
+
+    @Bean
     ConversationStore conversationStore(
             PostgresConversationMapper mapper,
             DataSource dataSource,
             Clock runtimeClock,
             ObjectMapper objectMapper,
-            RuntimeProperties properties) {
-        return new PostgresConversationStore(mapper, dataSource, runtimeClock, objectMapper,
-                properties.worker().maxUnfinishedJobs());
+            PostgresIntakeCapacity intakeCapacity) {
+        return new PostgresConversationStore(mapper, dataSource, runtimeClock, objectMapper, intakeCapacity);
     }
 
     @Bean
@@ -402,9 +407,8 @@ public class RuntimeConfiguration {
             DataSource dataSource,
             MessageIntakePort messageIntakePort,
             Clock runtimeClock,
-            RuntimeProperties properties) {
-        return new PostgresMessageSubmission(mapper, dataSource, messageIntakePort, runtimeClock,
-                properties.worker().maxUnfinishedJobs());
+            PostgresIntakeCapacity intakeCapacity) {
+        return new PostgresMessageSubmission(mapper, dataSource, messageIntakePort, runtimeClock, intakeCapacity);
     }
 
     @Bean

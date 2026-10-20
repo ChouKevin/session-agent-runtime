@@ -2,6 +2,7 @@ package com.java.system.sessionagent.slack.adapter.postgres;
 
 import com.baomidou.mybatisplus.core.MybatisConfiguration;
 import com.baomidou.mybatisplus.spring.MybatisSqlSessionFactoryBean;
+import com.java.system.sessionagent.storage.adapter.postgres.jdbc.PostgresUuidTypeHandler;
 import org.apache.ibatis.session.LocalCacheScope;
 import org.apache.ibatis.session.SqlSessionFactory;
 import org.mybatis.spring.SqlSessionTemplate;
@@ -24,7 +25,7 @@ final class SlackMybatisMapperFactory {
         configuration.setReturnInstanceForEmptyRow(true);
         configuration.setMapUnderscoreToCamelCase(true);
         configuration.setArgNameBasedConstructorAutoMapping(true);
-        configuration.getTypeHandlerRegistry().register(UUID.class, SlackUuidTypeHandler.class);
+        configuration.getTypeHandlerRegistry().register(UUID.class, PostgresUuidTypeHandler.class);
         configuration.addMapper(SlackDatabaseMapper.class);
 
         MybatisSqlSessionFactoryBean factoryBean = new MybatisSqlSessionFactoryBean();

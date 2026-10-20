@@ -9,6 +9,7 @@ import com.java.system.sessionagent.slack.domain.SlackIntakeClassification;
 import com.java.system.sessionagent.slack.domain.SlackIntakeResult;
 import com.java.system.sessionagent.slack.domain.SlackSessionResolution;
 import com.java.system.sessionagent.slack.port.out.MessageSubmissionPort;
+import com.java.system.sessionagent.storage.adapter.postgres.jdbc.PostgresIntakeCapacity;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -28,20 +29,11 @@ public final class PostgresMessageSubmission implements MessageSubmissionPort {
     private final TransactionTemplate transactionTemplate;
     private final MessageIntakePort messageIntakePort;
     private final Clock clock;
-    private final int maximumUnfinishedJobs;
-
-    public PostgresMessageSubmission(DataSource dataSource, MessageIntakePort messageIntakePort, Clock clock) {
-        this(SlackMybatisMapperFactory.create(dataSource), dataSource, messageIntakePort, clock, 100);
-    }
+    private final PostgresIntakeCapacity intakeCapacity;
 
     public PostgresMessageSubmission(
-            DataSource dataSource, MessageIntakePort messageIntakePort, Clock clock, int maximumUnfinishedJobs) {
-        this(SlackMybatisMapperFactory.create(dataSource), dataSource, messageIntakePort, clock, maximumUnfinishedJobs);
-    }
-
-    public PostgresMessageSubmission(
-            SlackDatabaseMapper mapper, DataSource dataSource, MessageIntakePort messageIntakePort, Clock clock) {
-        this(mapper, dataSource, messageIntakePort, clock, 100);
+            DataSource dataSource, MessageIntakePort messageIntakePort, Clock clock, PostgresIntakeCapacity intakeCapacity) {
+        this(SlackMybatisMapperFactory.create(dataSource), dataSource, messageIntakePort, clock, intakeCapacity);
     }
 
     public PostgresMessageSubmission(
@@ -49,7 +41,7 @@ public final class PostgresMessageSubmission implements MessageSubmissionPort {
             DataSource dataSource,
             MessageIntakePort messageIntakePort,
             Clock clock,
-            int maximumUnfinishedJobs) {
+            PostgresIntakeCapacity intakeCapacity) {
         DataSource requiredDataSource = Objects.requireNonNull(dataSource, "Data source must not be null");
         this.mapper = Objects.requireNonNull(mapper, "Slack database mapper must not be null");
         DataSourceTransactionManager transactionManager = new DataSourceTransactionManager(requiredDataSource);
@@ -57,8 +49,7 @@ public final class PostgresMessageSubmission implements MessageSubmissionPort {
         this.transactionTemplate.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRED);
         this.messageIntakePort = Objects.requireNonNull(messageIntakePort, "Message intake port must not be null");
         this.clock = Objects.requireNonNull(clock, "Clock must not be null");
-        Assert.isTrue(maximumUnfinishedJobs > 0, "Maximum unfinished jobs must be positive");
-        this.maximumUnfinishedJobs = maximumUnfinishedJobs;
+        this.intakeCapacity = Objects.requireNonNull(intakeCapacity, "Intake capacity must not be null");
     }
 
     @Override
@@ -77,7 +68,7 @@ public final class PostgresMessageSubmission implements MessageSubmissionPort {
     }
 
     private SlackIntakeResult receiveInTransaction(MessageSubmission intake) {
-        mapper.lockIntakeCapacity();
+        intakeCapacity.lock();
         Optional<StoredEventReceipt> existingEvent = findEventReceipt(intake.eventId());
         if (existingEvent.isPresent()) {
             return verifyExistingEvent(intake, existingEvent.orElseThrow());
@@ -97,12 +88,12 @@ public final class PostgresMessageSubmission implements MessageSubmissionPort {
                         intake.rootThreadTs(), intake.messageTs(), SlackIntakeClassification.UNBOUND_THREAD, Optional.empty());
                 return ignore(ignoredIntake);
             }
-            if (mapper.countUnfinishedJobs() >= maximumUnfinishedJobs) {
+            if (!intakeCapacity.hasCapacity()) {
                 return busy(intake);
             }
             return accept(intake, binding.orElseThrow());
         }
-        if (mapper.countUnfinishedJobs() >= maximumUnfinishedJobs) {
+        if (!intakeCapacity.hasCapacity()) {
             return busy(intake);
         }
         return acceptRoot(intake);

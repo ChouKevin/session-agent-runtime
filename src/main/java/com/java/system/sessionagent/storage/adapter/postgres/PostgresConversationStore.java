@@ -39,6 +39,7 @@ import com.java.system.sessionagent.conversation.port.out.ModelSelectionLookup;
 import com.java.system.sessionagent.conversation.port.out.ConversationStoreFailure;
 import com.java.system.sessionagent.conversation.port.out.ModelRouteMismatchException;
 import com.java.system.sessionagent.conversation.port.out.StaleWorkClaimException;
+import com.java.system.sessionagent.storage.adapter.postgres.jdbc.PostgresIntakeCapacity;
 import org.springframework.dao.DataAccessResourceFailureException;
 import org.springframework.dao.QueryTimeoutException;
 import org.springframework.dao.TransientDataAccessException;
@@ -79,19 +80,15 @@ public final class PostgresConversationStore implements ConversationStore {
     private final TransactionTemplate historyTransactionTemplate;
     private final Clock clock;
     private final ObjectMapper objectMapper;
-    private final int maximumUnfinishedJobs;
+    private final PostgresIntakeCapacity intakeCapacity;
 
     public PostgresConversationStore(DataSource dataSource, Clock clock, ObjectMapper objectMapper) {
-        this(PostgresMybatisMapperFactory.create(dataSource), dataSource, clock, objectMapper, 100);
-    }
-
-    public PostgresConversationStore(DataSource dataSource, Clock clock, ObjectMapper objectMapper, int maximumUnfinishedJobs) {
-        this(PostgresMybatisMapperFactory.create(dataSource), dataSource, clock, objectMapper, maximumUnfinishedJobs);
+        this(dataSource, clock, objectMapper, new PostgresIntakeCapacity(dataSource));
     }
 
     public PostgresConversationStore(
-            PostgresConversationMapper mapper, DataSource dataSource, Clock clock, ObjectMapper objectMapper) {
-        this(mapper, dataSource, clock, objectMapper, 100);
+            DataSource dataSource, Clock clock, ObjectMapper objectMapper, PostgresIntakeCapacity intakeCapacity) {
+        this(PostgresMybatisMapperFactory.create(dataSource), dataSource, clock, objectMapper, intakeCapacity);
     }
 
     public PostgresConversationStore(
@@ -99,7 +96,7 @@ public final class PostgresConversationStore implements ConversationStore {
             DataSource dataSource,
             Clock clock,
             ObjectMapper objectMapper,
-            int maximumUnfinishedJobs) {
+            PostgresIntakeCapacity intakeCapacity) {
         DataSource requiredDataSource = Objects.requireNonNull(dataSource, "Data source must not be null");
         this.mapper = Objects.requireNonNull(mapper, "Conversation mapper must not be null");
         DataSourceTransactionManager transactionManager = new DataSourceTransactionManager(requiredDataSource);
@@ -111,8 +108,7 @@ public final class PostgresConversationStore implements ConversationStore {
         this.historyTransactionTemplate.setReadOnly(true);
         this.clock = Objects.requireNonNull(clock, "Clock must not be null");
         this.objectMapper = Objects.requireNonNull(objectMapper, "Object mapper must not be null");
-        Assert.isTrue(maximumUnfinishedJobs > 0, "Maximum unfinished jobs must be positive");
-        this.maximumUnfinishedJobs = maximumUnfinishedJobs;
+        this.intakeCapacity = Objects.requireNonNull(intakeCapacity, "Intake capacity must not be null");
     }
 
     @Override
@@ -139,7 +135,7 @@ public final class PostgresConversationStore implements ConversationStore {
             ModelSelection defaultSelection,
             ModelSelectionLookup selectionLookup) {
         String sourceType = incomingMessage.source().storageValue();
-        mapper.lockIntakeCapacity();
+        intakeCapacity.lock();
         lockSourceIdentity(sourceType, incomingMessage.sourceMessageId());
         String contentHash = contentHash(incomingMessage.participantId(), incomingMessage.message());
         Optional<StoredSourceMessage> existing = findSourceMessage(sourceType, incomingMessage.sourceMessageId());
@@ -150,7 +146,7 @@ public final class PostgresConversationStore implements ConversationStore {
             }
             throw new MessageConflictException();
         }
-        if (mapper.countUnfinishedJobs() >= maximumUnfinishedJobs) {
+        if (!intakeCapacity.hasCapacity()) {
             throw new QueueFullException();
         }
         StoredSession session = lockOrCreateSession(sourceType, incomingMessage.sessionKey(), defaultSelection);

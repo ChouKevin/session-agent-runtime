@@ -14,7 +14,7 @@ empty layer merely to complete a pattern.
 | `tool` — `domain`, `port` | Defines generic tool names, definitions, snapshots, calls, executors, and outputs. Tool names, schemas, arguments, and results remain provider data; this module does not know an MCP or model SDK. |
 | `model` — `adapter/springai` | Maps the provider-neutral conversation model contract to Spring AI and Google GenAI, including prompts, history projection, tool callbacks, usage, and continuation data. Provider types stay inside this adapter. |
 | `mcp` — `domain`, `configuration`, `adapter/sdk`, `adapter/actuator` | Owns named MCP connection state and properties, SDK connection lifecycle, discovery, tool routing/adaptation, refresh/reconnect, and safe actuator diagnostics. Raw MCP metadata, schemas, and results do not become Runtime DTOs. |
-| `storage` — `adapter/postgres` | Implements conversation persistence with PostgreSQL, Flyway-backed tables, MyBatis mappers, UUID mapping, ordered history, job claims, and atomic history writes. |
+| `storage` — `adapter/postgres`, `adapter/postgres/jdbc` | Implements conversation persistence with PostgreSQL, Flyway-backed tables, MyBatis mappers, ordered history, job claims, and atomic history writes. The narrow JDBC export owns shared intake admission and UUID mapping for PostgreSQL adapters. |
 | `web` — `adapter/http` | Adapts HTTP requests and responses for message intake, job polling, session history, validation, and error handling. MCP diagnostics are owned by `mcp/adapter/actuator`. |
 | `worker` — `application`, `configuration` | Polls queued message jobs, claims and renews ownership, invokes processing, reports completion/retry/ownership-loss/recovery outcomes, and binds worker properties. |
 | `slack` — `domain`, `application`, `port/out`, `adapter/sdk`, `adapter/postgres`, `configuration` | Handles Slack intake, filtering, delivery lifecycle, Socket Mode, Slack SDK calls, and its own idempotency, thread binding, delivery persistence, and properties. Provider details stay inside the owning adapter. |
@@ -38,7 +38,7 @@ The complete named-interface map is intentionally kept in one assertion in
 | `conversation` | `domain`; `application`; `port.in`; `port.out` |
 | `model` | `adapter.springai` |
 | `mcp` | `configuration`; `adapter.sdk`; `adapter.actuator` |
-| `storage` | `adapter.postgres` |
+| `storage` | `adapter.postgres`; `adapter.postgres.jdbc` |
 | `web` | none |
 | `worker` | `application`; `configuration` |
 | `slack` | `domain`; `application`; `port.out`; `adapter.sdk`; `adapter.postgres`; `configuration` |
@@ -59,8 +59,31 @@ used by production code.
 | `storage` | `conversation :: domain`; `conversation :: port.in`; `conversation :: port.out`; `tool :: domain` | `conversation :: domain`; `conversation :: port.in`; `conversation :: port.out`; `tool :: domain` |
 | `web` | `conversation :: domain`; `conversation :: port.in`; `tool :: domain` | `conversation :: domain`; `conversation :: port.in` |
 | `worker` | `conversation :: domain`; `conversation :: port.in`; `conversation :: port.out` | `conversation :: domain`; `conversation :: port.in`; `conversation :: port.out` |
-| `slack` | `conversation :: domain`; `conversation :: port.in` | `conversation :: domain`; `conversation :: port.in` |
-| `bootstrap` | `tool :: port`; `mcp :: configuration`; `mcp :: adapter.sdk`; `mcp :: adapter.actuator`; `conversation :: application`; `conversation :: domain`; `conversation :: port.in`; `conversation :: port.out`; `model :: adapter.springai`; `storage :: adapter.postgres`; `web`; `worker :: application`; `worker :: configuration`; `slack :: domain`; `slack :: application`; `slack :: port.out`; `slack :: adapter.sdk`; `slack :: adapter.postgres`; `slack :: configuration` | `tool :: port`; `mcp :: configuration`; `mcp :: adapter.sdk`; `mcp :: adapter.actuator`; `conversation :: application`; `conversation :: domain`; `conversation :: port.in`; `conversation :: port.out`; `model :: adapter.springai`; `storage :: adapter.postgres`; `worker :: application`; `worker :: configuration`; `slack :: domain`; `slack :: application`; `slack :: port.out`; `slack :: adapter.sdk`; `slack :: adapter.postgres`; `slack :: configuration` |
+| `slack` | `conversation :: domain`; `conversation :: port.in`; `storage :: adapter.postgres.jdbc` | `conversation :: domain`; `conversation :: port.in`; `storage :: adapter.postgres.jdbc` |
+| `bootstrap` | `tool :: port`; `mcp :: configuration`; `mcp :: adapter.sdk`; `mcp :: adapter.actuator`; `conversation :: application`; `conversation :: domain`; `conversation :: port.in`; `conversation :: port.out`; `model :: adapter.springai`; `storage :: adapter.postgres`; `storage :: adapter.postgres.jdbc`; `web`; `worker :: application`; `worker :: configuration`; `slack :: domain`; `slack :: application`; `slack :: port.out`; `slack :: adapter.sdk`; `slack :: adapter.postgres`; `slack :: configuration` | `tool :: port`; `mcp :: configuration`; `mcp :: adapter.sdk`; `mcp :: adapter.actuator`; `conversation :: application`; `conversation :: domain`; `conversation :: port.in`; `conversation :: port.out`; `model :: adapter.springai`; `storage :: adapter.postgres`; `storage :: adapter.postgres.jdbc`; `worker :: application`; `worker :: configuration`; `slack :: domain`; `slack :: application`; `slack :: port.out`; `slack :: adapter.sdk`; `slack :: adapter.postgres`; `slack :: configuration` |
+
+`storage :: adapter.postgres.jdbc` exposes only shared PostgreSQL integration
+components: `PostgresIntakeCapacity` and `PostgresUuidTypeHandler`. Slack depends
+on this narrow export, not the conversation mapper/store export
+`storage :: adapter.postgres`. Both direct-construction MyBatis factories and
+bootstrap's MyBatis configuration register the same UUID handler; Slack has no
+separate UUID implementation.
+
+Bootstrap supplies one `PostgresIntakeCapacity` instance to
+`PostgresConversationStore` and `PostgresMessageSubmission`. It owns the configured
+limit, the global transaction-scoped advisory lock, and the query counting
+`PENDING`, `WORKING`, and `RETRY` jobs. Intake adapters acquire this lock before
+duplicate lookup and check capacity only for new jobs, using the same data source
+and transaction as the resulting writes.
+
+Slack still owns its receipts, immutable thread binding, and delivery notices.
+Accepted jobs and their receipts/binding/queued notice commit atomically; a full
+queue instead commits BUSY receipts and a busy notice without a session or job.
+Slack checks capacity without throwing before nested conversation intake, avoiding
+a rollback-only transaction that would discard BUSY. Core intake retains its
+`QueueFullException` contract. Accepted duplicates resolve to their original job
+even at capacity, and BUSY duplicates remain BUSY after capacity releases. The
+separate delivery worker and provider-neutral conversation contracts are unchanged.
 
 Keep provider SDKs inside their owning adapters. The conversation domain,
 application, ports, generic tool module, storage, web, and worker remain free of

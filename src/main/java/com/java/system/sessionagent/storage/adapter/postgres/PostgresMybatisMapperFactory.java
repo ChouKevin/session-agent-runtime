@@ -2,6 +2,7 @@ package com.java.system.sessionagent.storage.adapter.postgres;
 
 import com.baomidou.mybatisplus.core.MybatisConfiguration;
 import com.baomidou.mybatisplus.spring.MybatisSqlSessionFactoryBean;
+import com.java.system.sessionagent.storage.adapter.postgres.jdbc.PostgresUuidTypeHandler;
 import org.apache.ibatis.session.LocalCacheScope;
 import org.apache.ibatis.session.SqlSessionFactory;
 import org.mybatis.spring.SqlSessionTemplate;

@@ -45,6 +45,7 @@ import com.java.system.sessionagent.conversation.port.out.ConversationStore;
 import com.java.system.sessionagent.conversation.port.out.ModelCallReservation;
 import com.java.system.sessionagent.conversation.port.out.NoOpConversationTelemetry;
 import com.java.system.sessionagent.storage.adapter.postgres.PostgresConversationStore;
+import com.java.system.sessionagent.storage.adapter.postgres.jdbc.PostgresIntakeCapacity;
 import com.java.system.sessionagent.tool.port.ToolCatalog;
 import com.java.system.sessionagent.tool.port.ToolSnapshot;
 import org.flywaydb.core.Flyway;
@@ -76,7 +77,6 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
@@ -91,6 +91,7 @@ class SlackDeliveryPostgresIT {
 
     private DriverManagerDataSource dataSource;
     private JdbcTemplate jdbcTemplate;
+    private PostgresIntakeCapacity intakeCapacity;
 
     @BeforeEach
     void migrate() {
@@ -99,6 +100,7 @@ class SlackDeliveryPostgresIT {
         flyway().clean();
         flyway().migrate();
         jdbcTemplate = new JdbcTemplate(dataSource());
+        intakeCapacity = new PostgresIntakeCapacity(dataSource());
     }
 
     @AfterEach
@@ -108,12 +110,13 @@ class SlackDeliveryPostgresIT {
 
     @Test
     void discovers_and_delivers_a_cancelled_job_exactly_once_and_accepts_the_next_slack_message() {
+        PostgresIntakeCapacity capacity = new PostgresIntakeCapacity(dataSource(), 1);
         PostgresConversationStore conversationStore = new PostgresConversationStore(dataSource(), Clock.fixed(NOW, ZoneOffset.UTC),
-                new ObjectMapper(), 1);
+                new ObjectMapper(), capacity);
         MessageIntakePort messageIntake = new MessageService(conversationStore, TestConfiguredModels.withDefault("test"),
                 new NoOpConversationTelemetry());
         MessageHandler adapter = new MessageHandler("UBOT",
-                new PostgresMessageSubmission(dataSource(), messageIntake, Clock.fixed(NOW, ZoneOffset.UTC), 1));
+                new PostgresMessageSubmission(dataSource(), messageIntake, Clock.fixed(NOW, ZoneOffset.UTC), capacity));
         assertThat(adapter.handle(new IncomingEvent("cancel-event", "T1", "C1", "1.000001", "", "U1", "", "channel",
                 "<@UBOT> hello", "", false, false))).isEqualTo(SlackEventOutcome.ACCEPTED);
         MessageJobId jobId = new MessageJobId(jdbcTemplate.queryForObject(
@@ -273,7 +276,7 @@ class SlackDeliveryPostgresIT {
     }
 
     @Test
-    void renews_the_parent_lease_before_each_part_so_multiple_sends_outlive_the_original_lease() throws Exception {
+    void renews_the_parent_lease_between_parts_and_keeps_committed_progress_owned() throws Exception {
         completeSlackJobWithTerminalRuntime("1.000001", "x".repeat(4_001));
         markQueuedNoticeSent();
         SlackPostgresDeliveryStore deliveryStore = new SlackPostgresDeliveryStore(dataSource());
@@ -282,12 +285,9 @@ class SlackDeliveryPostgresIT {
         CountDownLatch allowFirstSendToFinish = new CountDownLatch(1);
         CountDownLatch secondSendStarted = new CountDownLatch(1);
         CountDownLatch allowSecondSendToFinish = new CountDownLatch(1);
-        AtomicReference<Instant> originalLeaseExpiry = new AtomicReference<>();
         SlackWebApi controlledSlack = request -> {
             posts.add(request);
             if (posts.size() == 1) {
-                originalLeaseExpiry.set(jdbcTemplate.queryForObject(
-                        "select locked_until from slack_delivery where kind = 'ANSWER'", Timestamp.class).toInstant());
                 firstSendStarted.countDown();
                 await(allowFirstSendToFinish);
             } else {
@@ -297,21 +297,33 @@ class SlackDeliveryPostgresIT {
             return "2.00000" + posts.size();
         };
         SlackDeliveryWorker worker = new SlackDeliveryWorker(deliveryStore, controlledSlack,
-                new SlackDeliveryProperties(Duration.ofMillis(500), Duration.ofSeconds(1), Duration.ofSeconds(1), 5),
+                new SlackDeliveryProperties(Duration.ofMinutes(10), Duration.ofSeconds(1), Duration.ofSeconds(1), 5),
                 "delivery-worker");
 
         ExecutorService executor = Executors.newSingleThreadExecutor();
         try {
             Future<Boolean> poll = executor.submit(worker::poll);
             assertThat(firstSendStarted.await(5, TimeUnit.SECONDS)).isTrue();
-            Instant initialExpiry = originalLeaseExpiry.get();
-            assertThat(initialExpiry).isNotNull();
-            awaitDatabaseClockAfter(initialExpiry.minusMillis(200));
+            UUID deliveryId = answerDeliveryId();
+            // Keep the lease live, but make the next renewal observably advance it without waiting for the clock.
+            assertThat(jdbcTemplate.update("""
+                    update slack_delivery set locked_until = clock_timestamp() + interval '5 minutes'
+                    where delivery_id = ?
+                    """, deliveryId)).isEqualTo(1);
+            Instant firstSendExpiry = jdbcTemplate.queryForObject(
+                    "select locked_until from slack_delivery where delivery_id = ?", Timestamp.class, deliveryId).toInstant();
             allowFirstSendToFinish.countDown();
             assertThat(secondSendStarted.await(5, TimeUnit.SECONDS)).isTrue();
-            awaitDatabaseClockAfter(initialExpiry);
-            assertThat(jdbcTemplate.queryForObject(
-                    "select locked_until > clock_timestamp() from slack_delivery where kind = 'ANSWER'", Boolean.class)).isTrue();
+            Instant secondSendExpiry = jdbcTemplate.queryForObject(
+                    "select locked_until from slack_delivery where delivery_id = ?", Timestamp.class, deliveryId).toInstant();
+            assertThat(secondSendExpiry).isAfter(firstSendExpiry);
+            assertThat(deliveryStore.read(deliveryId)).hasValueSatisfying(delivery -> {
+                assertThat(delivery.status()).isEqualTo(SlackDeliveryStatus.WORKING);
+                assertThat(delivery.totalParts()).contains(2);
+                assertThat(delivery.sentParts()).isEqualTo(1);
+            });
+            SlackPostgresDeliveryStore competingStore = new SlackPostgresDeliveryStore(dataSource());
+            assertThat(competingStore.claimNext("competing-worker", Duration.ofMinutes(10), 5)).isEmpty();
             allowSecondSendToFinish.countDown();
             assertThat(poll.get(5, TimeUnit.SECONDS)).isTrue();
         } finally {
@@ -323,6 +335,7 @@ class SlackDeliveryPostgresIT {
         assertThat(posts).hasSize(2);
         assertThat(deliveryStore.read(answerDeliveryId())).hasValueSatisfying(delivery -> {
             assertThat(delivery.status()).isEqualTo(SlackDeliveryStatus.SENT);
+            assertThat(delivery.totalParts()).contains(2);
             assertThat(delivery.sentParts()).isEqualTo(2);
         });
     }
@@ -549,11 +562,11 @@ class SlackDeliveryPostgresIT {
     @Test
     void does_not_claim_a_later_answer_for_the_same_session_while_an_earlier_answer_retries() {
         PostgresConversationStore conversationStore = new PostgresConversationStore(dataSource(), Clock.fixed(NOW, ZoneOffset.UTC),
-                new ObjectMapper());
+                new ObjectMapper(), intakeCapacity);
         MessageIntakePort messageIntake = new MessageService(conversationStore, TestConfiguredModels.withDefault("test"),
                 new NoOpConversationTelemetry());
         PostgresMessageSubmission slackIntake = new PostgresMessageSubmission(dataSource(), messageIntake,
-                Clock.fixed(NOW, ZoneOffset.UTC));
+                Clock.fixed(NOW, ZoneOffset.UTC), intakeCapacity);
         assertThat(slackIntake.receive(acceptedIntake("event-root", "1.000001", "1.000001")).outcome())
                 .isEqualTo(SlackEventOutcome.ACCEPTED);
         assertThat(slackIntake.receive(acceptedIntake("event-reply-one", "1.000001", "1.000002")).outcome())
@@ -615,11 +628,11 @@ class SlackDeliveryPostgresIT {
                 for each row execute function reject_slack_delivery_insert()
                 """);
         PostgresConversationStore conversationStore = new PostgresConversationStore(dataSource(), Clock.fixed(NOW, ZoneOffset.UTC),
-                new ObjectMapper());
+                new ObjectMapper(), intakeCapacity);
         MessageIntakePort messageIntake = new MessageService(conversationStore, TestConfiguredModels.withDefault("test"),
                 new NoOpConversationTelemetry());
         PostgresMessageSubmission slackIntake = new PostgresMessageSubmission(dataSource(), messageIntake,
-                Clock.fixed(NOW, ZoneOffset.UTC));
+                Clock.fixed(NOW, ZoneOffset.UTC), intakeCapacity);
         IncomingMessage message = new IncomingMessage(IncomingMessageSource.SLACK, "slack:T1:C1:1.000001", "U1", "1.000001", "request");
         MessageSubmission intake = new MessageSubmission("event-rollback", "T1", "C1", "1.000001", "1.000001",
                 SlackIntakeClassification.ACCEPTED, Optional.of(message));
@@ -637,11 +650,11 @@ class SlackDeliveryPostgresIT {
     @Test
     void correlates_new_and_duplicate_slack_intake_through_model_processing_and_terminal_delivery() {
         PostgresConversationStore conversationStore = new PostgresConversationStore(dataSource(), Clock.fixed(NOW, ZoneOffset.UTC),
-                new ObjectMapper());
+                new ObjectMapper(), intakeCapacity);
         MessageIntakePort messageIntake = new MessageService(conversationStore, TestConfiguredModels.withDefault("test"),
                 new NoOpConversationTelemetry());
         MessageHandler adapter = new MessageHandler("UBOT",
-                new PostgresMessageSubmission(dataSource(), messageIntake, Clock.fixed(NOW, ZoneOffset.UTC)));
+                new PostgresMessageSubmission(dataSource(), messageIntake, Clock.fixed(NOW, ZoneOffset.UTC), intakeCapacity));
         ListAppender<ILoggingEvent> intakeLogs = capture(MessageHandler.class);
         ListAppender<ILoggingEvent> modelLogs = capture(JobProcessor.class);
         ListAppender<ILoggingEvent> deliveryLogs = capture(SlackDeliveryWorker.class);
@@ -757,10 +770,11 @@ class SlackDeliveryPostgresIT {
 
     private MessageReceipt completeSlackJobWithTerminalRuntime(String messageTs, String terminalText) {
         PostgresConversationStore conversationStore = new PostgresConversationStore(dataSource(), Clock.fixed(NOW, ZoneOffset.UTC),
-                new ObjectMapper());
+                new ObjectMapper(), intakeCapacity);
         MessageIntakePort messageIntake = new MessageService(conversationStore, TestConfiguredModels.withDefault("test"),
                 new NoOpConversationTelemetry());
-        PostgresMessageSubmission slackIntake = new PostgresMessageSubmission(dataSource(), messageIntake, Clock.fixed(NOW, ZoneOffset.UTC));
+        PostgresMessageSubmission slackIntake = new PostgresMessageSubmission(dataSource(), messageIntake,
+                Clock.fixed(NOW, ZoneOffset.UTC), intakeCapacity);
         IncomingMessage message = new IncomingMessage(IncomingMessageSource.SLACK, "slack:T1:C1:" + messageTs, "U1", messageTs,
                 "request");
         MessageSubmission intake = new MessageSubmission("event-" + messageTs, "T1", "C1", messageTs, messageTs,
@@ -797,18 +811,6 @@ class SlackDeliveryPostgresIT {
 
     private UUID answerDeliveryId() {
         return jdbcTemplate.queryForObject("select delivery_id from slack_delivery where kind = 'ANSWER'", UUID.class);
-    }
-
-    private void awaitDatabaseClockAfter(Instant instant) throws InterruptedException {
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
-        while (System.nanoTime() < deadline) {
-            Boolean after = jdbcTemplate.queryForObject("select clock_timestamp() > ?", Boolean.class, Timestamp.from(instant));
-            if (Boolean.TRUE.equals(after)) {
-                return;
-            }
-            Thread.sleep(10);
-        }
-        throw new IllegalStateException("PostgreSQL clock did not pass the original Slack delivery lease");
     }
 
     private void awaitDatabaseLockWaiter(String queryFragment) throws InterruptedException {

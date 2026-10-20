@@ -19,12 +19,6 @@ import java.util.UUID;
 @Mapper
 public interface SlackDatabaseMapper extends BaseMapper<SlackDatabaseMapper.DeliveryEntity> {
 
-    @Select("select pg_advisory_xact_lock(731_937_205)")
-    String lockIntakeCapacity();
-
-    @Select("select count(*) from message_job where status in ('PENDING', 'WORKING', 'RETRY')")
-    long countUnfinishedJobs();
-
     @Insert("""
             insert into slack_thread_binding(team_id, channel_id, root_thread_ts, session_id, created_at)
             values (#{teamId}, #{channelId}, #{rootThreadTs}, #{sessionId,jdbcType=OTHER}, #{createdAt})
