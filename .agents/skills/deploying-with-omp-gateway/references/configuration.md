@@ -101,4 +101,6 @@ session-agent:
 
 把變數放進私有 environment／secret manager；不用認證就省略 `headers`。Runtime 不會因為模型經過 OMP Gateway 而自動取得 OMP 的 MCP、skills 或工具。每個 MCP 連線獨立管理。
 
+完整連線格式、java-code-intelligence 雙 reader 範例、systemd 憑證注入、停用／輪換及實際工具驗收見 [MCP 操作指南](mcp.md)。設定要加在 Runtime 生效的 application config，而不是 Gateway 或 OMP client 的 MCP 設定。
+
 主機範例以 JSON 寫到 systemd journal，不使用容器固定 `/app/logs` 路徑。用 `journalctl --user -u session-agent-runtime` 查詢；journal 的保留期依主機政策，不等於 repo Docker logging 的 7 日輪替設定。不要將完整 log 當作公開驗收附件。

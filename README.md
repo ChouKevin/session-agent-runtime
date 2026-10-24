@@ -172,6 +172,8 @@ new jobs, so accepted resends still resolve to their original job when full.
 
 Configure zero or more named connections under `session-agent.mcp.connections`. A connection name is portable (`[A-Za-z][A-Za-z0-9-]{0,31}`); discovered tools are exposed as `{connectionName}_{rawToolName}`. The URL is the exact absolute streamable-HTTP endpoint, including any non-default path.
 
+For the host deployment, follow the [MCP setup and acceptance runbook](.agents/skills/deploying-with-omp-gateway/references/mcp.md). It includes two independent read-only `java-code-intelligence` readers, private systemd credentials, disabling/rotation, and model-to-tool history verification. Gateway routing does not import OMP MCP configuration or skills. Discovery and direct MCP success do not by themselves prove model-generated tool arguments are compatible.
+
 ```yaml
 session-agent:
   mcp:

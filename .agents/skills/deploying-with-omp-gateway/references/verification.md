@@ -14,6 +14,8 @@ ss -ltn 'sport = :8090 or sport = :4000 or sport = :8765 or sport = :15432'
 
 預期 Runtime `status: UP`；listener 均為 loopback。MCP 未設定時 `connections` 為空是正常狀態，不代表 OMP 工具已接入。首次啟動用有上限的等待，逾時檢查 journal，不無限重試。
 
+有 MCP 時依 [MCP 操作指南](mcp.md) 逐一驗證 `state`／`toolCount`，再經授權檢查模型產生的 calls 與持久化 observations。下方一般模型 smoke 明確禁止 tools，不能作為 MCP 驗收。
+
 `omp auth-gateway status` 不是 gateway listener 的 health probe。查 `/healthz` 與 authenticated `/v1/models` 才能分別證明 listener 與 bearer 可用：
 
 ```bash
