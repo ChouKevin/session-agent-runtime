@@ -30,6 +30,12 @@ public record SlackIntakeResult(
             Assert.isTrue(disposition == SlackIntakeDisposition.NEW_BUSY
                             || disposition == SlackIntakeDisposition.DUPLICATE_BUSY,
                     "Busy Slack intake must use a busy disposition");
+        } else if (outcome == SlackEventOutcome.HANDLED) {
+            Assert.isTrue(sessionId.isEmpty() && messageJobId.isEmpty() && sessionResolution.isEmpty(),
+                    "Slack commands must not create message jobs or sessions");
+            Assert.isTrue(disposition == SlackIntakeDisposition.NEW_COMMAND
+                            || disposition == SlackIntakeDisposition.DUPLICATE_COMMAND,
+                    "Handled Slack commands must use a command disposition");
         } else {
             Assert.isTrue(sessionId.isEmpty() && messageJobId.isEmpty() && sessionResolution.isEmpty(),
                     "Ignored Slack intake must not include correlation identifiers");
@@ -66,6 +72,12 @@ public record SlackIntakeResult(
     public static SlackIntakeResult duplicateIgnored() {
         return ignored(SlackIntakeDisposition.DUPLICATE_IGNORED);
     }
+    public static SlackIntakeResult command(boolean duplicate) {
+        return new SlackIntakeResult(SlackEventOutcome.HANDLED,
+                duplicate ? SlackIntakeDisposition.DUPLICATE_COMMAND : SlackIntakeDisposition.NEW_COMMAND,
+                Optional.empty(), Optional.empty(), Optional.empty());
+    }
+
 
     private static SlackIntakeResult accepted(
             SlackIntakeDisposition disposition,

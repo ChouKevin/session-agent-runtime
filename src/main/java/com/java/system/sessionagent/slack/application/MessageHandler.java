@@ -44,6 +44,12 @@ public final class MessageHandler {
             logInbound(event, rootThreadTs, result);
             return result.outcome();
         }
+        if (isStopRequest(event)) {
+            SlackIntakeResult result = messageSubmissionPort.receive(new MessageSubmission(event.eventId(), event.teamId(),
+                    event.channelId(), rootThreadTs, event.messageTs(), SlackIntakeClassification.STOP_REQUEST, Optional.empty()));
+            logInbound(event, rootThreadTs, result);
+            return result.outcome();
+        }
         String message = normalizedMessage(event);
         if (!StringUtils.hasText(message)) {
             SlackIntakeResult result = messageSubmissionPort.receive(new MessageSubmission(event.eventId(), event.teamId(), event.channelId(), rootThreadTs,
@@ -128,6 +134,19 @@ public final class MessageHandler {
             return SlackIntakeClassification.UNSUPPORTED_CONTENT;
         }
         return SlackIntakeClassification.ACCEPTED;
+    }
+
+    private boolean isStopRequest(IncomingEvent event) {
+        if (!StringUtils.hasText(event.text())) {
+            return false;
+        }
+        String mention = "<@" + botUserId + ">";
+        int index = event.text().indexOf(mention);
+        if (index < 0) {
+            return false;
+        }
+        String command = (event.text().substring(0, index) + event.text().substring(index + mention.length())).trim();
+        return "stop".equals(command) || "停止工作".equals(command);
     }
 
     private String normalizedMessage(IncomingEvent event) {

@@ -52,7 +52,7 @@ public interface SlackDatabaseMapper extends BaseMapper<SlackDatabaseMapper.Deli
                 message_job_id = excluded.message_job_id
             where slack_message_receipt.top_level
                 and slack_message_receipt.classification <> 'ACCEPTED'
-                and slack_message_receipt.classification <> 'BUSY'
+                and slack_message_receipt.classification not in ('BUSY', 'STOP_REQUEST')
                 and excluded.top_level
                 and excluded.classification in ('ACCEPTED', 'BUSY')
             """)
@@ -298,7 +298,7 @@ public interface SlackDatabaseMapper extends BaseMapper<SlackDatabaseMapper.Deli
                 status, attempt_count, next_attempt_at, claim_number, created_at)
             values (#{deliveryId}, #{kind}, #{messageJobId,jdbcType=OTHER}, #{teamId}, #{channelId}, #{rootThreadTs}, #{messageTs}, #{text},
                 'PENDING', 0, clock_timestamp(), 0, clock_timestamp())
-            on conflict (team_id, channel_id, message_ts) where kind in ('QUEUED', 'BUSY') do nothing
+            on conflict (team_id, channel_id, message_ts) where kind in ('QUEUED', 'BUSY', 'STOP') do nothing
             """)
     int insertNoticeDelivery(
             @Param("deliveryId") UUID deliveryId, @Param("kind") String kind, @Param("messageJobId") UUID messageJobId,

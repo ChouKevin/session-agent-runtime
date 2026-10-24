@@ -623,17 +623,37 @@ public final class PostgresConversationStore implements ConversationStore {
                 return Optional.empty();
             }
             PostgresConversationMapper.CancellationRow job = found.orElseThrow();
-            JobStatus currentStatus = JobStatus.valueOf(job.status());
-            if (!currentStatus.isTerminal()) {
-                mapper.requestCancellation(jobId);
-                if (currentStatus != JobStatus.WORKING) {
-                    insertCancellationMessage(job.sessionId(), jobId, clock.instant());
-                    mapper.deleteContinuations(jobId, job.sessionId());
-                    mapper.cancelJob(jobId);
-                }
-            }
+            cancelLockedJob(job);
             return readJob(requiredId);
         });
+    }
+
+    @Override
+    public int requestSessionCancellation(SessionId sessionId) {
+        SessionId requiredId = Objects.requireNonNull(sessionId, "Session ID must not be null");
+        return inTransaction(() -> {
+            // Intake takes this same lock before creating jobs. Lock every snapshot job before
+            // allocating session sequences, matching worker/HTTP cancellation's job -> session order.
+            intakeCapacity.lock();
+            List<PostgresConversationMapper.CancellationRow> jobs =
+                    mapper.lockSessionCancellationJobs(UUID.fromString(requiredId.value()));
+            for (PostgresConversationMapper.CancellationRow job : jobs) {
+                cancelLockedJob(job);
+            }
+            return jobs.size();
+        });
+    }
+
+    private void cancelLockedJob(PostgresConversationMapper.CancellationRow job) {
+        JobStatus currentStatus = JobStatus.valueOf(job.status());
+        if (!currentStatus.isTerminal()) {
+            mapper.requestCancellation(job.messageJobId());
+            if (currentStatus != JobStatus.WORKING) {
+                insertCancellationMessage(job.sessionId(), job.messageJobId(), clock.instant());
+                mapper.deleteContinuations(job.messageJobId(), job.sessionId());
+                mapper.cancelJob(job.messageJobId());
+            }
+        }
     }
 
     private void insertCancellationMessage(UUID sessionId, UUID jobId, Instant createdAt) {

@@ -254,7 +254,7 @@ Do not start both deployment methods on the same ports.
 
 ## Database and local runtime
 
-The shipped database contract is a fresh schema applied through ordered Flyway migrations V1 through V6. V5 adds durable job progress and safe failure codes; historical terminal failures are backfilled only from an allowlisted final runtime event, not an earlier recoverable failure. Existing working rows may initially have no phase until reclaimed. V6 adds durable cancellation requests and the `CANCELLED` terminal state without rewriting existing history or progress. Compatibility with removed pre-release schemas is not supported. Do not reset or delete the current database or its data as part of starting this version. The Compose service binds the runtime HTTP port to loopback only. Required local credentials are intentionally not committed.
+The shipped database contract is a fresh schema applied through ordered Flyway migrations V1 through V7. V5 adds durable job progress and safe failure codes; historical terminal failures are backfilled only from an allowlisted final runtime event, not an earlier recoverable failure. Existing working rows may initially have no phase until reclaimed. V6 adds durable cancellation requests and the `CANCELLED` terminal state without rewriting existing history or progress. V7 adds durable Slack stop-command receipts and `STOP` delivery notices. Compatibility with removed pre-release schemas is not supported. Do not reset or delete the current database or its data as part of starting this version. The Compose service binds the runtime HTTP port to loopback only. Required local credentials are intentionally not committed.
 
 Conversations and tool results are retained indefinitely. This POC adds no TTL, automatic cleanup, or backup/recovery workflow. Existing temporary continuation cleanup and Docker/host log rotation remain unchanged.
 
@@ -327,6 +327,35 @@ notice without creating a session or job. Its nonthrowing capacity check happens
 before nested conversation intake, so a full queue does not mark the BUSY
 transaction rollback-only. A BUSY resend stays BUSY even after capacity releases;
 delivery retries remain independent of admission and model processing.
+
+Any human in a bound conversation thread can send `@bot stop` or `@bot 停止工作`.
+The bot mention is required, including in DMs; removing the addressing mention
+and trimming whitespace must leave exactly lowercase `stop` or `停止工作`.
+Unmentioned text, uppercase `STOP`, extra words, edits, attachments, hidden
+messages, and bot/system noise do not become stop commands.
+
+Runtime handles this command directly, without creating a user message or job,
+calling the model, or waiting in the work queue, even at full capacity. Acceptance
+atomically snapshots and requests cancellation of every `PENDING`, `RETRY`, or
+`WORKING` job in the thread's immutable session binding, saves event/logical-message
+receipts, and queues one durable `STOP` notice in the original thread. Other
+sessions and submissions accepted afterward are unaffected. Event replays and
+overlapping `app_mention`/`message` events for the same Slack message neither repeat
+cancellation nor duplicate the notice, even after later work has been submitted.
+The transaction takes the shared intake lock, then locks all snapshot jobs in
+user-message order before allocating cancellation history sequences; workers and
+the HTTP cancellation endpoint retain their job-before-session lock order.
+
+The receipt reports `已收到停止請求，共 N 項工作` and cautions that an in-flight call
+may need to finish or time out; it does not claim that running work has already
+stopped. Cancellation uses the same cooperative safe points as HTTP cancellation:
+already-executed operations are not rolled back, and each job's normal terminal
+cancellation result is still delivered separately. A bound thread with no
+nonterminal jobs, or an unbound thread, receives `此對話目前沒有可停止的工作`.
+A top-level command instead asks the sender to use the target thread; neither
+top-level nor unbound commands create a session or job. Commands use ordinary
+messages only, with no buttons, shortcuts, or slash commands. `STOP` notices use
+the existing durable delivery/retry mechanism and are queryable by Slack source.
 
 Terminal answers are persisted and delivered in parts of at most 4,000 UTF-16
 code units; retries continue with unsent parts and do not rerun the model.

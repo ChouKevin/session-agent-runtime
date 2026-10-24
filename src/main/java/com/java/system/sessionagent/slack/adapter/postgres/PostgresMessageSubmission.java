@@ -4,6 +4,7 @@ import com.java.system.sessionagent.conversation.domain.IncomingMessage;
 import com.java.system.sessionagent.conversation.domain.MessageReceipt;
 import com.java.system.sessionagent.conversation.port.in.MessageConflictException;
 import com.java.system.sessionagent.conversation.port.in.MessageIntakePort;
+import com.java.system.sessionagent.conversation.port.in.MessageJobCancellationPort;
 import com.java.system.sessionagent.slack.domain.MessageSubmission;
 import com.java.system.sessionagent.slack.domain.SlackIntakeClassification;
 import com.java.system.sessionagent.slack.domain.SlackIntakeResult;
@@ -28,18 +29,21 @@ public final class PostgresMessageSubmission implements MessageSubmissionPort {
     private final SlackDatabaseMapper mapper;
     private final TransactionTemplate transactionTemplate;
     private final MessageIntakePort messageIntakePort;
+    private final MessageJobCancellationPort cancellationPort;
     private final Clock clock;
     private final PostgresIntakeCapacity intakeCapacity;
 
     public PostgresMessageSubmission(
-            DataSource dataSource, MessageIntakePort messageIntakePort, Clock clock, PostgresIntakeCapacity intakeCapacity) {
-        this(SlackMybatisMapperFactory.create(dataSource), dataSource, messageIntakePort, clock, intakeCapacity);
+            DataSource dataSource, MessageIntakePort messageIntakePort, MessageJobCancellationPort cancellationPort,
+            Clock clock, PostgresIntakeCapacity intakeCapacity) {
+        this(SlackMybatisMapperFactory.create(dataSource), dataSource, messageIntakePort, cancellationPort, clock, intakeCapacity);
     }
 
     public PostgresMessageSubmission(
             SlackDatabaseMapper mapper,
             DataSource dataSource,
             MessageIntakePort messageIntakePort,
+            MessageJobCancellationPort cancellationPort,
             Clock clock,
             PostgresIntakeCapacity intakeCapacity) {
         DataSource requiredDataSource = Objects.requireNonNull(dataSource, "Data source must not be null");
@@ -48,6 +52,7 @@ public final class PostgresMessageSubmission implements MessageSubmissionPort {
         this.transactionTemplate = new TransactionTemplate(transactionManager);
         this.transactionTemplate.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRED);
         this.messageIntakePort = Objects.requireNonNull(messageIntakePort, "Message intake port must not be null");
+        this.cancellationPort = Objects.requireNonNull(cancellationPort, "Cancellation port must not be null");
         this.clock = Objects.requireNonNull(clock, "Clock must not be null");
         this.intakeCapacity = Objects.requireNonNull(intakeCapacity, "Intake capacity must not be null");
     }
@@ -78,6 +83,9 @@ public final class PostgresMessageSubmission implements MessageSubmissionPort {
         if (existingLogicalMessage.isPresent() && !canAcceptTopLevelRootAfterIgnored(intake, existingLogicalMessage.orElseThrow())) {
             return replayLogicalMessage(intake, existingLogicalMessage.orElseThrow());
         }
+        if (intake.classification() == SlackIntakeClassification.STOP_REQUEST) {
+            return stop(intake);
+        }
         if (intake.classification() != SlackIntakeClassification.ACCEPTED) {
             return ignore(intake);
         }
@@ -97,6 +105,23 @@ public final class PostgresMessageSubmission implements MessageSubmissionPort {
             return busy(intake);
         }
         return acceptRoot(intake);
+    }
+
+    private SlackIntakeResult stop(MessageSubmission intake) {
+        String text;
+        if (!isThreadReply(intake)) {
+            text = "請在要停止工作的對話串內 @bot stop 或 @bot 停止工作。";
+        } else {
+            int count = findThreadBinding(intake).map(sessionId -> cancellationPort.cancelSession(sessionId.toString())).orElse(0);
+            text = count == 0 ? "此對話目前沒有可停止的工作"
+                    : "已收到停止請求，共 " + count + " 項工作；進行中的呼叫可能需要先完成或逾時，已執行的操作不會回復。";
+        }
+        boolean inserted = persistLogicalReceipt(intake, SlackIntakeClassification.STOP_REQUEST, null, null);
+        persistAndVerifyEventReceipt(intake, SlackIntakeClassification.STOP_REQUEST, null);
+        if (inserted) {
+            insertNotice(intake, "STOP", null, text);
+        }
+        return SlackIntakeResult.command(!inserted);
     }
 
     private SlackIntakeResult acceptRoot(MessageSubmission intake) {
@@ -135,6 +160,9 @@ public final class PostgresMessageSubmission implements MessageSubmissionPort {
 
     private SlackIntakeResult verifyExistingEvent(MessageSubmission intake, StoredEventReceipt existing) {
         Assert.isTrue(existing.matchesEnvelope(intake), "Slack event ID must retain one logical identity");
+        if (existing.classification() == SlackIntakeClassification.STOP_REQUEST) {
+            return SlackIntakeResult.command(true);
+        }
         if (existing.isBusy()) {
             return SlackIntakeResult.duplicateBusy();
         }
@@ -153,6 +181,10 @@ public final class PostgresMessageSubmission implements MessageSubmissionPort {
     }
 
     private SlackIntakeResult replayLogicalMessage(MessageSubmission intake, StoredMessageReceipt existing) {
+        if (existing.classification() == SlackIntakeClassification.STOP_REQUEST) {
+            persistAndVerifyEventReceipt(intake, SlackIntakeClassification.STOP_REQUEST, null);
+            return SlackIntakeResult.command(true);
+        }
         if (existing.isBusy()) {
             persistAndVerifyEventReceipt(intake, SlackIntakeClassification.BUSY, null);
             return SlackIntakeResult.duplicateBusy();
@@ -252,7 +284,8 @@ public final class PostgresMessageSubmission implements MessageSubmissionPort {
     private static boolean canAcceptTopLevelRootAfterIgnored(MessageSubmission intake, StoredMessageReceipt existing) {
         return intake.classification() == SlackIntakeClassification.ACCEPTED
                 && !isThreadReply(intake)
-                && existing.isIgnoredTopLevel() && !existing.isBusy();
+                && existing.isIgnoredTopLevel() && !existing.isBusy()
+                && existing.classification() != SlackIntakeClassification.STOP_REQUEST;
     }
 
     private void acquireLogicalMessageLock(MessageSubmission intake) {

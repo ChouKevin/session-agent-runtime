@@ -406,9 +406,10 @@ public class RuntimeConfiguration {
             SlackDatabaseMapper mapper,
             DataSource dataSource,
             MessageIntakePort messageIntakePort,
+            MessageJobCancellationPort cancellationPort,
             Clock runtimeClock,
             PostgresIntakeCapacity intakeCapacity) {
-        return new PostgresMessageSubmission(mapper, dataSource, messageIntakePort, runtimeClock, intakeCapacity);
+        return new PostgresMessageSubmission(mapper, dataSource, messageIntakePort, cancellationPort, runtimeClock, intakeCapacity);
     }
 
     @Bean

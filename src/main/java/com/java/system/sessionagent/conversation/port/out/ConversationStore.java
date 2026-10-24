@@ -109,6 +109,8 @@ public interface ConversationStore {
 
     Optional<MessageJobProjection> requestCancellation(MessageJobId messageJobId);
 
+    int requestSessionCancellation(SessionId sessionId);
+
     boolean isCancellationRequested(MessageWorkClaim claim);
 
     default Optional<SessionProjection> readSession(SessionId sessionId) {

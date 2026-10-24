@@ -21,6 +21,7 @@ import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.java.system.sessionagent.conversation.application.MessageService;
+import com.java.system.sessionagent.conversation.application.JobCancellationService;
 import com.java.system.sessionagent.conversation.application.JobProcessor;
 import com.java.system.sessionagent.conversation.application.MessageJobRetryPolicy;
 import com.java.system.sessionagent.conversation.port.out.ConversationModels;
@@ -40,6 +41,8 @@ import com.java.system.sessionagent.conversation.domain.MessageReceipt;
 import com.java.system.sessionagent.conversation.domain.MessageWorkClaim;
 import com.java.system.sessionagent.conversation.domain.ToolCallId;
 import com.java.system.sessionagent.conversation.port.in.MessageIntakePort;
+import com.java.system.sessionagent.conversation.port.in.MessageJobCancellationPort;
+import com.java.system.sessionagent.conversation.port.in.MessageJobView;
 import com.java.system.sessionagent.conversation.port.out.ConversationModel;
 import com.java.system.sessionagent.conversation.port.out.ConversationStore;
 import com.java.system.sessionagent.conversation.port.out.ModelCallReservation;
@@ -109,6 +112,237 @@ class SlackDeliveryPostgresIT {
     }
 
     @Test
+    void smoke_stops_full_thread_without_model_wait_and_delivers_durable_receipt_and_each_cancellation() throws Exception {
+        PostgresIntakeCapacity capacity = new PostgresIntakeCapacity(dataSource(), 4);
+        Clock clock = Clock.fixed(NOW, ZoneOffset.UTC);
+        PostgresConversationStore store = new PostgresConversationStore(dataSource(), clock, new ObjectMapper(), capacity);
+        MessageIntakePort messages = new MessageService(store, TestConfiguredModels.withDefault("test"), new NoOpConversationTelemetry());
+        MessageHandler handler = new MessageHandler("UBOT", new PostgresMessageSubmission(dataSource(), messages,
+                new JobCancellationService(store), clock, capacity));
+        assertThat(handler.handle(stopEvent("root", "1", "", "<@UBOT> work"))).isEqualTo(SlackEventOutcome.ACCEPTED);
+        assertThat(handler.handle(stopEvent("pending", "2", "1", "queued"))).isEqualTo(SlackEventOutcome.ACCEPTED);
+        assertThat(handler.handle(stopEvent("retry", "3", "1", "retry"))).isEqualTo(SlackEventOutcome.ACCEPTED);
+        jdbcTemplate.update("update message_job set status = 'RETRY', retry_count = 1 where user_message_sequence = 3");
+        assertThat(handler.handle(stopEvent("other", "10", "", "<@UBOT> other"))).isEqualTo(SlackEventOutcome.ACCEPTED);
+        MessageWorkClaim claim = store.claimNext("model-worker", Duration.ofMinutes(1)).orElseThrow();
+        CountDownLatch modelStarted = new CountDownLatch(1);
+        CountDownLatch releaseModel = new CountDownLatch(1);
+        ConversationModel model = new ConversationModel() {
+            @Override
+            public ModelRouteId routeId() {
+                return new ModelRouteId("stop-smoke");
+            }
+
+            @Override
+            public ModelDescriptor descriptor() {
+                return new ModelDescriptor(routeId(), "fake", 1_000_000);
+            }
+
+            @Override
+            public ModelCallResult respond(ModelRequest request, ModelCallReservation reservation, Consumer<ModelUsage> observer) {
+                reservation.reserve();
+                modelStarted.countDown();
+                try {
+                    if (!releaseModel.await(10, TimeUnit.SECONDS)) {
+                        throw new IllegalStateException("Fake model was not released");
+                    }
+                } catch (InterruptedException exception) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException(exception);
+                }
+                return new ModelCallResult(new ModelReply.Text("in-flight answer must not replace cancellation"), Optional.empty());
+            }
+        };
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        try {
+            JobProcessor processor = new JobProcessor(store, TestConfiguredModels.withModel(model), emptyToolCatalog(), clock, 3,
+                    new MessageJobRetryPolicy(3, Duration.ofSeconds(1)), new NoOpConversationTelemetry());
+            Future<?> processing = executor.submit(() -> processor.process(claim, () -> true));
+            assertThat(modelStarted.await(5, TimeUnit.SECONDS)).isTrue();
+            IncomingEvent stop = new IncomingEvent("stop-message", "T1", "C1", "4", "1", "U99", "", "channel",
+                    " <@UBOT> 停止工作 ", "", false, false);
+            assertThat(handler.handle(stop)).isEqualTo(SlackEventOutcome.HANDLED);
+            assertThat(processing.isDone()).isFalse();
+            assertThat(store.readJob(claim.messageJobId()).orElseThrow().status()).isEqualTo(JobStatus.WORKING);
+            assertThat(store.isCancellationRequested(claim)).isTrue();
+            assertThat(jdbcTemplate.queryForList("select status from message_job where session_id = ? order by user_message_sequence",
+                    String.class, UUID.fromString(claim.sessionId().value()))).containsExactly("WORKING", "CANCELLED", "CANCELLED");
+            assertThat(handler.handle(stopEvent("later", "5", "1", "new work"))).isEqualTo(SlackEventOutcome.ACCEPTED);
+            MessageHandler restarted = new MessageHandler("UBOT", new PostgresMessageSubmission(dataSource(), messages,
+                    new JobCancellationService(store), clock, capacity));
+            assertThat(restarted.handle(stop)).isEqualTo(SlackEventOutcome.HANDLED);
+            assertThat(restarted.handle(stopEvent("stop-app-mention", "4", "1", "<@UBOT> 停止工作")))
+                    .isEqualTo(SlackEventOutcome.HANDLED);
+            assertThat(jdbcTemplate.queryForObject("select count(*) from message_job where cancellation_requested_at is not null",
+                    Integer.class)).isEqualTo(3);
+            assertThat(jdbcTemplate.queryForObject("select count(*) from message_job where status = 'PENDING'", Integer.class)).isEqualTo(2);
+            assertThat(jdbcTemplate.queryForObject("select count(*) from slack_delivery where kind = 'STOP'", Integer.class)).isEqualTo(1);
+            assertThat(jdbcTemplate.queryForObject("select terminal_text from slack_delivery where kind = 'STOP'", String.class))
+                    .contains("3", "呼叫", "逾時");
+            assertThat(jdbcTemplate.queryForObject("select count(*) from source_message", Integer.class)).isEqualTo(5);
+            List<SlackPostRequest> posts = new ArrayList<>();
+            SlackDeliveryWorker delivery = new SlackDeliveryWorker(new SlackPostgresDeliveryStore(dataSource()), request -> {
+                posts.add(request);
+                return "sent-" + posts.size();
+            }, new SlackDeliveryProperties(), "receipt-worker");
+            while (delivery.poll()) {
+                // Drain durable notices and already-terminal queued-job cancellation results.
+            }
+            assertThat(posts).filteredOn(post -> post.text().contains("已收到停止請求")).singleElement()
+                    .satisfies(post -> assertThat(post.rootThreadTs()).isEqualTo("1"));
+            releaseModel.countDown();
+            processing.get(5, TimeUnit.SECONDS);
+            assertThat(store.readJob(claim.messageJobId()).orElseThrow().status()).isEqualTo(JobStatus.CANCELLED);
+            SlackDeliveryWorker recovered = new SlackDeliveryWorker(new SlackPostgresDeliveryStore(dataSource()), request -> {
+                posts.add(request);
+                return "sent-" + posts.size();
+            }, new SlackDeliveryProperties(), "restarted-worker");
+            while (recovered.poll()) {
+                // The running job now has its own durable terminal cancellation delivery.
+            }
+            assertThat(posts).filteredOn(post -> JobCancellation.MESSAGE.equals(post.text())).hasSize(3)
+                    .allSatisfy(post -> assertThat(post.rootThreadTs()).isEqualTo("1"));
+            assertThat(posts).noneSatisfy(post -> assertThat(post.text()).contains("in-flight answer"));
+            assertThat(jdbcTemplate.queryForObject("select sum(model_calls) from message_job", Integer.class)).isEqualTo(1);
+            assertThat(jdbcTemplate.queryForObject("select count(*) from slack_delivery where status <> 'SENT'", Integer.class)).isZero();
+        } finally {
+            releaseModel.countDown();
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    void stop_guidance_creates_no_session_or_job_and_is_delivered_once_for_roots_and_unbound_threads() {
+        PostgresConversationStore store = new PostgresConversationStore(dataSource(), Clock.fixed(NOW, ZoneOffset.UTC), new ObjectMapper());
+        MessageIntakePort messages = new MessageService(store, TestConfiguredModels.withDefault("test"), new NoOpConversationTelemetry());
+        MessageHandler handler = new MessageHandler("UBOT", new PostgresMessageSubmission(dataSource(), messages,
+                new JobCancellationService(store), Clock.fixed(NOW, ZoneOffset.UTC), intakeCapacity));
+        assertThat(handler.handle(stopEvent("top", "1", "", "<@UBOT> stop"))).isEqualTo(SlackEventOutcome.HANDLED);
+        assertThat(handler.handle(stopEvent("top-dual", "1", "", "<@UBOT> stop"))).isEqualTo(SlackEventOutcome.HANDLED);
+        assertThat(handler.handle(stopEvent("unbound", "3", "2", "<@UBOT> stop"))).isEqualTo(SlackEventOutcome.HANDLED);
+        assertThat(jdbcTemplate.queryForObject("select count(*) from conversation_session", Integer.class)).isZero();
+        assertThat(jdbcTemplate.queryForObject("select count(*) from message_job", Integer.class)).isZero();
+        assertThat(jdbcTemplate.queryForObject("select count(*) from slack_thread_binding", Integer.class)).isZero();
+        List<SlackPostRequest> posts = new ArrayList<>();
+        SlackDeliveryWorker delivery = new SlackDeliveryWorker(new SlackPostgresDeliveryStore(dataSource()), request -> {
+            posts.add(request);
+            return "sent-" + posts.size();
+        }, new SlackDeliveryProperties(), "guidance-worker");
+        while (delivery.poll()) {
+            // Drain both command notices.
+        }
+        assertThat(posts).containsExactly(
+                new SlackPostRequest("C1", "1", "請在要停止工作的對話串內 @bot stop 或 @bot 停止工作。"),
+                new SlackPostRequest("C1", "2", "此對話目前沒有可停止的工作"));
+    }
+
+    @Test
+    void rolls_back_stop_snapshot_and_receipts_if_the_durable_notice_cannot_be_written() {
+        PostgresConversationStore store = new PostgresConversationStore(dataSource(), Clock.fixed(NOW, ZoneOffset.UTC), new ObjectMapper());
+        MessageIntakePort messages = new MessageService(store, TestConfiguredModels.withDefault("test"), new NoOpConversationTelemetry());
+        MessageHandler handler = new MessageHandler("UBOT", new PostgresMessageSubmission(dataSource(), messages,
+                new JobCancellationService(store), Clock.fixed(NOW, ZoneOffset.UTC), intakeCapacity));
+        handler.handle(stopEvent("root", "1", "", "<@UBOT> work"));
+        jdbcTemplate.execute("""
+                create function reject_stop_notice() returns trigger language plpgsql as $$
+                begin
+                    if new.kind = 'STOP' then raise exception 'stop notice rejected'; end if;
+                    return new;
+                end;
+                $$;
+                create trigger reject_stop_notice before insert on slack_delivery
+                    for each row execute function reject_stop_notice();
+                """);
+        assertThatThrownBy(() -> handler.handle(stopEvent("stop", "2", "1", "<@UBOT> stop")))
+                .hasMessageContaining("stop notice rejected");
+        assertThat(jdbcTemplate.queryForObject("select status from message_job", String.class)).isEqualTo("PENDING");
+        assertThat(jdbcTemplate.queryForObject("select count(*) from message_job where cancellation_requested_at is not null",
+                Integer.class)).isZero();
+        assertThat(jdbcTemplate.queryForObject("select count(*) from runtime_message", Integer.class)).isZero();
+        assertThat(jdbcTemplate.queryForObject("select count(*) from slack_message_receipt where classification = 'STOP_REQUEST'",
+                Integer.class)).isZero();
+        assertThat(jdbcTemplate.queryForObject("select count(*) from slack_event_receipt where classification = 'STOP_REQUEST'",
+                Integer.class)).isZero();
+    }
+
+    @Test
+    void serializes_stop_commit_with_new_intake_worker_append_http_cancel_and_dual_event_replay() throws Exception {
+        Clock clock = Clock.fixed(NOW, ZoneOffset.UTC);
+        PostgresConversationStore store = new PostgresConversationStore(dataSource(), clock, new ObjectMapper(), intakeCapacity);
+        MessageIntakePort messages = new MessageService(store, TestConfiguredModels.withDefault("test"), new NoOpConversationTelemetry());
+        JobCancellationService cancellations = new JobCancellationService(store);
+        MessageHandler ordinary = new MessageHandler("UBOT", new PostgresMessageSubmission(dataSource(), messages,
+                cancellations, clock, intakeCapacity));
+        ordinary.handle(stopEvent("root", "1", "", "<@UBOT> work"));
+        ordinary.handle(stopEvent("pending", "2", "1", "queued"));
+        MessageWorkClaim claim = store.claimNext("worker", Duration.ofMinutes(1)).orElseThrow();
+        String queuedJob = jdbcTemplate.queryForObject(
+                "select message_job_id::text from message_job where user_message_sequence = 2", String.class);
+        CountDownLatch snapshotCancelled = new CountDownLatch(1);
+        CountDownLatch commitStop = new CountDownLatch(1);
+        MessageJobCancellationPort staged = new MessageJobCancellationPort() {
+            @Override
+            public Optional<MessageJobView> cancel(String jobId) {
+                return cancellations.cancel(jobId);
+            }
+
+            @Override
+            public int cancelSession(String sessionId) {
+                int count = cancellations.cancelSession(sessionId);
+                snapshotCancelled.countDown();
+                try {
+                    if (!commitStop.await(10, TimeUnit.SECONDS)) {
+                        throw new IllegalStateException("Stop transaction was not released");
+                    }
+                } catch (InterruptedException exception) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException(exception);
+                }
+                return count;
+            }
+        };
+        MessageHandler stopping = new MessageHandler("UBOT", new PostgresMessageSubmission(dataSource(), messages,
+                staged, clock, intakeCapacity));
+        ExecutorService executor = Executors.newFixedThreadPool(5);
+        try {
+            Future<SlackEventOutcome> stopped = executor.submit(() -> stopping.handle(stopEvent("stop", "3", "1", "<@UBOT> stop")));
+            assertThat(snapshotCancelled.await(5, TimeUnit.SECONDS)).isTrue();
+            assertThat(jdbcTemplate.queryForObject("select count(*) from message_job where cancellation_requested_at is not null",
+                    Integer.class)).isZero();
+            assertThat(jdbcTemplate.queryForObject("select count(*) from slack_delivery where kind = 'STOP'", Integer.class)).isZero();
+            Future<SlackEventOutcome> later = executor.submit(() -> ordinary.handle(stopEvent("later", "4", "1", "later work")));
+            Future<JobStatus> appended = executor.submit(() -> store.append(claim,
+                    new ConversationStore.MessageBatch(List.of(new ConversationStore.AssistantData("late answer")),
+                            ConversationStore.JobUpdate.COMPLETE), NOW));
+            Future<?> httpCancelled = executor.submit(() -> cancellations.cancel(queuedJob));
+            Future<SlackEventOutcome> duplicate = executor.submit(() ->
+                    ordinary.handle(stopEvent("stop-app-mention", "3", "1", "<@UBOT> stop")));
+            commitStop.countDown();
+            assertThat(stopped.get(5, TimeUnit.SECONDS)).isEqualTo(SlackEventOutcome.HANDLED);
+            assertThat(appended.get(5, TimeUnit.SECONDS)).isEqualTo(JobStatus.CANCELLED);
+            httpCancelled.get(5, TimeUnit.SECONDS);
+            assertThat(later.get(5, TimeUnit.SECONDS)).isEqualTo(SlackEventOutcome.ACCEPTED);
+            assertThat(duplicate.get(5, TimeUnit.SECONDS)).isEqualTo(SlackEventOutcome.HANDLED);
+            assertThat(jdbcTemplate.queryForObject("select count(*) from message_job where status = 'CANCELLED'", Integer.class)).isEqualTo(2);
+            assertThat(jdbcTemplate.queryForObject("select count(*) from message_job where status = 'PENDING' and cancellation_requested_at is null",
+                    Integer.class)).isEqualTo(1);
+            assertThat(jdbcTemplate.queryForObject("select count(*) from runtime_message where code = 'JOB_CANCELLED'", Integer.class)).isEqualTo(2);
+            assertThat(jdbcTemplate.queryForObject("select count(*) from slack_delivery where kind = 'STOP'", Integer.class)).isEqualTo(1);
+            ordinary.handle(stopEvent("stop-again", "5", "1", "<@UBOT> stop"));
+            ordinary.handle(stopEvent("empty-stop", "6", "1", "<@UBOT> stop"));
+            assertThat(jdbcTemplate.queryForObject("select terminal_text from slack_delivery where message_ts = '6'", String.class))
+                    .isEqualTo("此對話目前沒有可停止的工作");
+        } finally {
+            commitStop.countDown();
+            executor.shutdownNow();
+        }
+    }
+
+    private static IncomingEvent stopEvent(String eventId, String messageTs, String threadTs, String text) {
+        return new IncomingEvent(eventId, "T1", "C1", messageTs, threadTs, "U2", "", "channel", text, "", false, false);
+    }
+
+    @Test
     void discovers_and_delivers_a_cancelled_job_exactly_once_and_accepts_the_next_slack_message() {
         PostgresIntakeCapacity capacity = new PostgresIntakeCapacity(dataSource(), 1);
         PostgresConversationStore conversationStore = new PostgresConversationStore(dataSource(), Clock.fixed(NOW, ZoneOffset.UTC),
@@ -116,7 +350,8 @@ class SlackDeliveryPostgresIT {
         MessageIntakePort messageIntake = new MessageService(conversationStore, TestConfiguredModels.withDefault("test"),
                 new NoOpConversationTelemetry());
         MessageHandler adapter = new MessageHandler("UBOT",
-                new PostgresMessageSubmission(dataSource(), messageIntake, Clock.fixed(NOW, ZoneOffset.UTC), capacity));
+                new PostgresMessageSubmission(dataSource(), messageIntake, new JobCancellationService(conversationStore),
+                        Clock.fixed(NOW, ZoneOffset.UTC), capacity));
         assertThat(adapter.handle(new IncomingEvent("cancel-event", "T1", "C1", "1.000001", "", "U1", "", "channel",
                 "<@UBOT> hello", "", false, false))).isEqualTo(SlackEventOutcome.ACCEPTED);
         MessageJobId jobId = new MessageJobId(jdbcTemplate.queryForObject(
@@ -566,7 +801,7 @@ class SlackDeliveryPostgresIT {
         MessageIntakePort messageIntake = new MessageService(conversationStore, TestConfiguredModels.withDefault("test"),
                 new NoOpConversationTelemetry());
         PostgresMessageSubmission slackIntake = new PostgresMessageSubmission(dataSource(), messageIntake,
-                Clock.fixed(NOW, ZoneOffset.UTC), intakeCapacity);
+                new JobCancellationService(conversationStore), Clock.fixed(NOW, ZoneOffset.UTC), intakeCapacity);
         assertThat(slackIntake.receive(acceptedIntake("event-root", "1.000001", "1.000001")).outcome())
                 .isEqualTo(SlackEventOutcome.ACCEPTED);
         assertThat(slackIntake.receive(acceptedIntake("event-reply-one", "1.000001", "1.000002")).outcome())
@@ -632,7 +867,7 @@ class SlackDeliveryPostgresIT {
         MessageIntakePort messageIntake = new MessageService(conversationStore, TestConfiguredModels.withDefault("test"),
                 new NoOpConversationTelemetry());
         PostgresMessageSubmission slackIntake = new PostgresMessageSubmission(dataSource(), messageIntake,
-                Clock.fixed(NOW, ZoneOffset.UTC), intakeCapacity);
+                new JobCancellationService(conversationStore), Clock.fixed(NOW, ZoneOffset.UTC), intakeCapacity);
         IncomingMessage message = new IncomingMessage(IncomingMessageSource.SLACK, "slack:T1:C1:1.000001", "U1", "1.000001", "request");
         MessageSubmission intake = new MessageSubmission("event-rollback", "T1", "C1", "1.000001", "1.000001",
                 SlackIntakeClassification.ACCEPTED, Optional.of(message));
@@ -654,7 +889,8 @@ class SlackDeliveryPostgresIT {
         MessageIntakePort messageIntake = new MessageService(conversationStore, TestConfiguredModels.withDefault("test"),
                 new NoOpConversationTelemetry());
         MessageHandler adapter = new MessageHandler("UBOT",
-                new PostgresMessageSubmission(dataSource(), messageIntake, Clock.fixed(NOW, ZoneOffset.UTC), intakeCapacity));
+                new PostgresMessageSubmission(dataSource(), messageIntake, new JobCancellationService(conversationStore),
+                        Clock.fixed(NOW, ZoneOffset.UTC), intakeCapacity));
         ListAppender<ILoggingEvent> intakeLogs = capture(MessageHandler.class);
         ListAppender<ILoggingEvent> modelLogs = capture(JobProcessor.class);
         ListAppender<ILoggingEvent> deliveryLogs = capture(SlackDeliveryWorker.class);
@@ -774,7 +1010,7 @@ class SlackDeliveryPostgresIT {
         MessageIntakePort messageIntake = new MessageService(conversationStore, TestConfiguredModels.withDefault("test"),
                 new NoOpConversationTelemetry());
         PostgresMessageSubmission slackIntake = new PostgresMessageSubmission(dataSource(), messageIntake,
-                Clock.fixed(NOW, ZoneOffset.UTC), intakeCapacity);
+                new JobCancellationService(conversationStore), Clock.fixed(NOW, ZoneOffset.UTC), intakeCapacity);
         IncomingMessage message = new IncomingMessage(IncomingMessageSource.SLACK, "slack:T1:C1:" + messageTs, "U1", messageTs,
                 "request");
         MessageSubmission intake = new MessageSubmission("event-" + messageTs, "T1", "C1", messageTs, messageTs,

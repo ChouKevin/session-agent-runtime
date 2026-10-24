@@ -483,6 +483,16 @@ public interface PostgresConversationMapper extends BaseMapper<PostgresConversat
     @Options(flushCache = Options.FlushCachePolicy.FALSE, useCache = false)
     List<CancellationRow> lockCancellationJob(@Param("messageJobId") UUID messageJobId);
 
+    @Select("""
+            select message_job_id, session_id, status, cancellation_requested_at
+            from message_job
+            where session_id = #{sessionId} and status in ('PENDING', 'WORKING', 'RETRY')
+            order by user_message_sequence
+            for update
+            """)
+    @Options(flushCache = Options.FlushCachePolicy.FALSE, useCache = false)
+    List<CancellationRow> lockSessionCancellationJobs(@Param("sessionId") UUID sessionId);
+
     @Select("select cancellation_requested_at is not null from message_job where message_job_id = #{messageJobId}")
     @Options(flushCache = Options.FlushCachePolicy.FALSE, useCache = false)
     boolean isCancellationRequested(@Param("messageJobId") UUID messageJobId);

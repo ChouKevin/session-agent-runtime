@@ -24,6 +24,7 @@ import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.AppenderBase;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.java.system.sessionagent.conversation.application.MessageService;
+import com.java.system.sessionagent.conversation.application.JobCancellationService;
 import com.java.system.sessionagent.conversation.application.JobProcessor;
 import com.java.system.sessionagent.conversation.application.MessageJobRetryPolicy;
 import com.java.system.sessionagent.conversation.TestConfiguredModels;
@@ -513,7 +514,8 @@ class PostgresMessageSubmissionPostgresIT {
             }
             return receipt;
         };
-        PostgresMessageSubmission intake = new PostgresMessageSubmission(raceDataSource, stagedAcceptedIntake, clock, capacity);
+        PostgresMessageSubmission intake = new PostgresMessageSubmission(raceDataSource, stagedAcceptedIntake,
+                new JobCancellationService(store()), clock, capacity);
         JdbcTemplate jdbcTemplate = new JdbcTemplate(dataSource());
         MessageSubmission accepted = rootIntake("T1", "C1", "1.000001");
         MessageSubmission ignored = new MessageSubmission("event-ignored-race", "T1", "C1", "1.000001", "1.000001",
@@ -777,7 +779,7 @@ class PostgresMessageSubmissionPostgresIT {
     private PostgresMessageSubmission intake(ConversationStore conversationStore, Clock clock, PostgresIntakeCapacity capacity) {
         MessageIntakePort messageIntakePort = new MessageService(conversationStore, TestConfiguredModels.withDefault("test"),
                 new NoOpConversationTelemetry());
-        return new PostgresMessageSubmission(dataSource(), messageIntakePort, clock, capacity);
+        return new PostgresMessageSubmission(dataSource(), messageIntakePort, new JobCancellationService(conversationStore), clock, capacity);
     }
 
     private SlackBoltSocketClient socketClient() {

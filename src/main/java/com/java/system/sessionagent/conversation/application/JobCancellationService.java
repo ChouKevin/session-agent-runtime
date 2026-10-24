@@ -1,6 +1,7 @@
 package com.java.system.sessionagent.conversation.application;
 
 import com.java.system.sessionagent.conversation.domain.MessageJobId;
+import com.java.system.sessionagent.conversation.domain.SessionId;
 import com.java.system.sessionagent.conversation.port.in.MessageJobCancellationPort;
 import com.java.system.sessionagent.conversation.port.in.MessageJobView;
 import com.java.system.sessionagent.conversation.port.out.ConversationStore;
@@ -22,5 +23,10 @@ public final class JobCancellationService implements MessageJobCancellationPort 
                 .map(projection -> new MessageJobView(projection.messageJobId().value(), projection.sessionId().value(),
                         projection.status(), projection.retryCount(), projection.modelCallCount(), projection.progress(),
                         projection.failure(), projection.cancellationRequestedAt()));
+    }
+
+    @Override
+    public int cancelSession(String sessionId) {
+        return conversationStore.requestSessionCancellation(new SessionId(sessionId));
     }
 }

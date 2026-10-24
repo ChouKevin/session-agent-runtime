@@ -27,6 +27,48 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 class MessageHandlerTest {
 
     @Test
+    void recognizes_only_exact_mentioned_stop_commands_after_content_guards() {
+        List<MessageSubmission> submissions = new ArrayList<>();
+        MessageHandler handler = new MessageHandler("UBOT", intake -> {
+            submissions.add(intake);
+            return resultFor(intake);
+        });
+        List<String> commands = List.of(" <@UBOT> stop \n", "<@UBOT> 停止工作", "stop <@UBOT>");
+        for (String text : commands) {
+            handler.handle(new IncomingEvent("E-" + submissions.size(), "T1", "C1", "2", "1", "U2", "", "channel",
+                    text, "", false, false));
+        }
+        handler.handle(new IncomingEvent("root", "T1", "C1", "3", "", "U2", "", "channel",
+                "<@UBOT> stop", "", false, false));
+        assertThat(submissions).allSatisfy(intake -> {
+            assertThat(intake.classification()).isEqualTo(SlackIntakeClassification.STOP_REQUEST);
+            assertThat(intake.message()).isEmpty();
+        });
+        assertThat(submissions.getLast().rootThreadTs()).isEqualTo("3");
+
+        submissions.clear();
+        for (String text : List.of("stop", "停止工作", "<@OTHER> stop", "<@UBOT> STOP", "<@UBOT> stop now",
+                "<@UBOT> stop.", "<@UBOT> <@UBOT> stop")) {
+            handler.handle(new IncomingEvent("ordinary-" + submissions.size(), "T1", "C1", "2", "1", "U2", "", "channel",
+                    text, "", false, false));
+        }
+        assertThat(submissions).allSatisfy(intake ->
+                assertThat(intake.classification()).isEqualTo(SlackIntakeClassification.ACCEPTED));
+        submissions.clear();
+        handler.handle(new IncomingEvent("attachment", "T1", "C1", "2", "1", "U2", "", "channel",
+                "<@UBOT> stop", "", false, true));
+        handler.handle(new IncomingEvent("edit", "T1", "C1", "2", "1", "U2", "", "channel",
+                "<@UBOT> stop", "message_changed", false, false));
+        handler.handle(new IncomingEvent("hidden", "T1", "C1", "2", "1", "U2", "", "channel",
+                "<@UBOT> stop", "", true, false));
+        handler.handle(new IncomingEvent("bot", "T1", "C1", "2", "1", "U2", "B1", "channel",
+                "<@UBOT> stop", "", false, false));
+        assertThat(submissions).extracting(MessageSubmission::classification).containsExactly(
+                SlackIntakeClassification.UNSUPPORTED_CONTENT, SlackIntakeClassification.EDIT_OR_DELETE,
+                SlackIntakeClassification.HIDDEN);
+    }
+
+    @Test
     void accepts_an_addressed_channel_root_after_durable_intake() {
         AtomicReference<MessageSubmission> accepted = new AtomicReference<>();
         MessageSubmissionPort intakePort = intake -> {
