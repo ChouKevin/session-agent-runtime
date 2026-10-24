@@ -111,6 +111,49 @@ Bot 發出的訊息會被 noise guard 過濾，不能用 `chat.postMessage` 偽�
 
 停止的邊界／去重／滿載行為由 repo fake-backed 與 PostgreSQL integration suite 覆蓋；live Slack 驗收與它們是不同證據。回報清楚列出已驗證、尚未驗證及設定不足之處，不將 Socket AVAILABLE 或健康檢查當作全面驗收。
 
+## 每題 Slack 狀態驗收（本地隔離與真人證據分開）
+
+先在經授權的隔離 PostgreSQL、實際 Runtime、實際 configured model adapter 與
+Slack Java SDK 執行；外部 HTTP 指向 loopback fake，Socket intake 用既有 adapter
+注入 synthetic events。不要新增 production probe hooks，也不要將此流程當作
+真人 Slack inbound、Socket 傳輸或 native client UI 的證明。
+
+1. 阻塞模型 HTTP，送同一 thread 兩題與另一 session 一題。記錄每題唯一初始
+   notice 的已確認 ts、job/source 對應及 `chat.update` 目標；前題 active、後題
+   queued、另一 session 可獨立執行。保持阻塞超過 30 秒，觀察真正 UTC 時間刷新。
+2. 確認 `chat.getPermalink(channel, message_ts)` 回傳的特定問題 URL 已驗證並
+   持久化；thread reply 保留 provider 的 `thread_ts`／`cid` query，不能以未文件化
+   `slack://...&message=` 或猜測 workspace domain 代替。此 API 不增加 scope。
+   Lookup 與 update 分不同 claim／poll，避免兩次 HTTP 共用一個 lease。
+3. 注入 update 503／429（含 `Retry-After`），確認 progress 延後但獨立 answer
+   worker 仍送回答；永久刪除／權限錯誤停止該 target，不產生 replacement spam。
+   Multipart 未全數 `SENT` 前只能是準備傳送或傳送失敗，不能因 job `DONE` 宣稱完成。
+4. 經既有 HTTP cancel／Slack stop adapter 路徑觀察 queued cancellation、
+   active stopping → cancelled；停止 worker renewal 後等真實 lease 到期，應顯示
+   interrupted 而非 running。重啟同一隔離資料庫並重播 source，應重用 notice ts
+   與 cached permalink；不因 progress／source replay 增加 model calls 或 history。
+   真正中斷工作的 recovery 可新增正常模型 request，須與 progress 分開計數。
+5. 保存模型 HTTP requests、公開 history、delivery parts 與 progress rows 的對照，
+   證明 status 不進模型／history，且沒有 tool arguments、SHA 或內部錯誤內容。
+   證據放 Git 外私有位置；移除 launcher source／compiled scaffolds 並停止 fake
+   HTTP、Runtime、Testcontainers。完整 gate 為 Java 21 的
+   `mvn --batch-mode --no-transfer-progress -Ppostgres-it clean verify`，需報告完整
+   ordinary phase 與 PG phase counts；不只挑 progress tests。
+
+預設 poll 2s、同狀態 refresh 30s、workspace progress API spacing 2s；跨 replicas
+共用 durable gate，backlog 與 Retry-After 可延遲。這是「最後確認」，不是模型遠端
+進度／百分比或外部 heartbeat；整個 Runtime 停機時會留下舊時間。Progress failure
+不影響 answer／model retry。Terminal 第一次 ack 後仍保留至少 delivery lease
+window 的 reconciliation（預設 30s > call timeout 25s），但 Slack 沒有 remote CAS，
+延遲 accepted update 仍可能短暫覆蓋新文字；不得保證 exactly-once 或 remote monotonic。
+初始 post outcome 不明也不授權 replacement。
+
+另取得 live 授權後，才由真人檢查特定問題 link 在實際 Slack client 導航及每題各自
+更新。Bot 必須有 `chat:write` 且只能 update 自己的訊息；不擴大權限或使用 user
+token 冒充真人。官方契約：
+[`chat.update`](https://docs.slack.dev/reference/methods/chat.update/)、
+[`chat.getPermalink`](https://docs.slack.dev/reference/methods/chat.getPermalink/)。
+
 ## Runtime skills 驗收（與 Gateway／真人 Slack 分開）
 
 一般可先在隔離 PostgreSQL 與本地 fake provider 執行，不能以 tests 通過或

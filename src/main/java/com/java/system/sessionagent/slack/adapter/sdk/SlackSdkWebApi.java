@@ -4,6 +4,9 @@ import com.slack.api.Slack;
 import com.slack.api.SlackConfig;
 import com.slack.api.methods.SlackApiException;
 import com.slack.api.methods.response.chat.ChatPostMessageResponse;
+import com.slack.api.methods.response.chat.ChatUpdateResponse;
+import com.slack.api.methods.response.chat.ChatGetPermalinkResponse;
+import com.java.system.sessionagent.slack.domain.SlackPermalinkParser;
 import okhttp3.Response;
 import org.springframework.util.Assert;
 import org.springframework.util.StringUtils;
@@ -12,6 +15,7 @@ import com.java.system.sessionagent.slack.configuration.SlackProperties;
 import com.java.system.sessionagent.slack.domain.SlackDeliveryFailureCategory;
 import com.java.system.sessionagent.slack.domain.SlackPostFailure;
 import com.java.system.sessionagent.slack.domain.SlackPostRequest;
+import com.java.system.sessionagent.slack.domain.SlackUpdateRequest;
 import com.java.system.sessionagent.slack.port.out.SlackWebApi;
 
 import java.io.IOException;
@@ -28,6 +32,8 @@ public final class SlackSdkWebApi implements SlackWebApi, AutoCloseable {
             "invalid_blocks", "invalid_blocks_format", "invalid_charset", "invalid_form_data", "invalid_post_type",
             "channel_not_found", "is_archived", "missing_scope", "msg_blocks_too_long", "msg_too_long", "no_permission", "no_text",
             "token_revoked");
+    private static final Set<String> PERMANENT_UPDATE_ERRORS = Set.of(
+            "message_not_found", "cant_update_message", "edit_window_closed", "not_in_channel", "restricted_action");
 
     private final SlackProperties properties;
     private final Slack slack;
@@ -66,6 +72,68 @@ public final class SlackSdkWebApi implements SlackWebApi, AutoCloseable {
         } catch (IOException exception) {
             throw new SlackPostFailure(SlackDeliveryFailureCategory.TRANSIENT, Optional.empty());
         }
+    }
+
+    @Override
+    public void update(SlackUpdateRequest request) {
+        SlackUpdateRequest requiredRequest = java.util.Objects.requireNonNull(request, "Slack update request must not be null");
+        Assert.isTrue(properties.enabled(), "Slack Web API requires complete Slack configuration");
+        try {
+            ChatUpdateResponse response = slack.methods(properties.botToken()).chatUpdate(builder -> builder
+                    .channel(requiredRequest.channelId()).ts(requiredRequest.messageTs()).text(requiredRequest.text()));
+            if (!response.isOk()) {
+                Optional<Duration> delay = retryAfter(response.getHttpResponseHeaders());
+                if (delay.isPresent()) {
+                    throw new SlackPostFailure(SlackDeliveryFailureCategory.RATE_LIMIT, delay);
+                }
+                throw updateFailure(response.getError());
+            }
+        } catch (SlackApiException exception) {
+            SlackPostFailure failure = classifiedFailure(exception);
+            if (failure.category() == SlackDeliveryFailureCategory.RATE_LIMIT) {
+                throw failure;
+            }
+            throw updateFailure(Optional.ofNullable(exception.getError()).map(value -> value.getError()).orElse(""));
+        } catch (IOException exception) {
+            throw new SlackPostFailure(SlackDeliveryFailureCategory.TRANSIENT, Optional.empty());
+        }
+    }
+
+    @Override
+    public String getPermalink(String channelId, String messageTs) {
+        Assert.isTrue(properties.enabled(), "Slack Web API requires complete Slack configuration");
+        try {
+            ChatGetPermalinkResponse response = slack.methods(properties.botToken()).chatGetPermalink(builder -> builder
+                    .channel(channelId).messageTs(messageTs));
+            if (!response.isOk()) {
+                Optional<Duration> delay = retryAfter(response.getHttpResponseHeaders());
+                if (delay.isPresent()) {
+                    throw new SlackPostFailure(SlackDeliveryFailureCategory.RATE_LIMIT, delay);
+                }
+                throw updateFailure(response.getError());
+            }
+            try {
+                new SlackPermalinkParser().requireMessage(response.getPermalink(), channelId, messageTs);
+            } catch (IllegalArgumentException exception) {
+                throw new SlackPostFailure(SlackDeliveryFailureCategory.PERMANENT, Optional.empty());
+            }
+            return response.getPermalink();
+        } catch (SlackApiException exception) {
+            SlackPostFailure failure = classifiedFailure(exception);
+            if (failure.category() == SlackDeliveryFailureCategory.RATE_LIMIT) {
+                throw failure;
+            }
+            throw updateFailure(Optional.ofNullable(exception.getError()).map(value -> value.getError()).orElse(""));
+        } catch (IOException exception) {
+            throw new SlackPostFailure(SlackDeliveryFailureCategory.TRANSIENT, Optional.empty());
+        }
+    }
+
+    private static SlackPostFailure updateFailure(String error) {
+        if (PERMANENT_UPDATE_ERRORS.contains(Optional.ofNullable(error).orElse(""))) {
+            return new SlackPostFailure(SlackDeliveryFailureCategory.PERMANENT, Optional.empty());
+        }
+        return classifiedFailure(error);
     }
 
     private static SlackPostFailure classifiedFailure(ChatPostMessageResponse response) {

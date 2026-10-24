@@ -15,7 +15,7 @@ import com.java.system.sessionagent.slack.domain.SlackEventOutcome;
 import com.java.system.sessionagent.slack.domain.SlackIntakeClassification;
 import com.java.system.sessionagent.slack.domain.SlackPostFailure;
 import com.java.system.sessionagent.slack.domain.SlackPostRequest;
-import com.java.system.sessionagent.slack.port.out.SlackWebApi;
+import com.java.system.sessionagent.slack.PostingSlackWebApi;
 import com.java.system.sessionagent.slack.configuration.SlackDeliveryProperties;
 
 import ch.qos.logback.classic.Logger;
@@ -183,7 +183,7 @@ class SlackDeliveryPostgresIT {
                     .contains("3", "呼叫", "逾時");
             assertThat(jdbcTemplate.queryForObject("select count(*) from source_message", Integer.class)).isEqualTo(5);
             List<SlackPostRequest> posts = new ArrayList<>();
-            SlackDeliveryWorker delivery = new SlackDeliveryWorker(new SlackPostgresDeliveryStore(dataSource()), request -> {
+            SlackDeliveryWorker delivery = new SlackDeliveryWorker(new SlackPostgresDeliveryStore(dataSource()), (PostingSlackWebApi) request -> {
                 posts.add(request);
                 return "sent-" + posts.size();
             }, new SlackDeliveryProperties(), "receipt-worker");
@@ -195,7 +195,7 @@ class SlackDeliveryPostgresIT {
             releaseModel.countDown();
             processing.get(5, TimeUnit.SECONDS);
             assertThat(store.readJob(claim.messageJobId()).orElseThrow().status()).isEqualTo(JobStatus.CANCELLED);
-            SlackDeliveryWorker recovered = new SlackDeliveryWorker(new SlackPostgresDeliveryStore(dataSource()), request -> {
+            SlackDeliveryWorker recovered = new SlackDeliveryWorker(new SlackPostgresDeliveryStore(dataSource()), (PostingSlackWebApi) request -> {
                 posts.add(request);
                 return "sent-" + posts.size();
             }, new SlackDeliveryProperties(), "restarted-worker");
@@ -226,7 +226,7 @@ class SlackDeliveryPostgresIT {
         assertThat(jdbcTemplate.queryForObject("select count(*) from message_job", Integer.class)).isZero();
         assertThat(jdbcTemplate.queryForObject("select count(*) from slack_thread_binding", Integer.class)).isZero();
         List<SlackPostRequest> posts = new ArrayList<>();
-        SlackDeliveryWorker delivery = new SlackDeliveryWorker(new SlackPostgresDeliveryStore(dataSource()), request -> {
+        SlackDeliveryWorker delivery = new SlackDeliveryWorker(new SlackPostgresDeliveryStore(dataSource()), (PostingSlackWebApi) request -> {
             posts.add(request);
             return "sent-" + posts.size();
         }, new SlackDeliveryProperties(), "guidance-worker");
@@ -366,7 +366,7 @@ class SlackDeliveryPostgresIT {
         deliveryStore.discover();
         deliveryStore.discover();
         List<SlackPostRequest> posts = new ArrayList<>();
-        SlackDeliveryWorker worker = new SlackDeliveryWorker(deliveryStore, request -> {
+        SlackDeliveryWorker worker = new SlackDeliveryWorker(deliveryStore, (PostingSlackWebApi) request -> {
             posts.add(request);
             return "2.000001";
         }, new SlackDeliveryProperties(), "delivery-worker");
@@ -415,7 +415,7 @@ class SlackDeliveryPostgresIT {
         deliveryStore.discover();
         UUID deliveryId = answerDeliveryId();
         jdbcTemplate.update("update slack_delivery set attempt_count = 4 where delivery_id = ?", deliveryId);
-        SlackWebApi failingSlack = request -> {
+        PostingSlackWebApi failingSlack = request -> {
             throw new SlackPostFailure(SlackDeliveryFailureCategory.TRANSIENT, Optional.empty());
         };
         SlackDeliveryWorker worker = new SlackDeliveryWorker(deliveryStore, failingSlack, new SlackDeliveryProperties(), "delivery-worker");
@@ -438,7 +438,7 @@ class SlackDeliveryPostgresIT {
         SlackPostgresDeliveryStore deliveryStore = new SlackPostgresDeliveryStore(dataSource());
         List<SlackPostRequest> posts = new ArrayList<>();
         AtomicBoolean rateLimited = new AtomicBoolean();
-        SlackWebApi slack = request -> {
+        PostingSlackWebApi slack = request -> {
             posts.add(request);
             if (posts.size() == 2 && rateLimited.compareAndSet(false, true)) {
                 throw new SlackPostFailure(SlackDeliveryFailureCategory.RATE_LIMIT, Optional.of(Duration.ofSeconds(1)));
@@ -484,7 +484,7 @@ class SlackDeliveryPostgresIT {
         markQueuedNoticeSent();
         SlackPostgresDeliveryStore deliveryStore = new SlackPostgresDeliveryStore(dataSource());
         List<SlackPostRequest> posts = new ArrayList<>();
-        SlackWebApi slack = request -> {
+        PostingSlackWebApi slack = request -> {
             posts.add(request);
             return "2.000001";
         };
@@ -522,7 +522,7 @@ class SlackDeliveryPostgresIT {
         CountDownLatch allowFirstSendToFinish = new CountDownLatch(1);
         CountDownLatch secondSendStarted = new CountDownLatch(1);
         CountDownLatch allowSecondSendToFinish = new CountDownLatch(1);
-        SlackWebApi controlledSlack = request -> {
+        PostingSlackWebApi controlledSlack = request -> {
             posts.add(request);
             if (posts.size() == 1) {
                 firstSendStarted.countDown();
@@ -622,7 +622,7 @@ class SlackDeliveryPostgresIT {
         completeSlackJobWithTerminalRuntime();
         markQueuedNoticeSent();
         SlackPostgresDeliveryStore deliveryStore = new SlackPostgresDeliveryStore(dataSource());
-        SlackWebApi truncatingSlack = request -> {
+        PostingSlackWebApi truncatingSlack = request -> {
             throw new SlackPostFailure(SlackDeliveryFailureCategory.PERMANENT, Optional.empty(), Optional.of("2.000099"));
         };
         SlackDeliveryWorker worker = new SlackDeliveryWorker(deliveryStore, truncatingSlack, new SlackDeliveryProperties(),
@@ -652,7 +652,7 @@ class SlackDeliveryPostgresIT {
                 where delivery_id = ?
                 """, deliveryId);
         AtomicBoolean posted = new AtomicBoolean(false);
-        SlackWebApi slack = request -> {
+        PostingSlackWebApi slack = request -> {
             posted.set(true);
             return "2.000001";
         };
@@ -908,7 +908,7 @@ class SlackDeliveryPostgresIT {
                     Clock.fixed(NOW, ZoneOffset.UTC), 3, new MessageJobRetryPolicy(3, Duration.ofSeconds(1)),
                     new NoOpConversationTelemetry());
             service.process(claim, () -> true);
-            SlackDeliveryWorker deliveryWorker = new SlackDeliveryWorker(new SlackPostgresDeliveryStore(dataSource()), request -> {
+            SlackDeliveryWorker deliveryWorker = new SlackDeliveryWorker(new SlackPostgresDeliveryStore(dataSource()), (PostingSlackWebApi) request -> {
                 posts.add(request);
                 return "2.000001";
             }, new SlackDeliveryProperties(), "delivery-worker");
@@ -1092,7 +1092,7 @@ class SlackDeliveryPostgresIT {
         return Flyway.configure().dataSource(dataSource()).cleanDisabled(false).load();
     }
 
-    private static final class DatabaseInspectingSlackWebApi implements SlackWebApi {
+    private static final class DatabaseInspectingSlackWebApi implements PostingSlackWebApi {
 
         private final JdbcTemplate jdbcTemplate;
         private final List<SlackPostRequest> posts = new ArrayList<>();

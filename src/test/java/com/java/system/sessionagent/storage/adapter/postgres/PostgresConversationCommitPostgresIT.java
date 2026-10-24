@@ -131,7 +131,7 @@ class PostgresConversationCommitPostgresIT {
         assertThat(tables).containsExactlyInAnyOrder("conversation_session", "source_message", "session_message", "user_message",
                 "message_job", "assistant_message", "assistant_tool_calls", "model_continuation", "tool_observation", "runtime_message",
                 "context_usage_checkpoint", "session_compaction", "slack_thread_binding", "slack_event_receipt", "slack_message_receipt",
-                "slack_delivery", "slack_delivery_part", "skill_command", "skill_message");
+                "slack_delivery", "slack_delivery_part", "slack_question_progress", "slack_progress_workspace", "skill_command", "skill_message");
         assertThat(observationColumns).containsExactlyInAnyOrder("session_id", "sequence", "role", "tool_call_id", "tool_name", "output");
         assertThat(jobColumns).contains("model_route_id", "phase", "phase_started_at", "current_tool_name", "failure_code")
                 .doesNotContain("reply_sequence");

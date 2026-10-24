@@ -2,6 +2,7 @@ package com.java.system.sessionagent.slack.adapter.sdk;
 
 import com.java.system.sessionagent.slack.application.MessageHandler;
 import com.java.system.sessionagent.slack.configuration.SlackProperties;
+import com.java.system.sessionagent.slack.configuration.SlackProgressProperties;
 import com.java.system.sessionagent.slack.domain.SlackIntakeResult;
 
 import org.junit.jupiter.api.Test;
@@ -61,8 +62,26 @@ class SlackConfigurationTest {
                 Duration.ofSeconds(60), 5));
     }
 
+    @Test
+    void binds_progress_once_and_rejects_nonpositive_scheduling_durations() {
+        contextRunner.withPropertyValues(
+                "session-agent.slack.progress.poll-delay=3s",
+                "session-agent.slack.progress.refresh-interval=45s",
+                "session-agent.slack.progress.workspace-interval=4s").run(context -> {
+                    assertThat(context).hasSingleBean(SlackProgressProperties.class);
+                    SlackProgressProperties progress = context.getBean(SlackProgressProperties.class);
+                    assertThat(progress.pollDelay()).isEqualTo(Duration.ofSeconds(3));
+                    assertThat(progress.refreshInterval()).isEqualTo(Duration.ofSeconds(45));
+                    assertThat(progress.workspaceInterval()).isEqualTo(Duration.ofSeconds(4));
+                });
+        for (String property : java.util.List.of("poll-delay", "refresh-interval", "workspace-interval")) {
+            contextRunner.withPropertyValues("session-agent.slack.progress." + property + "=0s")
+                    .run(context -> assertThat(context).hasFailed());
+        }
+    }
+
     @Configuration(proxyBeanMethods = false)
-    @EnableConfigurationProperties(SlackProperties.class)
+    @EnableConfigurationProperties({SlackProperties.class, SlackProgressProperties.class})
     static class SlackPropertiesConfiguration {
     }
 }

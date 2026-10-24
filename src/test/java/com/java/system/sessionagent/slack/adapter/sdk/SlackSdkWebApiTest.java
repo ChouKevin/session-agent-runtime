@@ -4,6 +4,7 @@ import com.java.system.sessionagent.slack.configuration.SlackProperties;
 import com.java.system.sessionagent.slack.domain.SlackDeliveryFailureCategory;
 import com.java.system.sessionagent.slack.domain.SlackPostFailure;
 import com.java.system.sessionagent.slack.domain.SlackPostRequest;
+import com.java.system.sessionagent.slack.domain.SlackUpdateRequest;
 
 import com.slack.api.Slack;
 import com.slack.api.SlackConfig;
@@ -36,6 +37,121 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.catchThrowable;
 
 class SlackSdkWebApiTest {
+
+    @Test
+    void resolves_the_specific_threaded_message_with_real_sdk_and_rejects_wrong_identity_or_unsafe_links() throws Exception {
+        String link = "https://example.slack.com/archives/C1/p2000002?thread_ts=1.000001&cid=C1";
+        for (String returned : List.of(link, "https://example.slack.com/archives/C1/p1000001",
+                "https://example.slack.com/archives/C2/p2000002", "https://evil.example/archives/C1/p2000002", "")) {
+            List<String> requests = new CopyOnWriteArrayList<>();
+            HttpServer server = HttpServer.create(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 0);
+            server.createContext("/", exchange -> {
+                requests.add(exchange.getRequestURI().toString() + new String(exchange.getRequestBody().readAllBytes(),
+                        java.nio.charset.StandardCharsets.UTF_8));
+                byte[] response = ("{\"ok\":true,\"permalink\":\"" + returned + "\"}")
+                        .getBytes(java.nio.charset.StandardCharsets.UTF_8);
+                exchange.sendResponseHeaders(200, response.length);
+                try (OutputStream body = exchange.getResponseBody()) { body.write(response); }
+            });
+            server.start();
+            SlackConfig config = new SlackConfig();
+            config.setStatsEnabled(false);
+            config.setMethodsEndpointUrlPrefix(methodsEndpoint(server));
+            try (SlackSdkWebApi api = new SlackSdkWebApi(properties(), Slack.getInstance(config))) {
+                if (returned.equals(link)) {
+                    assertThat(api.getPermalink("C1", "2.000002")).isEqualTo(link);
+                } else {
+                    assertThat(catchThrowable(() -> api.getPermalink("C1", "2.000002")))
+                            .isInstanceOfSatisfying(SlackPostFailure.class,
+                                    failure -> assertThat(failure.category()).isEqualTo(SlackDeliveryFailureCategory.PERMANENT));
+                }
+            } finally {
+                server.stop(0);
+            }
+            assertThat(requests).singleElement().satisfies(request -> assertThat(java.net.URLDecoder.decode(request,
+                    java.nio.charset.StandardCharsets.UTF_8)).contains("/chat.getPermalink", "channel=C1", "message_ts=2.000002"));
+        }
+    }
+
+    @Test
+    void updates_the_confirmed_notice_with_the_real_sdk_without_posting_a_replacement() throws Exception {
+        List<String> paths = new CopyOnWriteArrayList<>();
+        List<String> bodies = new CopyOnWriteArrayList<>();
+        List<String> authorization = new CopyOnWriteArrayList<>();
+        HttpServer server = HttpServer.create(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 0);
+        server.createContext("/", exchange -> {
+            paths.add(exchange.getRequestURI().getPath());
+            bodies.add(new String(exchange.getRequestBody().readAllBytes(), java.nio.charset.StandardCharsets.UTF_8));
+            authorization.add(exchange.getRequestHeaders().getFirst("Authorization"));
+            byte[] response = "{\"ok\":true,\"channel\":\"C2\",\"ts\":\"9.000002\"}".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, response.length);
+            try (OutputStream body = exchange.getResponseBody()) { body.write(response); }
+        });
+        server.start();
+        SlackConfig config = new SlackConfig();
+        config.setStatsEnabled(false);
+        config.setMethodsEndpointUrlPrefix(methodsEndpoint(server));
+        try (SlackSdkWebApi api = new SlackSdkWebApi(properties(), Slack.getInstance(config))) {
+            api.update(new SlackUpdateRequest("C2", "9.000002", "Last confirmed UTC"));
+        } finally {
+            server.stop(0);
+        }
+        assertThat(paths).containsExactly("/chat.update");
+        assertThat(authorization).containsExactly("Bearer xoxb-test");
+        assertThat(bodies).singleElement().satisfies(body -> {
+            assertThat(java.net.URLDecoder.decode(body, java.nio.charset.StandardCharsets.UTF_8))
+                    .contains("channel=C2", "ts=9.000002", "text=Last confirmed UTC");
+            assertThat(body).doesNotContain("thread_ts");
+        });
+    }
+
+    @Test
+    void real_sdk_progress_calls_check_ok_and_classify_deleted_permission_rate_limit_and_ambiguous_failures() throws Exception {
+        for (UpdateCase scenario : List.of(
+                new UpdateCase(200, "{\"ok\":false,\"error\":\"message_not_found\"}", "", SlackDeliveryFailureCategory.PERMANENT),
+                new UpdateCase(200, "{\"ok\":false,\"error\":\"cant_update_message\"}", "", SlackDeliveryFailureCategory.PERMANENT),
+                new UpdateCase(200, "{\"ok\":false,\"error\":\"missing_scope\"}", "", SlackDeliveryFailureCategory.PERMANENT),
+                new UpdateCase(403, "{\"ok\":false,\"error\":\"no_permission\"}", "", SlackDeliveryFailureCategory.PERMANENT),
+                new UpdateCase(429, "{\"ok\":false,\"error\":\"ratelimited\"}", "7", SlackDeliveryFailureCategory.RATE_LIMIT),
+                new UpdateCase(200, "{\"ok\":false,\"error\":\"ratelimited\"}", "7", SlackDeliveryFailureCategory.RATE_LIMIT),
+                new UpdateCase(503, "{\"ok\":false,\"error\":\"internal_error\"}", "", SlackDeliveryFailureCategory.TRANSIENT))) {
+            List<String> paths = new CopyOnWriteArrayList<>();
+            HttpServer server = HttpServer.create(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 0);
+            server.createContext("/", exchange -> {
+                paths.add(exchange.getRequestURI().getPath());
+                if (!scenario.retryAfter().isEmpty()) { exchange.getResponseHeaders().set("Retry-After", scenario.retryAfter()); }
+                byte[] response = scenario.body().getBytes(java.nio.charset.StandardCharsets.UTF_8);
+                exchange.sendResponseHeaders(scenario.status(), response.length);
+                try (OutputStream body = exchange.getResponseBody()) { body.write(response); }
+            });
+            server.start();
+            SlackConfig config = new SlackConfig();
+            config.setStatsEnabled(false);
+            config.setMethodsEndpointUrlPrefix(methodsEndpoint(server));
+            try (SlackSdkWebApi api = new SlackSdkWebApi(properties(), Slack.getInstance(config))) {
+                Throwable thrown = catchThrowable(() -> api.update(new SlackUpdateRequest("C2", "9.000002", "Safe status")));
+                assertThat(thrown).as(scenario.toString()).isInstanceOf(SlackPostFailure.class);
+                SlackPostFailure failure = (SlackPostFailure) thrown;
+                assertThat(failure.category()).isEqualTo(scenario.category());
+                assertThat(failure.getMessage()).isNull();
+                assertThat(failure.getCause()).isNull();
+                assertThat(failure.retryAfter()).isEqualTo(scenario.retryAfter().isEmpty()
+                        ? java.util.Optional.empty() : java.util.Optional.of(Duration.ofSeconds(7)));
+                Throwable lookupThrown = catchThrowable(() -> api.getPermalink("C2", "9.000002"));
+                assertThat(lookupThrown).as(scenario.toString()).isInstanceOfSatisfying(SlackPostFailure.class, lookupFailure -> {
+                    assertThat(lookupFailure.category()).isEqualTo(scenario.category());
+                    assertThat(lookupFailure.retryAfter()).isEqualTo(failure.retryAfter());
+                    assertThat(lookupFailure.getMessage()).isNull();
+                    assertThat(lookupFailure.getCause()).isNull();
+                });
+            } finally {
+                server.stop(0);
+            }
+            assertThat(paths).containsExactly("/chat.update", "/chat.getPermalink");
+        }
+    }
+
+    private record UpdateCase(int status, String body, String retryAfter, SlackDeliveryFailureCategory category) { }
 
     @Test
     void classifies_an_http_429_sdk_exception_using_its_retry_after_header() throws Exception {

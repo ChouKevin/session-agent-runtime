@@ -65,6 +65,11 @@ class ApplicationStartupTest {
             assertThat(context).hasSingleBean(McpConnectionManager.class);
             assertThat(context).hasSingleBean(ToolCatalog.class);
             assertThat(context).hasSingleBean(ConversationStore.class);
+            assertThat(context).hasSingleBean(com.java.system.sessionagent.slack.configuration.SlackProgressProperties.class);
+            assertThat(context).hasSingleBean(com.java.system.sessionagent.slack.port.out.SlackProgressStore.class);
+            assertThat(context).hasSingleBean(com.java.system.sessionagent.slack.application.SlackProgressWorker.class);
+            assertThat(context).hasSingleBean(com.java.system.sessionagent.slack.application.SlackProgressLifecycle.class);
+            assertThat(context.getBean(com.java.system.sessionagent.slack.application.SlackProgressLifecycle.class).isRunning()).isFalse();
             try (com.java.system.sessionagent.tool.port.ToolSnapshot snapshot = context.getBean(ToolCatalog.class).snapshot()) {
                 assertThat(snapshot.definitions()).isEmpty();
             }

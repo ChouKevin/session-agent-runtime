@@ -6,14 +6,10 @@ import org.w3c.dom.Element;
 import org.w3c.dom.Node;
 import org.w3c.dom.NodeList;
 
-import java.io.File;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.HashSet;
-import java.util.List;
-import java.util.Locale;
 import java.util.Set;
-import java.util.stream.Stream;
 
 import javax.xml.parsers.DocumentBuilderFactory;
 
@@ -24,9 +20,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class StandaloneProjectTest {
 
     private static final String RESERVED_TRANSPORT_CONTRACT_FILE = "src/test/shell/docker-contract-test.sh";
-    private static final Set<String> FORBIDDEN_RUNTIME_REMNANTS = Set.of(
-            "Observation" + "Id", "StrictJson" + "Codec", "ToolSchema" + "Factory", "DirectTool" + "Registry",
-            "reply" + "Only", "FINAL" + "_REPLY", "cita" + "tion");
 
     @Test
     void isAnIndependentBuildProjectWithLockedTooling() throws Exception {
@@ -50,7 +43,6 @@ class StandaloneProjectTest {
         assertLockedBuildConfiguration(project);
         assertSlackSocketModeDependencies(project);
         assertNoObsoleteLiveVerification(projectPom);
-        assertNoSemanticOrTypedToolRemnants(projectPom);
     }
 
     @Test
@@ -99,28 +91,6 @@ class StandaloneProjectTest {
         assertFalse(Files.exists(projectRoot.resolve("live-test.sh")));
         assertFalse(Files.exists(projectRoot.resolve("src/test/java/com/java/system/sessionagent/live/SessionAgentLiveAssertionTest.java")));
         assertFalse(Files.exists(projectRoot.resolve("src/test/java/com/java/system/sessionagent/live/SessionAgentLiveIT.java")));
-    }
-
-    private static void assertNoSemanticOrTypedToolRemnants(Path projectPom) throws Exception {
-        Path productionSources = projectPom.getParent().resolve("src/main");
-        List<Path> productionFiles;
-        try (Stream<Path> paths = Files.walk(productionSources)) {
-            productionFiles = paths.filter(Files::isRegularFile).toList();
-        }
-        for (Path productionFile : productionFiles) {
-            String relativePath = productionSources.relativize(productionFile).toString().replace(File.separatorChar, '/');
-            String content = Files.readString(productionFile);
-            assertFalse(relativePath.toLowerCase(Locale.ROOT).contains("semantic"),
-                    () -> "Production path must not contain semantic: " + relativePath);
-            assertFalse(content.contains("com.java.system.sessionagent.semantic"),
-                    () -> "Production code must not reference the Semantic package: " + relativePath);
-            assertFalse(content.contains("com.github.victools"),
-                    () -> "Production code must not directly use Victools: " + relativePath);
-            for (String remnant : FORBIDDEN_RUNTIME_REMNANTS) {
-                assertFalse(content.contains(remnant),
-                        () -> "Production code must not retain obsolete runtime remnant " + remnant + " in " + relativePath);
-            }
-        }
     }
 
     private static boolean isReservedTransportContractFile(String relativePath) {

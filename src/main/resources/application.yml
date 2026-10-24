@@ -39,6 +39,10 @@ session-agent:
       initial-backoff: 1s
       maximum-backoff: 60s
       maximum-attempts: 5
+    progress:
+      poll-delay: 2s
+      refresh-interval: 30s
+      workspace-interval: 2s
 spring:
   config:
     import: optional:classpath:models.yml

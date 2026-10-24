@@ -1,6 +1,7 @@
 package com.java.system.sessionagent.slack.application;
 
 import com.java.system.sessionagent.slack.configuration.SlackDeliveryProperties;
+import com.java.system.sessionagent.slack.PostingSlackWebApi;
 import com.java.system.sessionagent.slack.configuration.SlackProperties;
 import com.java.system.sessionagent.slack.domain.SlackDeliveryClaim;
 import com.java.system.sessionagent.slack.domain.SlackDeliveryFailureCategory;
@@ -33,7 +34,7 @@ class SlackDeliveryLifecycleTest {
         CountDownLatch messagePollRan = new CountDownLatch(1);
         SlackDeliveryWorker worker = new SlackDeliveryWorker(
                 new OneClaimStore(),
-                request -> awaitRelease(slackCallStarted, releaseSlackCall),
+                (PostingSlackWebApi) request -> awaitRelease(slackCallStarted, releaseSlackCall),
                 new SlackDeliveryProperties(),
                 "delivery-worker");
         SlackDeliveryLifecycle lifecycle = new SlackDeliveryLifecycle(worker, enabledProperties());

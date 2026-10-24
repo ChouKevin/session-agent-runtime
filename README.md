@@ -52,6 +52,13 @@ load complete ordered session history and available tools
 
 The runtime exposes registered tools to the model but does not interpret a provider's input schema or tool output. One ordinary tool failure is recorded as that tool's observation and does not prevent later requests in the same batch.
 
+The general conversation prompt asks for question-focused answers that explain the
+outcome and reasoning before supporting evidence. Commit SHAs, full source paths,
+line citations, and tool procedures are omitted by default unless requested or
+needed for understanding; relevant uncertainty and version limitations remain
+explicit. This is presentation guidance only: exact tool identifiers, required
+source/version verification, opaque MCP data, and complete audit history are unchanged.
+
 ## Durable history and HTTP API
 
 Submit a message, poll its job, then read the complete session history:
@@ -364,7 +371,7 @@ as part of a Runtime update.
 
 ## Database and local runtime
 
-The shipped database contract is a fresh schema applied through ordered Flyway migrations V1 through V7. V5 adds durable job progress and safe failure codes; historical terminal failures are backfilled only from an allowlisted final runtime event, not an earlier recoverable failure. Existing working rows may initially have no phase until reclaimed. V6 adds durable cancellation requests and the `CANCELLED` terminal state without rewriting existing history or progress. V7 adds durable Slack stop-command receipts and `STOP` delivery notices. Compatibility with removed pre-release schemas is not supported. Do not reset or delete the current database or its data as part of starting this version. The Compose service binds the runtime HTTP port to loopback only. Required local credentials are intentionally not committed.
+The shipped database contract is a fresh schema applied through ordered Flyway migrations V1 through V9. V5 adds durable job progress and safe failure codes; historical terminal failures are backfilled only from an allowlisted final runtime event, not an earlier recoverable failure. Existing working rows may initially have no phase until reclaimed. V6 adds durable cancellation requests and the `CANCELLED` terminal state without rewriting existing history or progress. V7 adds durable Slack stop-command receipts and `STOP` delivery notices. V8 adds skill commands; V9 adds Slack-owned per-question progress and workspace cooldown persistence. Compatibility with removed pre-release schemas is not supported. Do not reset or delete the current database or its data as part of starting this version. The Compose service binds the runtime HTTP port to loopback only. Required local credentials are intentionally not committed.
 
 Conversations and tool results are retained indefinitely. This POC adds no TTL or automatic cleanup. The OMP deployment skill documents operator-run database backup and schema-aware rollback; it does not add automatic backup scheduling or guarantee lossless restoration. Existing temporary continuation cleanup and Docker/host log retention remain unchanged.
 
@@ -414,7 +421,7 @@ Configure the Slack app for Socket Mode and subscribe to `app_mention` plus
 message events for public channels, private channels, MPIMs, and direct
 messages. Grant the matching read scopes (`app_mentions:read`,
 `channels:history`, `groups:history`, `mpim:history`, and `im:history`) and the
-bot write scope needed for outbound replies. Socket Mode supplies inbound event
+bot `chat:write` scope needed for outbound replies and updates to its own notices. Socket Mode supplies inbound event
 intake and envelope acknowledgement; accepted messages and outbound notices or
 answers are persisted as database deliveries, which a separate worker polls and
 sends through the Slack Web API. Runtime has no public Slack callback endpoint,
@@ -430,6 +437,47 @@ When the unfinished-job capacity is full, the source is durably recorded as busy
 with (`目前工作已滿，這則訊息尚未受理，請稍後重新送出。`) and is not later
 promoted into a job by a resend. These notices are delivery status, not proof of
 job completion or a replacement for Socket Mode acknowledgement.
+
+After Slack confirms the queued notice timestamp, Runtime updates that same bot-owned
+message with per-question status and a last-confirmed UTC observation time. Two
+questions in one thread retain independent notices; the status is not the thread's
+latest job. The original-question link comes from
+[`chat.getPermalink`](https://docs.slack.dev/reference/methods/chat.getPermalink/),
+is validated against the original channel/message, and is cached durably, including
+thread query parameters. No additional scope is required for that lookup. A
+separate claim performs the lookup before a later claim updates the notice, so one
+claim never spends two Slack call windows.
+
+Receipt means queued, not running. Active preparation, model waiting and tool
+lookup require a current processing lease. Status also distinguishes retry,
+stopping, interrupted ownership, preparing answer delivery, completed, cancelled,
+job failure and answer-delivery failure. `DONE` alone is not delivery success:
+completed appears only after every final-answer part is confirmed `SENT`. The final
+answer remains separate from the mutable notice.
+
+`session-agent.slack.progress` defaults to `poll-delay: 2s`,
+`refresh-interval: 30s` for unchanged nonfinal states, and
+`workspace-interval: 2s` between progress API attempts per workspace across replicas.
+Changed states are eligible sooner; polling coalesces intermediate phases.
+Backlog, outages and Slack `Retry-After` can delay updates beyond these best-effort
+intervals. Progress uses the existing delivery lease, retry/backoff and attempt
+limits, but has its own scheduler: slow or failing progress calls do not block
+answer posting, retry the model, or add conversation/history events. Permanent
+lookup/update errors (for example a deleted notice or permission loss) stop that
+target; they do not post a replacement notice.
+
+The timestamp is the last database observation, not proof of current model activity
+or an external heartbeat. An entire Runtime outage leaves the old static timestamp
+visible until recovery. Source replay and restart reuse the confirmed notice
+timestamp and cached question link. An unknown initial post outcome does not
+authorize another progress post. Slack
+[`chat.update`](https://docs.slack.dev/reference/methods/chat.update/) can update only
+the bot's own messages and has no remote compare-and-swap: claim/version fencing
+rejects stale local acknowledgments, but a delayed accepted request can briefly
+overwrite newer remote text. A terminal reconciliation pass waits at least the
+delivery lease window (default 30s, longer than the 25s call timeout) before
+retirement; this is not a guarantee of exactly-once posting or monotonic remote
+visibility.
 
 The Slack intake transaction commits an accepted job together with its receipts,
 immutable thread binding, and queued notice, or commits BUSY receipts and a busy

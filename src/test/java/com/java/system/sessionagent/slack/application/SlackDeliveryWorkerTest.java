@@ -7,7 +7,7 @@ import com.java.system.sessionagent.slack.domain.SlackDeliveryView;
 import com.java.system.sessionagent.slack.domain.SlackPostFailure;
 import com.java.system.sessionagent.slack.domain.SlackPostRequest;
 import com.java.system.sessionagent.slack.port.out.SlackDeliveryStore;
-import com.java.system.sessionagent.slack.port.out.SlackWebApi;
+import com.java.system.sessionagent.slack.PostingSlackWebApi;
 
 import ch.qos.logback.classic.Logger;
 import ch.qos.logback.classic.spi.ILoggingEvent;
@@ -92,7 +92,7 @@ class SlackDeliveryWorkerTest {
         SlackDeliveryClaim claim = claim(1, 1, new SlackPostRequest("C1", "1.000001", "Committed terminal response"));
         FakeDeliveryStore store = new FakeDeliveryStore(List.of(claim));
         store.transitionsAccepted = false;
-        SlackDeliveryWorker worker = new SlackDeliveryWorker(store, request -> "2.000001",
+        SlackDeliveryWorker worker = new SlackDeliveryWorker(store, (PostingSlackWebApi) request -> "2.000001",
                 new SlackDeliveryProperties(), "delivery-worker");
         Logger logger = (Logger) LoggerFactory.getLogger(SlackDeliveryWorker.class);
         ListAppender<ILoggingEvent> appender = new ListAppender<>();
@@ -330,7 +330,7 @@ class SlackDeliveryWorkerTest {
         }
     }
 
-    private static final class FakeSlackWebApi implements SlackWebApi {
+    private static final class FakeSlackWebApi implements PostingSlackWebApi {
 
         private final List<SlackPostRequest> posts = new ArrayList<>();
         private final Queue<SlackPostFailure> failures = new ArrayDeque<>();

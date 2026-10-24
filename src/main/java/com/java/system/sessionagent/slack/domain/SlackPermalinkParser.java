@@ -44,6 +44,15 @@ public final class SlackPermalinkParser {
         return new SlackPermalink(channelId, rootThreadTimestamp);
     }
 
+    /** Validates a specific message without changing thread-binding parse semantics. */
+    public void requireMessage(String permalink, String channelId, String messageTs) {
+        parse(permalink);
+        String expectedPath = "/archives/" + channelId + "/p" + messageTs.replace(".", "");
+        if (!expectedPath.equals(parseUri(permalink).getRawPath())) {
+            throw invalidPermalink();
+        }
+    }
+
     private static URI parseUri(String permalink) {
         try {
             return new URI(permalink);

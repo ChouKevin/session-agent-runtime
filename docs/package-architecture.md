@@ -93,6 +93,37 @@ a rollback-only transaction that would discard BUSY. Core intake retains its
 even at capacity, and BUSY duplicates remain BUSY after capacity releases. The
 separate delivery worker and provider-neutral conversation contracts are unchanged.
 
+Per-question status belongs entirely to Slack, not conversation history. V9 adds
+`slack_question_progress`, `slack_progress_workspace` and a coherent database
+job/answer-part observation view. Confirmation of a new `QUEUED` delivery registers
+its progress row in the same transaction; bounded recovery discovery skips fully
+delivered historical terminal work. The composite foreign key ties the exact job,
+source identity and confirmed notice timestamp together, never the latest thread
+job. Only unexpired processing ownership admits an active state; `DONE` is still
+delivering until every persisted final-answer part is `SENT`.
+
+`SlackProgressWorker`/`SlackProgressLifecycle` run independently of answer delivery.
+Claims use worker identity, claim number, lease and observed revision fencing, with
+a durable workspace gate shared by replicas. HTTP runs outside database
+transactions. A missing original-question link uses one SDK `chat.getPermalink`
+call, validates the provider URL against the source channel/message using the
+existing permalink parser, then caches it under the claim and releases ownership.
+The next gated claim re-observes the latest job before `chat.update`; there are
+never two outbound calls inside one claim window. Thread lookup still resolves a
+threaded permalink to its root, while question-link validation checks the specific
+path message and preserves the provider's thread query unchanged.
+
+The independent retry/cooldown path cannot create model requests, conversation
+events or replacement notices. Progress failures never fail or suppress answer
+delivery. Defaults are 2s polling, 30s unchanged-state refresh and 2s workspace
+spacing, with coalescing and persisted `Retry-After` delays rather than latency
+guarantees. Terminal updates retain a lease-window reconciliation pass after their
+first acknowledgment; stale local claims cannot acknowledge success. Slack has no
+conditional remote write, so delayed accepted requests can still briefly regress
+visible text. An old UTC observation remains static during a complete Runtime
+outage and is not a current liveness assertion. Replay/restart recover the same
+confirmed notice and cached provider permalink, not a guessed workspace URL.
+
 Keep provider SDKs inside their owning adapters. The conversation domain,
 application, ports, generic tool module, storage, web, and worker remain free of
 model, MCP, Google, and Slack SDK types. MCP connections remain independent: an
@@ -156,11 +187,11 @@ cross-layer behavior.
 | --- | --- |
 | Domain invariants and provider-neutral records | `ConversationDomainTest`, `ContextUsageEstimatorTest`, `GenericToolSnapshotTest`, and `slack/domain/SlackPermalinkParserTest`; these run without Spring, PostgreSQL, an MCP server, or a model key. |
 | Conversation application behavior with local fakes | `MessageServiceTest`, `SessionQueryServiceTest`, `MessageJobContextCompactionTest`, `MessageJobToolExecutionTest`, `MessageJobRecoveryTest`, and shared `MessageJobTestFixtures`; these cover history loading, model-call reservation, compaction, ordered tool execution and ordinary tool failures, continuation, claim fencing, retry, and recovery. |
-| Model adapter behavior | `model/adapter/springai/HistoryProjectorTest`, `SystemPromptTest`, `SpringAiConversationModelTest`, `SpringAiToolCallbackFactoryTest`, `SpringAiMessagePartsHandlerTest`, `GoogleGenAiContinuationTest`, and the explicitly gated `GoogleModelLiveTest`. Ordered continuation tests retain reasoning, per-part signatures, unknown provider parts and media; local fake-HTTP provider tests exercise replay without model quota. |
+| Model adapter behavior | `model/adapter/springai/HistoryProjectorTest`, `SpringAiConversationModelTest`, `SpringAiToolCallbackFactoryTest`, `SpringAiMessagePartsHandlerTest`, `GoogleGenAiContinuationTest`, and the explicitly gated `GoogleModelLiveTest`. Ordered continuation tests retain reasoning, per-part signatures, unknown provider parts and media; local fake-HTTP provider tests exercise replay without model quota. |
 | MCP adapter behavior | `mcp/adapter/sdk/McpConnectionClientFactoryTest`, `McpConnectionManagerTest`, `McpToolCatalogTest`, `McpToolResultMapperTest`, and `McpConnectionsEndpointTest`. The endpoint test stays in this package because it exercises the SDK adapter's private seam. |
 | PostgreSQL and HTTP adapters | `storage/adapter/postgres/PostgresConversationCommitPostgresIT`, `PostgresMessageIntakePostgresIT`, and `PostgresMessageJobPostgresIT`; `web/adapter/http/MessageControllerTest`; and Slack persistence tests described below. |
 | Worker behavior | `worker/application/MessageJobWorkerTest`, covering claim, renewal, processing, retry, limit, and recovery coordination. |
-| Slack application and adapters | `slack/application/MessageHandlerTest`, `SlackDeliveryLifecycleTest`, `SlackDeliveryWorkerTest`, and `SlackSocketLifecycleTest`; `slack/adapter/postgres/SlackDeliveryPostgresIT`; and SDK-seam tests in `slack/adapter/sdk`, including `SlackConfigurationTest`, `PostgresMessageSubmissionPostgresIT`, `SlackSocketShutdownTest`, `SlackBoltSocketClientTest`, and `SlackSdkWebApiTest`. |
+| Slack application and adapters | `slack/application/MessageHandlerTest`, `SlackDeliveryLifecycleTest`, `SlackDeliveryWorkerTest`, `SlackProgressWorkerTest`, `SlackProgressLifecycleTest`, and `SlackSocketLifecycleTest`; `slack/adapter/postgres/SlackDeliveryPostgresIT` and `SlackProgressPostgresIT`; and SDK-seam tests in `slack/adapter/sdk`, including `SlackConfigurationTest`, `PostgresMessageSubmissionPostgresIT`, `SlackSocketShutdownTest`, `SlackBoltSocketClientTest`, and `SlackSdkWebApiTest` (real SDK calls against local fake HTTP, including question permalink identity and update errors). |
 | Bootstrap configuration and metrics | `bootstrap/configuration/RuntimeConfigurationTest`, `ApplicationStartupTest`, `RuntimePropertiesTest`, and `LoggingConfigurationTest`; `bootstrap/adapter/metrics/RuntimeObservabilityTest`. |
 | Architecture and dependency boundaries | `ApplicationModulesTest` verifies the nine closed modules, the exact allowed dependency map, and the complete named-interface map. `RuntimeBoundaryTest` verifies provider boundaries, MCP and Slack SDK confinement to their SDK adapters, and the domain/port direction rules for conversation and Slack. |
 
@@ -182,6 +213,17 @@ boundaries, history ordering, or concurrency:
 JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64 \
 mvn --batch-mode --no-transfer-progress -Ppostgres-it verify
 ```
+
+For the complete clean ordinary-plus-PostgreSQL gate, use
+`JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64 mvn --batch-mode --no-transfer-progress -Ppostgres-it clean verify`.
+The ordinary phase is the full suite, not a selected subset. Integrated acceptance
+also needs a separately launched real Runtime with isolated PostgreSQL, actual
+configured-model and Slack SDK adapters pointed at local fake HTTP services, and
+synthetic intake through the existing Slack adapter. Capture blocked-model refresh,
+multipart delivery, independent progress errors, cancellation and restart/history
+counts; keep private evidence outside Git and remove temporary launchers. This
+proves local transport integration, not genuine Slack inbound or native client UI.
+
 
 Neither command should require a live model or MCP server. Keep live model,
 deployed MCP, and real Slack behavior explicitly authorized and outside the

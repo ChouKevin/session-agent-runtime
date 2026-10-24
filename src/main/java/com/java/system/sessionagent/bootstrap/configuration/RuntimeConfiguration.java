@@ -33,17 +33,22 @@ import com.java.system.sessionagent.slack.adapter.postgres.PostgresMessageSubmis
 import com.java.system.sessionagent.slack.adapter.postgres.SlackDatabaseMapper;
 import com.java.system.sessionagent.slack.adapter.postgres.SlackPostgresDeliveryStore;
 import com.java.system.sessionagent.slack.adapter.postgres.SlackPostgresSessionLookup;
+import com.java.system.sessionagent.slack.adapter.postgres.SlackPostgresProgressStore;
 import com.java.system.sessionagent.slack.adapter.sdk.SlackBoltSocketClient;
 import com.java.system.sessionagent.slack.adapter.sdk.SlackSdkWebApi;
 import com.java.system.sessionagent.slack.application.MessageHandler;
 import com.java.system.sessionagent.slack.application.SlackDeliveryLifecycle;
 import com.java.system.sessionagent.slack.application.SlackDeliveryWorker;
+import com.java.system.sessionagent.slack.application.SlackProgressLifecycle;
+import com.java.system.sessionagent.slack.application.SlackProgressWorker;
 import com.java.system.sessionagent.slack.application.SlackSocketLifecycle;
 import com.java.system.sessionagent.slack.configuration.SlackDeliveryProperties;
 import com.java.system.sessionagent.slack.configuration.SlackProperties;
+import com.java.system.sessionagent.slack.configuration.SlackProgressProperties;
 import com.java.system.sessionagent.slack.domain.SlackPermalinkParser;
 import com.java.system.sessionagent.slack.port.out.MessageSubmissionPort;
 import com.java.system.sessionagent.slack.port.out.SlackDeliveryStore;
+import com.java.system.sessionagent.slack.port.out.SlackProgressStore;
 import com.java.system.sessionagent.slack.port.out.SlackSocketClient;
 import com.java.system.sessionagent.slack.port.out.SlackWebApi;
 import com.java.system.sessionagent.tool.port.ToolCatalog;
@@ -91,7 +96,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 
 @Configuration(proxyBeanMethods = false)
-@EnableConfigurationProperties({RuntimeProperties.class, RuntimeProperties.Datasource.class, SlackProperties.class})
+@EnableConfigurationProperties({RuntimeProperties.class, RuntimeProperties.Datasource.class, SlackProperties.class, SlackProgressProperties.class})
 public class RuntimeConfiguration {
 
     private static final String GOOGLE_GENAI_API_ROUTE = "https://generativelanguage.googleapis.com";
@@ -447,6 +452,21 @@ public class RuntimeConfiguration {
     @Bean
     SlackDeliveryLifecycle slackDeliveryLifecycle(SlackDeliveryWorker slackDeliveryWorker, SlackProperties properties) {
         return new SlackDeliveryLifecycle(slackDeliveryWorker, properties);
+    }
+
+    @Bean
+    SlackProgressStore slackProgressStore(DataSource dataSource, SlackProgressProperties progress, SlackDeliveryProperties delivery) {
+        return new SlackPostgresProgressStore(dataSource, progress, delivery);
+    }
+
+    @Bean
+    SlackProgressWorker slackProgressWorker(SlackProgressStore store, SlackWebApi api, SlackDeliveryProperties delivery) {
+        return new SlackProgressWorker(store, api, delivery, "session-agent-slack-progress");
+    }
+
+    @Bean
+    SlackProgressLifecycle slackProgressLifecycle(SlackProgressWorker worker, SlackProperties slack, SlackProgressProperties progress) {
+        return new SlackProgressLifecycle(worker, slack, progress);
     }
 
     @Bean

@@ -224,6 +224,15 @@ public interface SlackDatabaseMapper extends BaseMapper<SlackDatabaseMapper.Deli
             @Param("workerId") String workerId,
             @Param("claimNumber") long claimNumber);
 
+    @Insert("""
+            insert into slack_question_progress(message_job_id, notice_delivery_id, team_id, channel_id,
+                source_message_ts, target_message_ts)
+            select message_job_id, delivery_id, team_id, channel_id, message_ts, slack_message_ts
+            from slack_delivery where delivery_id = #{deliveryId} and kind = 'QUEUED' and status = 'SENT'
+            on conflict (message_job_id) do nothing
+            """)
+    int registerProgress(@Param("deliveryId") UUID deliveryId);
+
     @Update("""
             update slack_delivery_part part set status = 'FAILED', slack_message_ts = #{slackMessageTs}
             from slack_delivery delivery

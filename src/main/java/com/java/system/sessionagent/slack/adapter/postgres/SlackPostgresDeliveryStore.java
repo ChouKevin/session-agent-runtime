@@ -103,6 +103,7 @@ public final class SlackPostgresDeliveryStore implements SlackDeliveryStore {
                 status.setRollbackOnly();
                 return false;
             }
+            mapper.registerProgress(requiredClaim.deliveryId());
             return true;
         });
         return Boolean.TRUE.equals(sent);

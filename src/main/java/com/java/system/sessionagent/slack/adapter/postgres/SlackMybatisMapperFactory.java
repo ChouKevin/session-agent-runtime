@@ -18,6 +18,10 @@ final class SlackMybatisMapperFactory {
     }
 
     static SlackDatabaseMapper create(DataSource dataSource) {
+        return create(dataSource, SlackDatabaseMapper.class);
+    }
+
+    static <T> T create(DataSource dataSource, Class<T> mapperType) {
         DataSource requiredDataSource = Objects.requireNonNull(dataSource, "Data source must not be null");
         MybatisConfiguration configuration = new MybatisConfiguration();
         configuration.setCacheEnabled(false);
@@ -26,7 +30,7 @@ final class SlackMybatisMapperFactory {
         configuration.setMapUnderscoreToCamelCase(true);
         configuration.setArgNameBasedConstructorAutoMapping(true);
         configuration.getTypeHandlerRegistry().register(UUID.class, PostgresUuidTypeHandler.class);
-        configuration.addMapper(SlackDatabaseMapper.class);
+        configuration.addMapper(mapperType);
 
         MybatisSqlSessionFactoryBean factoryBean = new MybatisSqlSessionFactoryBean();
         factoryBean.setDataSource(requiredDataSource);
@@ -38,7 +42,7 @@ final class SlackMybatisMapperFactory {
             // The mapper retains this template and manages per-call sessions; manually closing it throws UnsupportedOperationException.
             @SuppressWarnings("resource")
             SqlSessionTemplate sqlSessionTemplate = new SqlSessionTemplate(sqlSessionFactory);
-            return sqlSessionTemplate.getMapper(SlackDatabaseMapper.class);
+            return sqlSessionTemplate.getMapper(mapperType);
         } catch (Exception exception) {
             throw new IllegalStateException("MyBatis SQL session factory could not be initialized", exception);
         }
