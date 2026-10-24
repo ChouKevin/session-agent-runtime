@@ -212,10 +212,27 @@ verification, and includes portable, non-secret templates. The example model is
 `openai-codex/gpt-6.1-sol` with `reasoning-effort: medium`; verify availability and
 capacity against your gateway catalog before deployment.
 
-The build pins Spring AI **2.1.0-M1**, a milestone/pre-release rather than a stable
-release. The upgrade retains the existing Google and OpenAI adapters; availability
-of Responses API support in the dependency does not enable it in this runtime or
-add native Codex OAuth login/refresh.
+The build pins Spring AI **2.1.0-RC1**, a release candidate/pre-release rather than
+a stable release. The upgrade retains the existing Google and OpenAI adapters;
+availability of Responses API support in the dependency does not enable it in this
+runtime or add native Codex OAuth login/refresh.
+
+Spring AI's ordered message parts are captured as opaque, route-bound continuation
+state during a tool turn. This preserves reasoning, per-part Google thought
+signatures, and OpenAI-compatible extra tool-call properties on replay, including
+assistant text alongside tool calls. Provider response metadata is not the replay
+contract. The continuation remains private to the model adapter and is removed
+when the job finishes; permanent provider-neutral history is unchanged. Runtime
+still owns sequential tool execution and atomic history commits, not Spring AI
+memory or an advisor-managed tool loop.
+
+Before replacing an M1 runtime with RC1, drain in-flight/retry jobs through
+completion. RC1 does not replay the old Google metadata-only continuation format;
+already completed conversation history needs no migration. The local fake-HTTP
+smoke verifies Runtime sends explicit `strict: false`, keeps optional tool-schema
+fields optional, commits/replays the tool observation, and stores the final
+response. It does not verify a gateway's downstream translation; the gateway
+compatibility requirement below still applies.
 
 `src/main/resources/models.yml` is the bundled model configuration imported by the default `application.yml`. It contains a Google entry and an inactive OpenAI fragment for direct-provider/container deployments. The OMP deployment skill instead selects a complete external `application.yml` with `SPRING_CONFIG_LOCATION`, importing its own `models.yml` without retaining the unused Google entry. Model credentials are environment placeholders only; do not put a key in configuration committed to a repository.
 

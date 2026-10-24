@@ -1,6 +1,7 @@
 package com.java.system.sessionagent.bootstrap.configuration;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.java.system.sessionagent.conversation.domain.AssistantToolCallsMessage;
 import com.java.system.sessionagent.conversation.domain.ContextCompactionRequest;
 import com.java.system.sessionagent.conversation.domain.ModelCallResult;
@@ -9,7 +10,6 @@ import com.java.system.sessionagent.conversation.domain.ModelReply;
 import com.java.system.sessionagent.conversation.domain.ModelRequest;
 import com.java.system.sessionagent.conversation.domain.MessageJobId;
 import com.java.system.sessionagent.conversation.domain.MessageRole;
-import com.java.system.sessionagent.conversation.domain.ModelRouteId;
 import com.java.system.sessionagent.conversation.domain.ModelUsage;
 import com.java.system.sessionagent.conversation.domain.SessionId;
 import com.java.system.sessionagent.conversation.domain.SessionSequence;
@@ -274,16 +274,16 @@ class OpenAiConfiguredModelTest {
     }
 
     @Test
-    void maps_openai_tool_calls_with_assistant_text_and_preserves_opaque_tool_schema() throws Exception {
+    void replays_openai_tool_text_reasoning_and_extra_properties_without_changing_opaque_tool_schema() throws Exception {
         AtomicReference<String> requestBody = new AtomicReference<>();
         AtomicInteger providerRequests = new AtomicInteger();
         HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         server.createContext("/v1/chat/completions", exchange -> respond(exchange, new AtomicReference<>(), requestBody,
-                providerRequests, """
+                providerRequests, providerRequests.get() == 0 ? """
                 {"id":"chatcmpl-2","object":"chat.completion","created":0,"model":"gpt-5-mini",
-                "choices":[{"index":0,"message":{"role":"assistant","content":"Checking.","tool_calls":[{"id":"call-lookup","type":"function","function":{"name":"lookup","arguments":"{\\"query\\":\\"fee\\"}"}}]},"finish_reason":"tool_calls"}],
+                "choices":[{"index":0,"message":{"role":"assistant","reasoning_content":"Need a lookup.","content":"Checking.","tool_calls":[{"id":"call-lookup","type":"function","function":{"name":"lookup","arguments":"{\\"query\\":\\"fee\\"}"},"extra_content":{"google":{"thought_signature":"AQID"}}}]},"finish_reason":"tool_calls"}],
                 "usage":{"prompt_tokens":8,"completion_tokens":2,"total_tokens":10}}
-                """));
+                """ : textResponse("The fee is 9.")));
         server.start();
         Map<String, Object> schema = Map.of("type", "object", "properties", Map.of("query", Map.of("type", "string")),
                 "required", List.of("query"), "additionalProperties", false);
@@ -299,6 +299,28 @@ class OpenAiConfiguredModelTest {
             assertThat(new ObjectMapper().readTree(requestBody.get()).at("/tools/0/function/parameters"))
                     .isEqualTo(new ObjectMapper().valueToTree(schema));
             assertThat(requestBody.get()).doesNotContain("\"strict\":true");
+            ModelContinuation continuation = result.continuation().orElseThrow();
+            ModelReply.UseTools reply = (ModelReply.UseTools) result.reply();
+            SessionId sessionId = new SessionId("session-1");
+            MessageJobId jobId = new MessageJobId("job-1");
+            AssistantToolCallsMessage calls = new AssistantToolCallsMessage(sessionId, new SessionSequence(2),
+                    Optional.of(jobId), Instant.EPOCH, MessageRole.ASSISTANT_TOOL_CALLS, reply.message(), reply.requests());
+            ToolObservation observation = new ToolObservation(sessionId, new SessionSequence(3), Optional.of(jobId),
+                    Instant.EPOCH, MessageRole.TOOL, reply.requests().getFirst().toolCallId(), "lookup",
+                    Map.of("isError", false, "result", Map.of("fee", 9)));
+
+            ModelCallResult finalResult = models.defaultConversationModel().respond(
+                    new ModelRequest(List.of(calls, observation), Map.of(calls.sequence(), continuation),
+                            new ToolSnapshot(List.of(tool))), () -> 2);
+
+            assertThat(finalResult.reply()).isEqualTo(new ModelReply.Text("The fee is 9."));
+            assertThat(providerRequests).hasValue(2);
+            JsonNode wire = new ObjectMapper().readTree(requestBody.get());
+            assertThat(wire.at("/messages/1/content").asText()).isEqualTo("Checking.");
+            assertThat(wire.at("/messages/1/reasoning_content").asText()).isEqualTo("Need a lookup.");
+            assertThat(wire.at("/messages/1/tool_calls/0/extra_content/google/thought_signature").asText()).isEqualTo("AQID");
+            assertThat(wire.at("/messages/2/tool_call_id").asText()).isEqualTo("call-lookup");
+            assertThat(wire.at("/messages/2/content").asText()).contains("\"fee\":9");
         } finally {
             server.stop(0);
         }
@@ -321,8 +343,7 @@ class OpenAiConfiguredModelTest {
                 MessageRole.TOOL, request.toolCallId(), "lookup", Map.of("isError", false, "result", Map.of("fee", 9)));
         try (ConfiguredModels models = configuredModels(server)) {
             ModelCallResult result = models.defaultConversationModel().respond(new ModelRequest(List.of(calls, observation),
-                    Map.of(calls.sequence(), new ModelContinuation(new ModelRouteId("google-primary"), "google-thought-signature",
-                            "opaque-google-continuation".getBytes(StandardCharsets.UTF_8))), new ToolSnapshot(List.of())), () -> 1);
+                    Map.of(), new ToolSnapshot(List.of())), () -> 1);
 
             assertThat(result.reply()).isEqualTo(new ModelReply.Text("After the tool."));
             assertThat(providerRequests).hasValue(1);

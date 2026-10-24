@@ -13,6 +13,8 @@ import com.java.system.sessionagent.conversation.domain.UserMessage;
 import com.java.system.sessionagent.conversation.domain.ContextSummary;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.ToolResponseMessage;
+import org.springframework.ai.chat.messages.part.MessagePart;
+import org.springframework.ai.chat.messages.part.ToolCallPart;
 import org.springframework.util.Assert;
 
 import java.util.ArrayList;
@@ -21,6 +23,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.Optional;
+import java.util.Objects;
 
 public final class HistoryProjector {
 
@@ -103,15 +106,33 @@ public final class HistoryProjector {
         List<org.springframework.ai.chat.messages.AssistantMessage.ToolCall> toolCalls = calls.requests().stream()
                 .map(this::toolCall)
                 .toList();
-        org.springframework.ai.chat.messages.AssistantMessage.Builder<?> assistantBuilder = org.springframework.ai.chat.messages.AssistantMessage.builder()
-                .content(calls.message().orElse(null)) // cs-allow Spring AI builder accepts absent optional text as null
-                .toolCalls(toolCalls);
+        org.springframework.ai.chat.messages.AssistantMessage assistant;
         ModelContinuation continuation = continuations.get(calls.sequence());
-        if (continuation != null) { // cs-allow continuation is optional map lookup
+        if (Objects.nonNull(continuation)) {
             Assert.notNull(continuationHandler, "Continuation handler is required for stored provider state");
-            assistantBuilder.properties(continuationHandler.restore(continuation));
+            List<MessagePart> parts = continuationHandler.restore(continuation);
+            List<MessagePart> restored = new ArrayList<>(parts.size());
+            int toolIndex = 0;
+            for (MessagePart part : parts) {
+                if (part instanceof ToolCallPart toolPart) {
+                    if (toolIndex >= toolCalls.size()) {
+                        throw new InvalidConversationHistoryException();
+                    }
+                    restored.add(new ToolCallPart(toolCalls.get(toolIndex++), toolPart.payload(), toolPart.attributes()));
+                } else {
+                    restored.add(part);
+                }
+            }
+            if (toolIndex != toolCalls.size()) {
+                throw new InvalidConversationHistoryException();
+            }
+            assistant = org.springframework.ai.chat.messages.AssistantMessage.builder().parts(restored).build();
+        } else {
+            assistant = org.springframework.ai.chat.messages.AssistantMessage.builder()
+                    .content(calls.message().orElse(null)) // cs-allow Spring AI builder accepts absent optional text as null
+                    .toolCalls(toolCalls).build();
         }
-        projected.add(assistantBuilder.build());
+        projected.add(assistant);
         projected.add(ToolResponseMessage.builder().responses(observations.stream().map(this::toolResponse).toList()).build());
         return assistantIndex + calls.requests().size() + 1;
     }

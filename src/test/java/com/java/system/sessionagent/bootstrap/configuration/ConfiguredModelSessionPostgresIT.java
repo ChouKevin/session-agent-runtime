@@ -27,6 +27,9 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 import org.springframework.ai.chat.messages.AssistantMessage;
+import org.springframework.ai.chat.messages.part.OpaquePayload;
+import org.springframework.ai.chat.messages.part.TextPart;
+import org.springframework.ai.chat.messages.part.ToolCallPart;
 import org.springframework.ai.chat.metadata.ChatResponseMetadata;
 import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.chat.model.ChatResponse;
@@ -160,9 +163,12 @@ class ConfiguredModelSessionPostgresIT {
     @Test
     void projects_committed_google_tool_history_across_google_openai_google_with_only_same_turn_thought_signatures() throws Exception {
         ScriptedChatModel google = new ScriptedChatModel(List.of(
-                AssistantMessage.builder().content("Checking.")
-                        .properties(Map.of("thoughtSignatures", List.of(new byte[] {1, 2, 3})))
-                        .toolCalls(List.of(new AssistantMessage.ToolCall("call-fee", "function", "lookup", "{}"))).build(),
+                AssistantMessage.builder()
+                        .part(new TextPart("Checking.", null, Map.of()))
+                        .part(new ToolCallPart(
+                                new AssistantMessage.ToolCall("call-fee", "function", "lookup", "{}"),
+                                new OpaquePayload("google", "thought_signature", "AQID"),
+                                Map.of())).build(),
                 new AssistantMessage("x".repeat(6_000)),
                 new AssistantMessage("google after openai")));
         ScriptedChatModel openAi = new ScriptedChatModel(List.of(new AssistantMessage("compact prior history"),
@@ -189,9 +195,9 @@ class ConfiguredModelSessionPostgresIT {
 
             assertThat(google.prompts()).hasSize(3);
             assertThat(assistantMessages(google.prompts().get(1))).anySatisfy(message ->
-                    assertThat(message.getMetadata()).containsKey("thoughtSignatures"));
+                    assertThat(message.getParts()).anySatisfy(part -> assertThat(part.payload()).isNotNull()));
             assertThat(assistantMessages(google.prompts().get(2))).allSatisfy(message ->
-                    assertThat(message.getMetadata()).doesNotContainKey("thoughtSignatures"));
+                    assertThat(message.getParts()).allSatisfy(part -> assertThat(part.payload()).isNull()));
             assertThat(openAi.prompts()).hasSize(2);
             assertThat(openAi.prompts().getFirst().getInstructions().getFirst().getText()).contains("Summarize the supplied");
             assertThat(openAi.prompts().get(1).getInstructions()).anySatisfy(message ->

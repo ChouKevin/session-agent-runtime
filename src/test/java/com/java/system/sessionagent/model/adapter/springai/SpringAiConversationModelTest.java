@@ -26,6 +26,10 @@ import com.java.system.sessionagent.tool.domain.ToolName;
 import com.java.system.sessionagent.tool.port.ToolSnapshot;
 import org.junit.jupiter.api.Test;
 import org.springframework.ai.chat.messages.AssistantMessage;
+import org.springframework.ai.chat.messages.part.OpaquePayload;
+import org.springframework.ai.chat.messages.part.ReasoningPart;
+import org.springframework.ai.chat.messages.part.TextPart;
+import org.springframework.ai.chat.messages.part.ToolCallPart;
 import org.springframework.ai.chat.prompt.ChatOptions;
 import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.ai.chat.metadata.ChatResponseMetadata;
@@ -113,7 +117,7 @@ class SpringAiConversationModelTest {
         ObjectMapper mapper = new ObjectMapper();
         SpringAiConversationModel model = new SpringAiConversationModel(chatModel, new SystemPrompt(),
                 new MicrometerConversationTelemetry(registry), mapper,
-                new GoogleGenAiThoughtSignatureHandler(GOOGLE_ROUTE_ID, mapper));
+                new SpringAiMessagePartsHandler(GOOGLE_ROUTE_ID));
         UserMessage history = new UserMessage(new SessionId("session-1"), new SessionSequence(1),
                 Optional.of(new MessageJobId("job-1")), Instant.EPOCH, MessageRole.USER, "user", "history");
 
@@ -167,7 +171,7 @@ class SpringAiConversationModelTest {
         };
         ObjectMapper mapper = new ObjectMapper();
         SpringAiConversationModel model = new SpringAiConversationModel(chatModel, new SystemPrompt(), new NoOpConversationTelemetry(), mapper,
-                new GoogleGenAiThoughtSignatureHandler(GOOGLE_ROUTE_ID, mapper));
+                new SpringAiMessagePartsHandler(GOOGLE_ROUTE_ID));
 
         ModelCallResult result = model.respond(new ModelRequest(List.of(), new ToolSnapshot(List.of())), () -> 1, usage -> { });
 
@@ -190,7 +194,7 @@ class SpringAiConversationModelTest {
         };
         ObjectMapper mapper = new ObjectMapper();
         SpringAiConversationModel model = new SpringAiConversationModel(chatModel, new SystemPrompt(), new NoOpConversationTelemetry(), mapper,
-                new GoogleGenAiThoughtSignatureHandler(GOOGLE_ROUTE_ID, mapper));
+                new SpringAiMessagePartsHandler(GOOGLE_ROUTE_ID));
 
         assertThatThrownBy(() -> model.respond(new ModelRequest(List.of(), new ToolSnapshot(List.of())), () -> 1, usage -> { }))
                 .isInstanceOfSatisfying(ModelCallFailure.class,
@@ -206,7 +210,7 @@ class SpringAiConversationModelTest {
             }
         };
         SpringAiConversationModel terminalModel = new SpringAiConversationModel(terminalChatModel, new SystemPrompt(),
-                new NoOpConversationTelemetry(), mapper, new GoogleGenAiThoughtSignatureHandler(GOOGLE_ROUTE_ID, mapper));
+                new NoOpConversationTelemetry(), mapper, new SpringAiMessagePartsHandler(GOOGLE_ROUTE_ID));
 
         assertThatThrownBy(() -> terminalModel.respond(new ModelRequest(List.of(), new ToolSnapshot(List.of())), () -> 1, usage -> { }))
                 .isInstanceOfSatisfying(ModelCallFailure.class,
@@ -233,7 +237,7 @@ class SpringAiConversationModelTest {
         };
         ObjectMapper mapper = new ObjectMapper();
         SpringAiConversationModel model = new SpringAiConversationModel(chatModel, new SystemPrompt(), new NoOpConversationTelemetry(), mapper,
-                new GoogleGenAiThoughtSignatureHandler(GOOGLE_ROUTE_ID, mapper));
+                new SpringAiMessagePartsHandler(GOOGLE_ROUTE_ID));
         UserMessage history = new UserMessage(new SessionId("session-1"), new SessionSequence(1), Optional.of(new MessageJobId("job-1")),
                 Instant.EPOCH, MessageRole.USER, "user", "history");
 
@@ -282,12 +286,15 @@ class SpringAiConversationModelTest {
     }
 
     @Test
-    void restores_thought_signatures_only_for_the_next_native_tool_call() {
-        byte[] firstSignature = new byte[] {1, 2, 3};
-        byte[] secondSignature = new byte[] {4, 5};
-        AssistantMessage firstResponse = AssistantMessage.builder().content("Inspecting.")
-                .properties(Map.of("thoughtSignatures", List.of(firstSignature, secondSignature), "finishReason", "STOP"))
-                .toolCalls(List.of(new AssistantMessage.ToolCall("call-1", "function", "first", "{}"))).build();
+    void restores_ordered_reasoning_and_part_signatures_for_the_next_native_tool_call() {
+        OpaquePayload thoughtSignature = new OpaquePayload("google", "thought_signature", "AQID");
+        OpaquePayload callSignature = new OpaquePayload("google", "thought_signature", "BAU=");
+        AssistantMessage firstResponse = AssistantMessage.builder()
+                .part(new ReasoningPart("Need the fee.", null, thoughtSignature, Map.of()))
+                .part(new TextPart("Inspecting.", thoughtSignature, Map.of()))
+                .part(new ToolCallPart(new AssistantMessage.ToolCall("", "function", "first", "{}"),
+                        callSignature, Map.of()))
+                .properties(Map.of("finishReason", "STOP")).build();
         AssistantMessage finalResponse = new AssistantMessage("done");
         List<Prompt> prompts = new ArrayList<>();
         AtomicBoolean firstCall = new AtomicBoolean(true);
@@ -302,29 +309,30 @@ class SpringAiConversationModelTest {
         ObjectMapper mapper = new ObjectMapper();
         ModelRouteId routeId = new ModelRouteId("gemini-primary");
         SpringAiConversationModel model = new SpringAiConversationModel(chatModel, new SystemPrompt(), new NoOpConversationTelemetry(),
-                mapper, new GoogleGenAiThoughtSignatureHandler(routeId, mapper));
+                mapper, new SpringAiMessagePartsHandler(routeId));
 
         ModelCallResult firstResult = model.respond(new ModelRequest(List.of(), new ToolSnapshot(List.of())), () -> 1, usage -> { });
         ModelContinuation continuation = firstResult.continuation().orElseThrow();
+        ToolRequest requested = ((ModelReply.UseTools) firstResult.reply()).requests().getFirst();
         List<SessionMessage> history = List.of(
                 new AssistantToolCallsMessage(new SessionId("session-1"), new SessionSequence(2), Optional.of(new MessageJobId("job-1")),
                         Instant.EPOCH, MessageRole.ASSISTANT_TOOL_CALLS, Optional.of("Inspecting."),
-                        List.of(new ToolRequest(new ToolCallId("call-1"), new ToolName("first"), Map.of()))),
+                        List.of(requested)),
                 new ToolObservation(new SessionId("session-1"), new SessionSequence(3), Optional.of(new MessageJobId("job-1")),
-                        Instant.EPOCH, MessageRole.TOOL, new ToolCallId("call-1"), "first", Map.of("isError", false, "result", Map.of())));
+                        Instant.EPOCH, MessageRole.TOOL, requested.toolCallId(), "first", Map.of("isError", false, "result", Map.of())));
 
         ModelCallResult secondResult = model.respond(new ModelRequest(history, Map.of(new SessionSequence(2), continuation),
                 new ToolSnapshot(List.of())), () -> 2, usage -> { });
 
-        assertThat(firstResult.reply()).isEqualTo(new ModelReply.UseTools(Optional.of("Inspecting."), List.of(
-                new ToolRequest(new ToolCallId("call-1"), new ToolName("first"), Map.of()))));
+        assertThat(firstResult.reply()).isEqualTo(new ModelReply.UseTools(Optional.of("Inspecting."), List.of(requested)));
         assertThat(secondResult.reply()).isEqualTo(new ModelReply.Text("done"));
         assertThat(prompts).hasSize(2);
         org.springframework.ai.chat.messages.AssistantMessage restored = (org.springframework.ai.chat.messages.AssistantMessage)
                 prompts.get(1).getInstructions().get(1);
-        assertThat(restored.getMetadata()).containsKey("thoughtSignatures").doesNotContainKeys("finishReason", "candidateIndex");
-        assertThat(thoughtSignatures(restored.getMetadata().get("thoughtSignatures")))
-                .containsExactly(firstSignature, secondSignature);
+        assertThat(restored.getMetadata()).doesNotContainKeys("thoughtSignatures", "finishReason", "candidateIndex");
+        assertThat(restored.getParts()).containsExactly(firstResponse.getParts().get(0), firstResponse.getParts().get(1),
+                new ToolCallPart(new AssistantMessage.ToolCall(requested.toolCallId().value(), "function", "first", "{}"),
+                        callSignature, Map.of()));
     }
 
     @Test
@@ -341,7 +349,7 @@ class SpringAiConversationModelTest {
                         Instant.EPOCH, MessageRole.TOOL, new ToolCallId("call-1"), "first",
                         Map.of("isError", false, "result", Map.of())));
         ModelContinuation malformed = new ModelContinuation(routeId,
-                "spring-ai-google-genai-thought-signatures-v1", new byte[] {1, 2, 3});
+                "spring-ai-message-parts-v1", new byte[] {1, 2, 3});
 
         assertThatThrownBy(() -> model.respond(new ModelRequest(history, Map.of(new SessionSequence(2), malformed), new ToolSnapshot(List.of())),
                 () -> { reserved.set(true); return 1; }, usage -> { }))
@@ -368,7 +376,7 @@ class SpringAiConversationModelTest {
         };
         ObjectMapper mapper = new ObjectMapper();
         return new SpringAiConversationModel(chatModel, new SystemPrompt(), new NoOpConversationTelemetry(), mapper,
-                new GoogleGenAiThoughtSignatureHandler(routeId, mapper));
+                new SpringAiMessagePartsHandler(routeId));
     }
 
     private static Usage usage(Integer promptTokens, Integer completionTokens, Integer totalTokens, Optional<Long> cachedInputTokens) {
@@ -395,13 +403,6 @@ class SpringAiConversationModelTest {
         };
     }
 
-    private static List<byte[]> thoughtSignatures(Object value) {
-        assertThat(value).isInstanceOf(List.class);
-        List<?> elements = (List<?>) value;
-        assertThat(elements).allSatisfy(element -> assertThat(element).isInstanceOf(byte[].class));
-        return elements.stream().map(element -> (byte[]) element).toList();
-    }
-
     private static SpringAiConversationModel model(
             AssistantMessage message,
             AtomicBoolean providerCalled,
@@ -415,6 +416,6 @@ class SpringAiConversationModelTest {
         };
         ObjectMapper mapper = new ObjectMapper();
         return new SpringAiConversationModel(chatModel, new SystemPrompt(), new NoOpConversationTelemetry(), mapper,
-                new GoogleGenAiThoughtSignatureHandler(routeId, mapper));
+                new SpringAiMessagePartsHandler(routeId));
     }
 }

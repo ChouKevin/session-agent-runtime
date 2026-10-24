@@ -8,7 +8,7 @@ import com.java.system.sessionagent.conversation.domain.ModelReply;
 import com.java.system.sessionagent.conversation.domain.ModelRequest;
 import com.java.system.sessionagent.conversation.domain.ModelRouteId;
 import com.java.system.sessionagent.conversation.domain.ModelUsage;
-import com.java.system.sessionagent.model.adapter.springai.GoogleGenAiThoughtSignatureHandler;
+import com.java.system.sessionagent.model.adapter.springai.SpringAiMessagePartsHandler;
 import com.java.system.sessionagent.model.adapter.springai.SpringAiConversationModel;
 import com.java.system.sessionagent.model.adapter.springai.SystemPrompt;
 import com.java.system.sessionagent.tool.port.ToolSnapshot;
@@ -60,7 +60,7 @@ class GoogleGenAiConfiguredModelUsageTest {
         ChatModel chatModel = scriptedChatModel(googleUsage);
         SpringAiConversationModel model = new SpringAiConversationModel(chatModel, new SystemPrompt(),
                 new MicrometerConversationTelemetry(registry), mapper,
-                new GoogleGenAiThoughtSignatureHandler(GOOGLE_ROUTE_ID, mapper));
+                new SpringAiMessagePartsHandler(GOOGLE_ROUTE_ID));
 
         ModelCallResult result = model.respond(
                 new ModelRequest(List.of(), new ToolSnapshot(List.of())), () -> 1);

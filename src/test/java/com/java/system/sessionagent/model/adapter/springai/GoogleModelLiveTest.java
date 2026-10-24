@@ -53,7 +53,7 @@ class GoogleModelLiveTest {
         ObjectMapper objectMapper = new ObjectMapper();
         SpringAiConversationModel model = new SpringAiConversationModel(
                 countingModel, new SystemPrompt(), new NoOpConversationTelemetry(), objectMapper,
-                new GoogleGenAiThoughtSignatureHandler(new ModelRouteId("google-genai"), objectMapper));
+                new SpringAiMessagePartsHandler(new ModelRouteId("google-genai")));
 
         ModelReply reply = model.respond(new ModelRequest(List.of(question), new ToolSnapshot(List.of())),
                 reservations::incrementAndGet, usage -> { }).reply();

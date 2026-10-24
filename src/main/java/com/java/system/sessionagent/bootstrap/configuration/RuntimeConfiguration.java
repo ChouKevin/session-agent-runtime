@@ -18,8 +18,7 @@ import com.java.system.sessionagent.conversation.port.out.ConversationStore;
 import com.java.system.sessionagent.conversation.port.out.ConversationTelemetry;
 import com.java.system.sessionagent.bootstrap.adapter.metrics.MicrometerConversationTelemetry;
 import com.java.system.sessionagent.model.adapter.springai.SpringAiConversationModel;
-import com.java.system.sessionagent.model.adapter.springai.DiscardingContinuationHandler;
-import com.java.system.sessionagent.model.adapter.springai.GoogleGenAiThoughtSignatureHandler;
+import com.java.system.sessionagent.model.adapter.springai.SpringAiMessagePartsHandler;
 import com.java.system.sessionagent.model.adapter.springai.ConfiguredModelBinding;
 import com.java.system.sessionagent.model.adapter.springai.ConfiguredModels;
 import com.java.system.sessionagent.conversation.domain.ModelRouteId;
@@ -172,7 +171,7 @@ public class RuntimeConfiguration {
                 createdModel.ownedResource().ifPresent(resources::add);
                 SpringAiConversationModel conversationModel = new SpringAiConversationModel(createdModel.chatModel(), promptResource,
                         conversationTelemetry, objectMapper,
-                        continuationHandler(profile.profile().provider(), routeId, objectMapper),
+                        new SpringAiMessagePartsHandler(routeId),
                         new ModelDescriptor(routeId, profile.profile().modelId(), profile.profile().contextWindowTokens()),
                         RuntimeConfiguration::isGoogleTransientFailure);
                 bindings.put(key, new ConfiguredModelBinding(key, fingerprint(profile), conversationModel));
@@ -314,16 +313,6 @@ public class RuntimeConfiguration {
         Assert.isTrue(milliseconds > 0, "Google model timeout must be at least one millisecond");
         Assert.isTrue(milliseconds <= Integer.MAX_VALUE, "Google model timeout must fit SDK milliseconds");
         return (int) milliseconds;
-    }
-
-    private static com.java.system.sessionagent.model.adapter.springai.SpringAiContinuationHandler continuationHandler(
-            String provider,
-            ModelRouteId routeId,
-            ObjectMapper objectMapper) {
-        if ("google-genai".equals(provider)) {
-            return new GoogleGenAiThoughtSignatureHandler(routeId, objectMapper);
-        }
-        return new DiscardingContinuationHandler(routeId);
     }
 
     static String fingerprint(EffectiveModelProfile effectiveProfile) {

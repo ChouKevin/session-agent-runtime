@@ -3,8 +3,9 @@ package com.java.system.sessionagent.model.adapter.springai;
 import com.java.system.sessionagent.conversation.domain.ModelContinuation;
 import com.java.system.sessionagent.conversation.domain.ModelRouteId;
 import org.springframework.ai.chat.messages.AssistantMessage;
+import org.springframework.ai.chat.messages.part.MessagePart;
 
-import java.util.Map;
+import java.util.List;
 import java.util.Optional;
 
 public interface SpringAiContinuationHandler {
@@ -13,5 +14,5 @@ public interface SpringAiContinuationHandler {
 
     Optional<ModelContinuation> capture(AssistantMessage message);
 
-    Map<String, Object> restore(ModelContinuation continuation);
+    List<MessagePart> restore(ModelContinuation continuation);
 }
