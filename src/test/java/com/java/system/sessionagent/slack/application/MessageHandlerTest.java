@@ -27,6 +27,29 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 class MessageHandlerTest {
 
     @Test
+    void normalizes_one_leading_skill_mention_in_roots_replies_and_direct_messages() {
+        List<MessageSubmission> submissions = new ArrayList<>();
+        MessageHandler handler = new MessageHandler("UBOT", intake -> {
+            submissions.add(intake);
+            return resultFor(intake);
+        });
+        handler.handle(new IncomingEvent("root-skill", "T1", "C1", "1", "", "U1", "", "channel",
+                " <@UBOT> /skill:review question <@UBOT> ", "", false, false));
+        handler.handle(new IncomingEvent("reply-skill", "T1", "C1", "2", "1", "U1", "", "channel",
+                "<@UBOT> /skill:review question <@UBOT>", "", false, false));
+        handler.handle(new IncomingEvent("dm-skill", "T1", "D1", "3", "", "U1", "", "im",
+                "<@UBOT> /skill:review question <@UBOT>", "", false, false));
+        assertThat(submissions).extracting(MessageSubmission::eventId)
+                .containsExactly("root-skill", "reply-skill", "dm-skill");
+        assertThat(submissions).allSatisfy(submission -> assertThat(submission.message().orElseThrow().message())
+                .isEqualTo("/skill:review question <@UBOT>"));
+        submissions.clear();
+        handler.handle(new IncomingEvent("ordinary-mention", "T1", "D1", "4", "", "U1", "", "im",
+                "<@UBOT> ordinary text", "", false, false));
+        assertThat(submissions.getFirst().message().orElseThrow().message()).isEqualTo("<@UBOT> ordinary text");
+    }
+
+    @Test
     void recognizes_only_exact_mentioned_stop_commands_after_content_guards() {
         List<MessageSubmission> submissions = new ArrayList<>();
         MessageHandler handler = new MessageHandler("UBOT", intake -> {

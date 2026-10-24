@@ -4,6 +4,7 @@ import com.java.system.sessionagent.conversation.domain.ContextCompaction;
 import com.java.system.sessionagent.conversation.domain.ContextEstimate;
 import com.java.system.sessionagent.conversation.domain.ContextUsageEstimator;
 import com.java.system.sessionagent.conversation.domain.ContextUsageProjection;
+import com.java.system.sessionagent.conversation.domain.ContextHistoryView;
 import com.java.system.sessionagent.conversation.domain.MessageJobId;
 import com.java.system.sessionagent.conversation.domain.ModelSelection;
 import com.java.system.sessionagent.conversation.domain.SessionId;
@@ -71,14 +72,12 @@ public final class ConversationQueryService implements ConversationQueryPort {
             ContextUsageProjection contextProjection;
             Optional<ContextCompaction> compaction;
             try (ToolSnapshot snapshot = toolCatalog.snapshot()) {
-                List<SessionMessage> history = conversationStore.loadHistory(requiredSessionId).stream()
-                        .sorted(Comparator.comparingLong(message -> message.sequence().value())).toList();
+                ContextHistoryView history = new ContextHistoryView(conversationStore.loadContextHistory(requiredSessionId));
                 compaction = conversationStore.loadCompaction(requiredSessionId);
                 long generation = compaction.map(value -> value.generation()).orElse(0L);
-                List<SessionMessage> visibleHistory = compaction.map(value -> history.stream()
-                        .filter(message -> message.sequence().value() > value.coveredThrough().value()).toList()).orElse(history);
+                List<SessionMessage> visibleHistory = history.between(compaction.map(value -> value.coveredThrough().value()).orElse(0L), Long.MAX_VALUE);
                 contextProjection = new ContextUsageProjection(conversationModel.descriptor(), conversationModel.systemPrompt(),
-                        snapshot.definitions(), visibleHistory, generation, compaction.map(value -> value.summary()));
+                        snapshot.definitions(), visibleHistory, generation, compaction.map(value -> value.summary()), history.eligibilityFingerprint());
             }
             ContextEstimate estimate = contextUsageEstimator.estimate(contextProjection,
                     conversationStore.loadUsageCheckpoint(requiredSessionId, selection, conversationModel.descriptor(),

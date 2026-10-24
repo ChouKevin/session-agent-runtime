@@ -104,3 +104,47 @@ session-agent:
 完整連線格式、java-code-intelligence 雙 reader 範例、systemd 憑證注入、停用／輪換及實際工具驗收見 [MCP 操作指南](mcp.md)。設定要加在 Runtime 生效的 application config，而不是 Gateway 或 OMP client 的 MCP 設定。
 
 主機範例以 JSON 寫到 systemd journal，不使用容器固定 `/app/logs` 路徑。用 `journalctl --user -u session-agent-runtime` 查詢；journal 的保留期依主機政策，不等於 repo Docker logging 的 7 日輪替設定。不要將完整 log 當作公開驗收附件。
+
+## Runtime 本地 skills（選用，預設停用）
+
+合併至既有私有 application config 的同一 `session-agent` 節點，不覆寫模型、
+Slack 或 datasource。Gateway 不管理這些檔案。
+
+```yaml
+session-agent:
+  skills:
+    roots: [/opt/session-agent/skills]
+    max-file-bytes: 65536
+    max-skills: 128
+```
+
+root 的直接子目錄為 skill；例如 `/opt/session-agent/skills/review/SKILL.md`：
+
+```markdown
+---
+name: review
+description: Review proposed changes for correctness and maintainability.
+---
+Check the requested behavior and concrete risks.
+Read skill://review/references/checklist.md when needed.
+```
+
+name 必須等於目錄名，只用小寫字母／數字與分隔連字號，上限 64 字元；
+description 非空且上限 1024 字元。檔案必須是有效 UTF-8，含 frontmatter 的完整
+bytes 計入大小限制。重複／不合法 metadata 會拒絕啟動；不要放秘密。
+新名稱、description 或 roots 設定要重啟才更新 discovery metadata；每次新的
+`readSkill` 或 `/skill:review 問題` 都讀當時的 body／相對 reference。
+同一 source message 重送不是新讀取，已提交 selection 的工作復原也不重讀。
+SHA-256 只是讀取證據，不是鎖版本。
+
+HTTP 的 message 使用 `/skill:review 問題`；Slack 用普通訊息
+`@bot /skill:review 問題`（已綁定 thread 也適用），不是註冊 Slack slash command。
+不帶問題只要求模型確認載入。無效選擇保留 USER／安全錯誤 audit，但不送模型、
+summary 或 token 估算；該工作零模型請求。自動工具讀取失敗仍是普通 TOOL observation。
+載入內容可被一般 compaction 摘要／移出 context，不永久啟用、不自動還原；
+要再次載入就提交新的 `/skill:review`。
+
+所有使用者都可讀 roots 內容。僅允許操作者維護、Runtime read/traverse 的目錄，
+容器以唯讀 bind mount（`:ro`）掛載；路徑與祖先不可用 symlink。不要掛載 home、
+OMP credential 或 `.agents/skills` 維護／部署指南。Runtime 不執行 shell/scripts，
+也不自動發現 OMP／repository skills。部署權限見 [install.md](install.md)。

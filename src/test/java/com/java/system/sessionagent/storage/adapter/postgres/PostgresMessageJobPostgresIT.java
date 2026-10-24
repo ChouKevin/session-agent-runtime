@@ -1,5 +1,7 @@
 package com.java.system.sessionagent.storage.adapter.postgres;
 
+import com.java.system.sessionagent.skill.adapter.filesystem.FileSystemSkillLibrary;
+import com.java.system.sessionagent.skill.configuration.SkillProperties;
 import com.java.system.sessionagent.conversation.domain.IncomingMessage;
 import com.java.system.sessionagent.conversation.domain.AssistantToolCallsMessage;
 import com.java.system.sessionagent.conversation.domain.MessageJobId;
@@ -203,7 +205,7 @@ class PostgresMessageJobPostgresIT {
             }
         };
         JobProcessor processor = new JobProcessor(restarted, TestConfiguredModels.withModel(model),
-                () -> new ToolSnapshot(List.of()), Clock.systemUTC(), 3,
+                () -> new ToolSnapshot(List.of()), new FileSystemSkillLibrary(new SkillProperties()), Clock.systemUTC(), 3,
                 new MessageJobRetryPolicy(3, Duration.ofSeconds(60)), new NoOpConversationTelemetry());
 
         assertThat(processor.process(recovered, () -> true)).isEqualTo(MessageJobProcessingResult.CANCELLED);
@@ -249,7 +251,7 @@ class PostgresMessageJobPostgresIT {
                     secondCalls.incrementAndGet();
                     return new ToolOutput(false, Map.of("unexpected", true));
                 })));
-        JobProcessor processor = new JobProcessor(store, TestConfiguredModels.withModel(model), tools, Clock.systemUTC(), 3,
+        JobProcessor processor = new JobProcessor(store, TestConfiguredModels.withModel(model), tools, new FileSystemSkillLibrary(new SkillProperties()), Clock.systemUTC(), 3,
                 new MessageJobRetryPolicy(3, Duration.ofSeconds(60)), new NoOpConversationTelemetry());
         ExecutorService executor = Executors.newSingleThreadExecutor();
         try {
@@ -406,7 +408,7 @@ class PostgresMessageJobPostgresIT {
                 update message_job set phase = 'TOOL_EXECUTION', phase_started_at = ?, current_tool_name = 'first', model_calls = 2
                 where message_job_id = ?
                 """, Timestamp.from(NOW), UUID.fromString(active.messageJobId().value()));
-        List<SessionMessage> history = store.loadHistory(completed.sessionId());
+        List<Map<String, Object>> history = legacyAudit(active.sessionId(), completed.sessionId());
 
         flyway().migrate();
 
@@ -421,7 +423,7 @@ class PostgresMessageJobPostgresIT {
             assertThat(job.failure()).contains(JobFailure.MODEL_UNAVAILABLE);
             assertThat(job.cancellationRequestedAt()).isEmpty();
         });
-        assertThat(store.loadHistory(completed.sessionId())).isEqualTo(history);
+        assertThat(legacyAudit(active.sessionId(), completed.sessionId())).isEqualTo(history);
         assertThat(store.extendClaim(claim, Duration.ofMinutes(3))).isTrue();
         assertThat(store.requestCancellation(active.messageJobId()).orElseThrow().status()).isEqualTo(JobStatus.WORKING);
     }
@@ -502,7 +504,7 @@ class PostgresMessageJobPostgresIT {
                     awaitGate(releaseSecondTool);
                     return new ToolOutput(true, Map.of("error", "ordinary tool failure"));
                 })));
-        JobProcessor processor = new JobProcessor(store, TestConfiguredModels.withModel(model), tools, Clock.systemUTC(), 3,
+        JobProcessor processor = new JobProcessor(store, TestConfiguredModels.withModel(model), tools, new FileSystemSkillLibrary(new SkillProperties()), Clock.systemUTC(), 3,
                 new MessageJobRetryPolicy(3, Duration.ofSeconds(60)), new NoOpConversationTelemetry());
         ExecutorService executor = Executors.newSingleThreadExecutor();
         try {
@@ -702,9 +704,7 @@ class PostgresMessageJobPostgresIT {
         seedLegacyTerminalHistory(failed, JobFailure.MODEL_UNAVAILABLE.name(), false);
         seedLegacyTerminalHistory(recovered, JobFailure.MODEL_OUTPUT_INVALID.name(), true);
         seedLegacyTerminalHistory(unknown, "UNKNOWN_LEGACY_CODE", false);
-        List<SessionMessage> failedHistory = store.loadHistory(failed.sessionId());
-        List<SessionMessage> recoveredHistory = store.loadHistory(recovered.sessionId());
-        List<SessionMessage> unknownHistory = store.loadHistory(unknown.sessionId());
+        List<Map<String, Object>> history = legacyAudit(failed.sessionId(), recovered.sessionId(), unknown.sessionId());
 
         flyway().migrate();
 
@@ -715,11 +715,21 @@ class PostgresMessageJobPostgresIT {
         });
         assertThat(store().readJob(recovered.messageJobId()).orElseThrow().failure()).isEmpty();
         assertThat(store().readJob(unknown.messageJobId()).orElseThrow().failure()).isEmpty();
-        assertThat(store().loadHistory(failed.sessionId())).isEqualTo(failedHistory);
-        assertThat(store().loadHistory(recovered.sessionId())).isEqualTo(recoveredHistory);
-        assertThat(store().loadHistory(unknown.sessionId())).isEqualTo(unknownHistory);
+        assertThat(legacyAudit(failed.sessionId(), recovered.sessionId(), unknown.sessionId())).isEqualTo(history);
         assertThat(store().readSession(failed.sessionId()).orElseThrow().currentJob())
                 .contains(store().readJob(failed.messageJobId()).orElseThrow());
+    }
+
+    private List<Map<String, Object>> legacyAudit(SessionId... sessions) {
+        return java.util.Arrays.stream(sessions).flatMap(session -> jdbcTemplate.queryForList("""
+                select event.*, to_jsonb(user_detail) as user_detail,
+                       to_jsonb(runtime_detail) as runtime_detail, to_jsonb(assistant_detail) as assistant_detail
+                from session_message event
+                left join user_message user_detail using (session_id, sequence)
+                left join runtime_message runtime_detail using (session_id, sequence)
+                left join assistant_message assistant_detail using (session_id, sequence)
+                where event.session_id = ? order by event.sequence
+                """, UUID.fromString(session.value())).stream()).toList();
     }
 
     private void seedLegacyTerminalHistory(MessageReceipt receipt, String runtimeCode, boolean recovered) {
@@ -974,7 +984,7 @@ class PostgresMessageJobPostgresIT {
                     laterToolCalls.incrementAndGet();
                     return new ToolOutput(false, Map.of("second", true));
                 })));
-        return new JobProcessor(store, models, catalog, Clock.systemUTC(), 2,
+        return new JobProcessor(store, models, catalog, new FileSystemSkillLibrary(new SkillProperties()), Clock.systemUTC(), 2,
                 new MessageJobRetryPolicy(3, Duration.ofSeconds(60)), new NoOpConversationTelemetry());
     }
 

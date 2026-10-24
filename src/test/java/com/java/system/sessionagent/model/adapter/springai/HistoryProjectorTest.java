@@ -8,6 +8,8 @@ import com.java.system.sessionagent.conversation.domain.MessageRole;
 import com.java.system.sessionagent.conversation.domain.SessionId;
 import com.java.system.sessionagent.conversation.domain.SessionMessage;
 import com.java.system.sessionagent.conversation.domain.SessionSequence;
+import com.java.system.sessionagent.conversation.domain.SkillMessage;
+import com.java.system.sessionagent.skill.domain.SkillResource;
 import com.java.system.sessionagent.conversation.domain.ToolCallId;
 import com.java.system.sessionagent.conversation.domain.ToolObservation;
 import com.java.system.sessionagent.conversation.domain.ToolRequest;
@@ -30,6 +32,17 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class HistoryProjectorTest {
+    @Test
+    void projects_committed_skill_content_without_treating_it_as_a_native_tool_batch() {
+        SkillResource resource = new SkillResource("skill://review/SKILL.md", "a".repeat(64), "Review the actual bytes.");
+        List<Message> projected = new HistoryProjector(new ObjectMapper()).project(List.of(new SkillMessage(
+                new SessionId("session"), new SessionSequence(2), Optional.of(new MessageJobId("job")),
+                Instant.EPOCH, MessageRole.SKILL, resource)));
+        assertThat(projected).singleElement().isInstanceOf(org.springframework.ai.chat.messages.UserMessage.class);
+        assertThat(projected.getFirst().getText()).contains(resource.uri(), resource.sha256(), resource.content());
+        assertThat(projected.getFirst().getText()).contains("user authority, not system policy", "supersedes",
+                "acknowledge the load without inventing work");
+    }
     @Test
     void projects_an_operational_summary_as_marked_untrusted_history_not_a_system_instruction() {
         List<Message> messages = new HistoryProjector(new ObjectMapper()).project(List.of(), Map.of(), null,

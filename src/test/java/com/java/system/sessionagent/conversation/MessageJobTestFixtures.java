@@ -16,6 +16,8 @@ import com.java.system.sessionagent.conversation.domain.SessionSequence;
 import com.java.system.sessionagent.conversation.domain.ToolCallId;
 import com.java.system.sessionagent.conversation.domain.ToolRequest;
 import com.java.system.sessionagent.conversation.domain.UserMessage;
+import com.java.system.sessionagent.conversation.domain.ConversationHistory;
+import com.java.system.sessionagent.conversation.domain.SessionMessage;
 import com.java.system.sessionagent.conversation.port.out.ConversationModel;
 import com.java.system.sessionagent.conversation.port.out.ConversationStore;
 import com.java.system.sessionagent.conversation.port.out.ModelCallReservation;
@@ -26,6 +28,8 @@ import com.java.system.sessionagent.tool.port.ToolCatalog;
 import com.java.system.sessionagent.tool.port.ToolDefinition;
 import com.java.system.sessionagent.tool.port.ToolOutput;
 import com.java.system.sessionagent.tool.port.ToolSnapshot;
+import com.java.system.sessionagent.skill.adapter.filesystem.FileSystemSkillLibrary;
+import com.java.system.sessionagent.skill.configuration.SkillProperties;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -52,6 +56,10 @@ final class MessageJobTestFixtures {
             return appendedStatus(batch);
         });
         return store;
+    }
+
+    static ConversationHistory contextHistory(List<SessionMessage> messages) {
+        return new ConversationHistory(messages, Map.of());
     }
 
     static JobStatus appendedStatus(ConversationStore.MessageBatch batch) {
@@ -84,7 +92,7 @@ final class MessageJobTestFixtures {
     }
 
     static JobProcessor service(ConversationStore store, ConversationModel model, ToolCatalog catalog, int maximumCalls) {
-        return new JobProcessor(store, TestConfiguredModels.withModel(model), catalog, Clock.fixed(Instant.EPOCH, ZoneOffset.UTC), maximumCalls,
+        return new JobProcessor(store, TestConfiguredModels.withModel(model), catalog, new FileSystemSkillLibrary(new SkillProperties()), Clock.fixed(Instant.EPOCH, ZoneOffset.UTC), maximumCalls,
                 new MessageJobRetryPolicy(3, Duration.ofSeconds(60)), new NoOpConversationTelemetry());
     }
 

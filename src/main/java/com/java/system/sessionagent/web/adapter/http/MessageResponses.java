@@ -11,6 +11,7 @@ import com.java.system.sessionagent.conversation.domain.RuntimeMessage;
 import com.java.system.sessionagent.conversation.domain.SessionMessage;
 import com.java.system.sessionagent.conversation.domain.ToolObservation;
 import com.java.system.sessionagent.conversation.domain.UserMessage;
+import com.java.system.sessionagent.conversation.domain.SkillMessage;
 import com.java.system.sessionagent.conversation.port.in.MessageJobView;
 import com.java.system.sessionagent.slack.domain.SlackDeliveryView;
 
@@ -119,7 +120,7 @@ public final class MessageResponses {
         }
     }
 
-    public sealed interface SessionMessageResponse permits UserResponse, AssistantToolCallsResponse, ToolResponse, AssistantResponse, RuntimeResponse {
+    public sealed interface SessionMessageResponse permits UserResponse, AssistantToolCallsResponse, ToolResponse, AssistantResponse, RuntimeResponse, SkillResponse {
 
         long sequence();
 
@@ -134,6 +135,10 @@ public final class MessageResponses {
             String messageJobId = message.messageJobId().map(value -> value.value()).orElse(null); // cs-allow public API represents an absent optional job ID as null
             if (message instanceof UserMessage user) {
                 return new UserResponse(user.sequence().value(), user.createdAt(), messageJobId, user.participantId(), user.message());
+            }
+            if (message instanceof SkillMessage skill) {
+                return new SkillResponse(skill.sequence().value(), skill.createdAt(), messageJobId,
+                        skill.resource().uri(), skill.resource().sha256(), skill.resource().content());
             }
             if (message instanceof ToolObservation tool) {
                 return new ToolResponse(tool.sequence().value(), tool.createdAt(), messageJobId, tool.toolCallId().value(),
@@ -156,6 +161,11 @@ public final class MessageResponses {
     public record UserResponse(long sequence, Instant createdAt, String messageJobId, String participantId, String message)
             implements SessionMessageResponse {
         @Override public String type() { return "USER"; }
+    }
+
+    public record SkillResponse(long sequence, Instant createdAt, String messageJobId, String uri, String sha256,
+                                String content) implements SessionMessageResponse {
+        @Override public String type() { return "SKILL"; }
     }
 
     public record AssistantToolCallsResponse(long sequence, Instant createdAt, String messageJobId, String message,

@@ -68,6 +68,72 @@ GET  /internal/slack-deliveries?teamId=...&channelId=...&messageTs=...
 
 `POST /internal/messages` accepts `sessionKey`, `participantId`, `sourceMessageId`, and `message`. Reusing a nonblank `sessionKey` continues the same session. The accepted response contains `sessionId` and `messageJobId`.
 
+Explicit skill selections beginning with `/skill:` are classified durably at intake,
+including malformed names. Intake retains the exact USER audit text and never reads
+skill files. The storage contract resolves a pending selection atomically to one
+`SKILL` audit event (`uri`, `sha256`, and actual `content`) or a safe
+`SKILL_UNAVAILABLE` runtime error. Source replay returns the original receipt;
+resolution replay cannot replace committed skill bytes. Full and paged history are
+complete audit APIs. Context consumers can read history and command dispositions
+from one repeatable-read snapshot through `loadContextHistory`.
+Workers resolve only their claimed command before any model response or summary,
+then reload committed context. Accepted recovery reuses persisted bytes; a new
+source message rereads the file. Unknown, malformed, or unreadable selections
+finish safely without a model request. Pending/rejected commands and rejection
+feedback remain auditable but are excluded from model and summary context.
+
+Skills are disabled by default (`session-agent.skills.roots: []`), with no
+`readSkill` tool exposed. Configure trusted local root directories explicitly:
+
+```yaml
+session-agent:
+  skills:
+    roots: [/opt/session-agent/skills]
+    max-file-bytes: 65536
+    max-skills: 128
+```
+
+Each root contains direct child directories such as `review/SKILL.md`, with YAML
+frontmatter `name: review` and a nonempty `description`. Registry metadata is
+startup-only; new names/descriptions need restart. Bodies and relative references
+are read from current bounded UTF-8 files without following symlinks. Use
+`/skill:review [question]` via HTTP or Slack; omitting the question asks only for
+load acknowledgment. Slack removes one leading own-bot mention for explicit
+selections in addressed roots, bound replies, and DMs; exact stop commands retain
+priority. This is message syntax, not a Slack slash-command registration.
+The application owns the library lifecycle and exposes one composite catalog
+containing local skills and independently managed MCP tools.
+
+Example `/opt/session-agent/skills/review/SKILL.md` (the directory and name must
+match; use lowercase letters/digits separated by hyphens, at most 64 characters):
+
+```markdown
+---
+name: review
+description: Review a proposed change for correctness and maintainability.
+---
+Check the requested behavior and identify concrete risks.
+Read skill://review/references/checklist.md when the task needs the checklist.
+```
+
+Descriptions are limited to 1024 characters. On normal model requests, startup
+metadata appears only in the `readSkill` description; bodies enter history only
+when read. Summarization has no tools. Automatic reads retain the model's actual
+call IDs and ordinary TOOL success/failure observations; explicit selections
+produce USER + SKILL, not fabricated tool calls. Both kinds of loaded content
+follow ordinary compaction: original instructions may leave model context, and
+are not pinned or automatically restored. Use a **new source message**
+`/skill:review question` to force a current-body reread after editing a file.
+The SHA-256 proves the bytes read, not an immutable version.
+
+Roots are shared trusted operator configuration: every Runtime user can read their
+contents. Grant the Runtime service account read/traverse access only; keep roots
+operator-owned, and use read-only bind mounts (`:ro`) for container deployments.
+Symlinks (including root ancestors) are rejected. Do not put secrets in these roots,
+mount a home directory, or point roots at `.agents/skills` maintenance/deployment
+guides. No shell/scripts are executed and no OMP, home, or repository skills are
+discovered automatically.
+
 The job response contains its IDs, `status`, `retryCount`, and `modelCallCount`, plus
 `phase`, `phaseStartedAt`, `currentToolName`, `failureCode`, `failureMessage`, and
 `cancellationRequestedAt`. `GET /internal/sessions/{sessionId}` exposes the same
@@ -91,7 +157,7 @@ one atomic history batch.
 are fixed safe text, never raw provider exceptions. Codes are
 `MODEL_CALL_LIMIT_REACHED`, `MODEL_OUTPUT_INVALID`, `MODEL_UNAVAILABLE`,
 `CONTEXT_TOO_LARGE`, `COMPACTION_FAILED`, `INVALID_CONVERSATION_HISTORY`,
-`STORAGE_UNAVAILABLE`, and `PROCESSING_INTERRUPTED`.
+`STORAGE_UNAVAILABLE`, `SKILL_UNAVAILABLE`, and `PROCESSING_INTERRUPTED`.
 An ordinary tool error remains that tool's observation and does not, by itself,
 mark the entire job as failed.
 

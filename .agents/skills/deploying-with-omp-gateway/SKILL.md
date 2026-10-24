@@ -20,6 +20,7 @@ description: Use when installing, configuring, updating, checking, or rolling ba
 | MCP 連線、憑證、停用與工具驗收 | [mcp.md](references/mcp.md) | 每個連線 discovery 與真實工具 calls／observations 分別驗證 |
 | 更新、備份、回滾、啟停 | [operations.md](references/operations.md) | 憑證與 volume 保留，版本可追蹤，資料庫相容性確認 |
 | 健康檢查、模型與 Slack 實測 | [verification.md](references/verification.md) | 分別報告 health、model、Slack 證據，不互相替代 |
+| Runtime 本地 skills／明確重讀 | [configuration.md](references/configuration.md)、[verification.md](references/verification.md) | 唯讀可信 roots；區分 metadata、current body、audit 與模型 context |
 
 範本在 [assets/](assets/)，安裝前核對版本、路徑、連接埠及既有服務。已部署主機走「更新」，不是重新執行 fresh install。
 
@@ -29,6 +30,7 @@ description: Use when installing, configuring, updating, checking, or rolling ba
 - 模型範例 `openai-codex/gpt-6.1-sol`，`reasoning-effort: medium`；可用性與容量須以該 gateway 的 `/v1/models` 核對。
 - 外部完整 `application.yml` 配合 `SPRING_CONFIG_LOCATION`，不合併 bundled Google model profile。
 - systemd user services；私有目錄 `700`、環境檔 `600`；repo 僅保存不含憑證的範本。
+- Runtime skills 預設停用，僅讀操作者明確設定的共享 roots；不自動匯入 OMP 或本 repo 的維護 skills。本部署指南不能當作 Runtime 業務 skill 掛載；不授權 shell 執行。
 
 ## 常見錯誤與停止條件
 

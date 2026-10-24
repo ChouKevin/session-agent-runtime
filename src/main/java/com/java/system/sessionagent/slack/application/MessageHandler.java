@@ -2,6 +2,7 @@ package com.java.system.sessionagent.slack.application;
 
 import com.java.system.sessionagent.conversation.domain.IncomingMessage;
 import com.java.system.sessionagent.conversation.domain.IncomingMessageSource;
+import com.java.system.sessionagent.conversation.domain.SkillCommand;
 import com.java.system.sessionagent.slack.domain.IncomingEvent;
 import com.java.system.sessionagent.slack.domain.MessageSubmission;
 import com.java.system.sessionagent.slack.domain.SlackEventOutcome;
@@ -152,6 +153,14 @@ public final class MessageHandler {
     private String normalizedMessage(IncomingEvent event) {
         if (!StringUtils.hasText(event.text())) {
             return "";
+        }
+        String trimmed = event.text().trim();
+        String leadingMention = "<@" + botUserId + ">";
+        if (trimmed.startsWith(leadingMention)) {
+            String withoutMention = trimmed.substring(leadingMention.length()).stripLeading();
+            if (SkillCommand.parse(withoutMention).isPresent()) {
+                return withoutMention;
+            }
         }
         if (StringUtils.hasText(event.threadTs()) && !event.messageTs().equals(event.threadTs())) {
             return event.text().trim();

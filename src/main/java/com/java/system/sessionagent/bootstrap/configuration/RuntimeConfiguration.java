@@ -47,6 +47,7 @@ import com.java.system.sessionagent.slack.port.out.SlackDeliveryStore;
 import com.java.system.sessionagent.slack.port.out.SlackSocketClient;
 import com.java.system.sessionagent.slack.port.out.SlackWebApi;
 import com.java.system.sessionagent.tool.port.ToolCatalog;
+import com.java.system.sessionagent.skill.port.SkillLibrary;
 import com.java.system.sessionagent.worker.application.MessageJobWorker;
 import com.java.system.sessionagent.worker.configuration.WorkerProperties;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -484,11 +485,12 @@ public class RuntimeConfiguration {
             ConversationStore conversationStore,
             ConfiguredModels configuredModels,
             ToolCatalog toolCatalog,
+            SkillLibrary skillLibrary,
             Clock runtimeClock,
             RuntimeProperties properties,
             MessageJobRetryPolicy messageJobRetryPolicy,
             ConversationTelemetry conversationTelemetry) {
-        return new JobProcessor(conversationStore, configuredModels, toolCatalog, runtimeClock,
+        return new JobProcessor(conversationStore, configuredModels, toolCatalog, skillLibrary, runtimeClock,
                 properties.model().maxModelCallsPerMessage(), messageJobRetryPolicy, conversationTelemetry);
     }
 

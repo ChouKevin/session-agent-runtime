@@ -14,6 +14,14 @@ import com.java.system.sessionagent.slack.domain.SlackLifecycleState;
 import com.java.system.sessionagent.slack.port.out.SlackSocketClient;
 import com.java.system.sessionagent.slack.port.out.SlackSocketConnectionListener;
 import com.java.system.sessionagent.tool.port.ToolCatalog;
+import com.java.system.sessionagent.skill.port.SkillLibrary;
+import com.java.system.sessionagent.skill.domain.SkillReadResult;
+import com.java.system.sessionagent.mcp.adapter.sdk.McpToolCatalog;
+import com.java.system.sessionagent.tool.port.ToolSnapshot;
+import org.junit.jupiter.api.io.TempDir;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.concurrent.atomic.AtomicReference;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.springframework.ai.google.genai.GoogleGenAiChatOptions;
 import org.junit.jupiter.api.Test;
@@ -38,7 +46,7 @@ class ApplicationStartupTest {
     private final ApplicationContextRunner contextRunner = new ApplicationContextRunner()
             .withConfiguration(AutoConfigurations.of(MybatisPlusAutoConfiguration.class))
             .withBean(SlackSocketClient.class, UnreachableSocketClient::new)
-            .withUserConfiguration(RuntimeConfiguration.class, McpConfiguration.class, TestDependencies.class)
+            .withUserConfiguration(RuntimeConfiguration.class, McpConfiguration.class, SkillConfiguration.class, TestDependencies.class)
             .withPropertyValues(
                     "spring.datasource.url=jdbc:postgresql://localhost:5432/session_agent",
                     "spring.datasource.password=test-datasource-password",
@@ -57,8 +65,30 @@ class ApplicationStartupTest {
             assertThat(context).hasSingleBean(McpConnectionManager.class);
             assertThat(context).hasSingleBean(ToolCatalog.class);
             assertThat(context).hasSingleBean(ConversationStore.class);
+            try (com.java.system.sessionagent.tool.port.ToolSnapshot snapshot = context.getBean(ToolCatalog.class).snapshot()) {
+                assertThat(snapshot.definitions()).isEmpty();
+            }
+            assertThat(context).hasSingleBean(com.java.system.sessionagent.skill.port.SkillLibrary.class);
             assertThat(context.getBean(ConversationModel.class).routeId().value()).isEqualTo("google-primary");
         });
+    }
+
+    @Test
+    void exposes_one_composite_catalog_and_closes_its_owned_library(@TempDir Path root) throws Exception {
+        Files.writeString(Files.createDirectories(root.resolve("review")).resolve("SKILL.md"),
+                "---\nname: review\ndescription: Review instructions\n---\nReview the question.");
+        AtomicReference<SkillLibrary> owned = new AtomicReference<>();
+        contextRunner.withPropertyValues("session-agent.skills.roots[0]=" + root).run(context -> {
+            assertThat(context).hasNotFailed().hasSingleBean(ToolCatalog.class).doesNotHaveBean(McpToolCatalog.class);
+            SkillLibrary library = context.getBean(SkillLibrary.class);
+            owned.set(library);
+            assertThat(library.read("skill://review")).isInstanceOf(SkillReadResult.Success.class);
+            try (ToolSnapshot snapshot = context.getBean(ToolCatalog.class).snapshot()) {
+                assertThat(snapshot.definitions()).singleElement().satisfies(definition ->
+                        assertThat(definition.name().value()).isEqualTo("readSkill"));
+            }
+        });
+        assertThat(owned.get().read("skill://review")).isEqualTo(new SkillReadResult.Failure("SKILL_UNAVAILABLE"));
     }
 
     @Test

@@ -51,6 +51,7 @@ class RuntimeBoundaryTest {
                     "com.java.system.sessionagent.conversation.application..",
                     "com.java.system.sessionagent.conversation.port..",
                     "com.java.system.sessionagent.tool..",
+                    "com.java.system.sessionagent.skill..",
                     "com.java.system.sessionagent.storage..",
                     "com.java.system.sessionagent.web..",
                     "com.java.system.sessionagent.worker..")

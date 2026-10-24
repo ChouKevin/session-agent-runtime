@@ -6,6 +6,10 @@ management:
       exposure:
         include: health,mcpConnections
 session-agent:
+  skills:
+    roots: []
+    max-file-bytes: 65536
+    max-skills: 128
   mcp:
     connections: {}
     refresh-interval: ${SESSION_AGENT_MCP_REFRESH_INTERVAL:60s}

@@ -15,6 +15,8 @@ import com.java.system.sessionagent.conversation.domain.MessageRole;
 import com.java.system.sessionagent.conversation.domain.RuntimeMessage;
 import com.java.system.sessionagent.conversation.domain.SessionId;
 import com.java.system.sessionagent.conversation.domain.SessionSequence;
+import com.java.system.sessionagent.conversation.domain.SkillMessage;
+import com.java.system.sessionagent.skill.domain.SkillResource;
 import com.java.system.sessionagent.conversation.domain.ToolObservation;
 import com.java.system.sessionagent.conversation.domain.ToolCallId;
 import com.java.system.sessionagent.conversation.domain.ToolRequest;
@@ -69,6 +71,26 @@ class MessageControllerTest {
     private static final String SESSION_ID = "a1d4cefe-d5b5-4f40-b9f6-beb41a6831af";
     private static final String JOB_ID = "f47bdb7e-75c3-4dbf-bdd4-1f8681705b62";
     private static final Instant CREATED_AT = Instant.parse("2026-08-31T10:00:01Z");
+
+    @Test
+    void serializes_skill_audit_bytes_in_paged_public_history() throws Exception {
+        MessageIntakePort intake = mock(MessageIntakePort.class);
+        ConversationQueryPort queries = mock(ConversationQueryPort.class);
+        when(queries.messages(eq(SESSION_ID), eq(1L), eq(1))).thenReturn(Optional.of(List.of(
+                new SkillMessage(new SessionId(SESSION_ID),
+                        new SessionSequence(2), Optional.of(new MessageJobId(JOB_ID)), CREATED_AT, MessageRole.SKILL,
+                        new SkillResource("skill://review/SKILL.md",
+                                "a".repeat(64), "# Review\nActual content")))));
+
+        mvc(intake, queries).perform(get("/internal/sessions/{sessionId}/messages", SESSION_ID)
+                        .queryParam("afterSequence", "1").queryParam("limit", "1"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$[0].type").value("SKILL"))
+                .andExpect(jsonPath("$[0].messageJobId").value(JOB_ID))
+                .andExpect(jsonPath("$[0].uri").value("skill://review/SKILL.md"))
+                .andExpect(jsonPath("$[0].sha256").value("a".repeat(64)))
+                .andExpect(jsonPath("$[0].content").value("# Review\nActual content"));
+    }
 
     @Test
     void rejects_malformed_job_cancellation_before_submission() throws Exception {

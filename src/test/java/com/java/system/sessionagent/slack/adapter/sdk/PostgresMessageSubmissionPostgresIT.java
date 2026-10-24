@@ -1,5 +1,7 @@
 package com.java.system.sessionagent.slack.adapter.sdk;
 
+import com.java.system.sessionagent.skill.adapter.filesystem.FileSystemSkillLibrary;
+import com.java.system.sessionagent.skill.configuration.SkillProperties;
 import com.java.system.sessionagent.slack.adapter.postgres.PostgresMessageSubmission;
 import com.java.system.sessionagent.slack.adapter.postgres.SlackPostgresDeliveryStore;
 import com.java.system.sessionagent.slack.adapter.postgres.SlackPostgresSessionLookup;
@@ -731,7 +733,7 @@ class PostgresMessageSubmissionPostgresIT {
             }
         };
         ToolCatalog toolCatalog = () -> new ToolSnapshot(List.of());
-        JobProcessor messageJobService = new JobProcessor(store, TestConfiguredModels.withModel(model), toolCatalog,
+        JobProcessor messageJobService = new JobProcessor(store, TestConfiguredModels.withModel(model), toolCatalog, new FileSystemSkillLibrary(new SkillProperties()),
                 Clock.fixed(Instant.parse("2026-09-06T00:00:02Z"), ZoneOffset.UTC), 3,
                 new MessageJobRetryPolicy(3, Duration.ofSeconds(1)), new NoOpConversationTelemetry());
 

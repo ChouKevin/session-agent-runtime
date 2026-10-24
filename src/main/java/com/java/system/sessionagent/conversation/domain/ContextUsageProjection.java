@@ -12,7 +12,8 @@ public record ContextUsageProjection(
         List<ToolDefinition> toolDefinitions,
         List<SessionMessage> history,
         long compactGeneration,
-        Optional<ContextSummary> contextSummary) {
+        Optional<ContextSummary> contextSummary,
+        String eligibilityFingerprint) {
 
     public ContextUsageProjection {
         Assert.notNull(model, "Context model must not be null");
@@ -23,10 +24,7 @@ public record ContextUsageProjection(
         history = List.copyOf(history);
         Assert.isTrue(compactGeneration >= 0, "Context compact generation must not be negative");
         Assert.notNull(contextSummary, "Context summary must not be null");
+        Assert.hasText(eligibilityFingerprint, "Context eligibility fingerprint must not be blank");
     }
 
-    public ContextUsageProjection(ModelDescriptor model, String systemPrompt, List<ToolDefinition> toolDefinitions,
-            List<SessionMessage> history, long compactGeneration) {
-        this(model, systemPrompt, toolDefinitions, history, compactGeneration, Optional.empty());
-    }
 }

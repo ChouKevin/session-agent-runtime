@@ -82,6 +82,20 @@ PY
 
 `runtime.env` 是 systemd EnvironmentFile 與 Compose dotenv 的共同子集：一行一個 `NAME=value`；範例的 token/password 都使用不含空白、引號、`$` 或換行的值。不使用 `export`、命令替換，也不 `source` 這個檔案。若要使用含特殊字元的外部秘密，先分離各工具的編碼與 secret 注入方式，不能假設解析規則相同。
 
+若明確啟用 Runtime skills，另備操作者管理的內容目錄，依
+[configuration.md](configuration.md) 設定 roots 與 `SKILL.md`。Runtime service
+帳號只需 read/traverse，不應持有寫入權限；同帳號部署的 Unix owner mode 不能
+形成對操作者的安全隔離，需獨立 owner／帳號或唯讀 mount 才能限制 Runtime。
+容器部署必須掛載指定內容 root 為 `:ro`，不能掛整個 checkout、home 或憑證目錄。
+不要把本部署指南自動安裝成 Runtime skill，也不增加 shell 工具或放寬檔案權限。
+roots／祖先不能是 symlink；啟動前確認 service account 能讀檔。
+啟用 roots 需要 Java filesystem provider 支援 `SecureDirectoryStream`；
+不支援會 fail closed、拒絕啟動。預期使用 Linux 上支援此 API 的本地 filesystem
+provider，不能假設所有 Linux filesystem／mount 都支援。檔案大小限制只限制
+讀取 bytes，不保證 open latency；若具權限的並行 writer 將檔案換成 FIFO／其他
+special file，regular-file 檢查與 no-follow open 不等於 timeout 防護。這是可信
+操作者管理 roots 的邊界，不是對抗惡意 writer 的隔離機制。
+
 ## 3. 建置並安裝精確版本
 
 在已確認要部署的乾淨 checkout 執行：

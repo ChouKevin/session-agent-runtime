@@ -1,5 +1,7 @@
 package com.java.system.sessionagent.conversation;
 
+import com.java.system.sessionagent.skill.adapter.filesystem.FileSystemSkillLibrary;
+import com.java.system.sessionagent.skill.configuration.SkillProperties;
 import ch.qos.logback.classic.Logger;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
@@ -59,7 +61,7 @@ class MessageJobRecoveryTest {
     void does_not_invoke_a_tool_when_ownership_is_revoked_during_progress_publication() {
         ConversationStore store = mockStore();
         MessageWorkClaim claim = claim();
-        when(store.loadHistory(claim.sessionId())).thenReturn(List.of(user()));
+        when(store.loadContextHistory(claim.sessionId())).thenReturn(contextHistory(List.of(user())));
         when(store.reserveModelCall(eq(claim), eq(2), any(Instant.class))).thenReturn(OptionalInt.of(1));
         AtomicBoolean owned = new AtomicBoolean(true);
         Mockito.doAnswer(invocation -> {
@@ -90,7 +92,7 @@ class MessageJobRecoveryTest {
     void does_not_call_the_provider_when_reservation_returns_after_ownership_is_revoked() throws Exception {
         ConversationStore store = mockStore();
         MessageWorkClaim claim = claim();
-        when(store.loadHistory(claim.sessionId())).thenReturn(List.of(user()));
+        when(store.loadContextHistory(claim.sessionId())).thenReturn(contextHistory(List.of(user())));
         CountDownLatch reservationStarted = new CountDownLatch(1);
         CountDownLatch releaseReservation = new CountDownLatch(1);
         when(store.reserveModelCall(eq(claim), eq(2), any(Instant.class))).thenAnswer(invocation -> {
@@ -132,7 +134,7 @@ class MessageJobRecoveryTest {
     void completes_invalid_history_without_a_reservation_or_reclaimable_work() {
         ConversationStore store = mockStore();
         MessageWorkClaim claim = claim();
-        when(store.loadHistory(claim.sessionId())).thenReturn(List.of(user()));
+        when(store.loadContextHistory(claim.sessionId())).thenReturn(contextHistory(List.of(user())));
         ConversationModel model = model(TEST_ROUTE_ID, (request, reservation, usage) -> { throw ModelCallFailure.invalidHistory(); });
 
         service(store, model, catalog()).process(claim, () -> true);
@@ -146,7 +148,7 @@ class MessageJobRecoveryTest {
     void completes_invalid_persisted_native_history_without_reserving_or_calling_the_provider() {
         ConversationStore store = mockStore();
         MessageWorkClaim claim = claim();
-        when(store.loadHistory(claim.sessionId())).thenThrow(ConversationStoreFailure.invalidHistory(
+        when(store.loadContextHistory(claim.sessionId())).thenThrow(ConversationStoreFailure.invalidHistory(
                 new IllegalArgumentException("Malformed native call history")));
         ConversationModel model = mock(ConversationModel.class);
 
@@ -163,7 +165,7 @@ class MessageJobRecoveryTest {
     void does_not_report_a_storage_retry_when_the_claim_guarded_transition_is_rejected() {
         ConversationStore store = mockStore();
         MessageWorkClaim claim = claim();
-        when(store.loadHistory(claim.sessionId())).thenThrow(ConversationStoreFailure.transientFailure(
+        when(store.loadContextHistory(claim.sessionId())).thenThrow(ConversationStoreFailure.transientFailure(
                 new IllegalStateException("storage unavailable")));
         when(store.readJob(claim.messageJobId())).thenReturn(Optional.of(new ConversationStore.MessageJobProjection(
                 claim.messageJobId(), claim.sessionId(), JobStatus.WORKING, 0, 0, Optional.empty(), Optional.empty(), Optional.empty())));
@@ -192,7 +194,7 @@ class MessageJobRecoveryTest {
     void reports_retry_scheduled_only_after_the_claim_guarded_storage_transition_succeeds() {
         ConversationStore store = mockStore();
         MessageWorkClaim claim = claim();
-        when(store.loadHistory(claim.sessionId())).thenThrow(ConversationStoreFailure.transientFailure(
+        when(store.loadContextHistory(claim.sessionId())).thenThrow(ConversationStoreFailure.transientFailure(
                 new IllegalStateException("storage unavailable")));
         when(store.readJob(claim.messageJobId())).thenReturn(Optional.of(new ConversationStore.MessageJobProjection(
                 claim.messageJobId(), claim.sessionId(), JobStatus.WORKING, 0, 0, Optional.empty(), Optional.empty(), Optional.empty())));
@@ -235,7 +237,7 @@ class MessageJobRecoveryTest {
 
         ArgumentCaptor<ConversationStore.MessageBatch> batch = ArgumentCaptor.forClass(ConversationStore.MessageBatch.class);
         verify(store).append(eq(claim), batch.capture(), any(Instant.class));
-        verify(store, Mockito.never()).loadHistory(any());
+        verify(store, Mockito.never()).loadContextHistory(any());
         verify(model, Mockito.never()).respond(any(), any(), any());
         assertTerminalFailure(batch.getValue(), "MODEL_UNAVAILABLE");
     }
@@ -261,7 +263,7 @@ class MessageJobRecoveryTest {
             }
         };
         ToolCatalog catalog = () -> { throw new AssertionError("Tool snapshot must not be opened"); };
-        JobProcessor processor = new JobProcessor(store, models, catalog, java.time.Clock.systemUTC(), 2,
+        JobProcessor processor = new JobProcessor(store, models, catalog, new FileSystemSkillLibrary(new SkillProperties()), java.time.Clock.systemUTC(), 2,
                 new com.java.system.sessionagent.conversation.application.MessageJobRetryPolicy(3, Duration.ofSeconds(60)),
                 new com.java.system.sessionagent.conversation.port.out.NoOpConversationTelemetry());
 
@@ -269,7 +271,7 @@ class MessageJobRecoveryTest {
 
         ArgumentCaptor<ConversationStore.MessageBatch> batch = ArgumentCaptor.forClass(ConversationStore.MessageBatch.class);
         verify(store).append(eq(claim), batch.capture(), any(Instant.class));
-        verify(store, Mockito.never()).loadHistory(any());
+        verify(store, Mockito.never()).loadContextHistory(any());
         assertTerminalFailure(batch.getValue(), "MODEL_UNAVAILABLE");
     }
 
@@ -280,7 +282,7 @@ class MessageJobRecoveryTest {
         ConversationModel model = mock(ConversationModel.class);
         ModelRouteId routeId = new ModelRouteId("codex-primary");
         when(model.routeId()).thenReturn(routeId);
-        when(store.loadHistory(claim.sessionId())).thenReturn(List.of(user()));
+        when(store.loadContextHistory(claim.sessionId())).thenReturn(contextHistory(List.of(user())));
         when(store.loadContinuations(claim)).thenReturn(Map.of(new SessionSequence(2),
                 new ModelContinuation(new ModelRouteId("gemini-primary"), "opaque-v1", new byte[] {1})));
         ToolCatalog catalog = () -> { throw new AssertionError("Tool snapshot must not be opened"); };
@@ -301,7 +303,7 @@ class MessageJobRecoveryTest {
         ConversationModel model = mock(ConversationModel.class);
         ModelRouteId routeId = new ModelRouteId("codex-primary");
         when(model.routeId()).thenReturn(routeId);
-        when(store.loadHistory(claim.sessionId())).thenReturn(List.of(user()));
+        when(store.loadContextHistory(claim.sessionId())).thenReturn(contextHistory(List.of(user())));
         when(store.reserveModelCall(eq(claim), eq(2), any(Instant.class))).thenReturn(OptionalInt.of(1), OptionalInt.empty());
         ModelContinuation continuation = new ModelContinuation(new ModelRouteId("gemini-primary"), "opaque-v1", new byte[] {1});
         when(model.respond(any(), any(), any())).thenAnswer(invocation -> {
@@ -330,7 +332,7 @@ class MessageJobRecoveryTest {
     void completes_terminal_continuation_replay_failure_once_without_reserving_or_executing_tools() {
         ConversationStore store = mockStore();
         MessageWorkClaim claim = claim();
-        when(store.loadHistory(claim.sessionId())).thenReturn(List.of(user()));
+        when(store.loadContextHistory(claim.sessionId())).thenReturn(contextHistory(List.of(user())));
         ConversationModel model = model(TEST_ROUTE_ID, (request, reservation, usage) -> { throw ModelCallFailure.terminal(); });
         AtomicBoolean toolInvoked = new AtomicBoolean();
         ToolCatalog catalog = () -> new ToolSnapshot(List.of(binding("first", arguments -> {

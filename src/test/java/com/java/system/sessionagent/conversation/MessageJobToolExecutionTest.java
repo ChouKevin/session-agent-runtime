@@ -50,7 +50,7 @@ class MessageJobToolExecutionTest {
     void completes_an_unrestricted_text_reply_without_tool_execution() {
         ConversationStore store = mockStore();
         MessageWorkClaim claim = claim();
-        when(store.loadHistory(claim.sessionId())).thenReturn(List.of(user()));
+        when(store.loadContextHistory(claim.sessionId())).thenReturn(contextHistory(List.of(user())));
         when(store.reserveModelCall(eq(claim), eq(2), any(Instant.class))).thenReturn(OptionalInt.of(1));
         ConversationModel model = model(TEST_ROUTE_ID, (request, reservation, usage) -> {
             reservation.reserve();
@@ -72,7 +72,7 @@ class MessageJobToolExecutionTest {
         ConversationStore store = mockStore();
         MessageWorkClaim claim = claim();
         AtomicInteger releases = new AtomicInteger();
-        when(store.loadHistory(claim.sessionId())).thenReturn(List.of(user()));
+        when(store.loadContextHistory(claim.sessionId())).thenReturn(contextHistory(List.of(user())));
         when(store.reserveModelCall(eq(claim), eq(2), any(Instant.class))).thenReturn(OptionalInt.of(1));
         ConversationModel model = model(TEST_ROUTE_ID, (request, reservation, usage) -> {
             reservation.reserve();
@@ -92,7 +92,7 @@ class MessageJobToolExecutionTest {
         List<String> releases = new ArrayList<>();
         AtomicInteger snapshots = new AtomicInteger();
         AtomicInteger modelCalls = new AtomicInteger();
-        when(store.loadHistory(claim.sessionId())).thenReturn(List.of(user())).thenReturn(List.of(user()));
+        when(store.loadContextHistory(claim.sessionId())).thenReturn(contextHistory(List.of(user()))).thenReturn(contextHistory(List.of(user())));
         when(store.reserveModelCall(eq(claim), eq(2), any(Instant.class))).thenReturn(OptionalInt.of(1), OptionalInt.of(2));
         ToolCatalog catalog = () -> {
             int snapshotIndex = snapshots.getAndIncrement();
@@ -122,7 +122,7 @@ class MessageJobToolExecutionTest {
         ConversationStore store = mockStore();
         MessageWorkClaim claim = claim();
         AtomicInteger releases = new AtomicInteger();
-        when(store.loadHistory(claim.sessionId())).thenReturn(List.of(user()));
+        when(store.loadContextHistory(claim.sessionId())).thenReturn(contextHistory(List.of(user())));
         ConversationModel model = model(TEST_ROUTE_ID, (request, reservation, usage) -> { throw ModelCallFailure.invalidHistory(); });
 
         service(store, model, () -> trackedSnapshot(releases)).process(claim, () -> true);
@@ -136,7 +136,7 @@ class MessageJobToolExecutionTest {
         MessageWorkClaim claim = claim();
         AtomicInteger releases = new AtomicInteger();
         AtomicBoolean owned = new AtomicBoolean(true);
-        when(store.loadHistory(claim.sessionId())).thenReturn(List.of(user()));
+        when(store.loadContextHistory(claim.sessionId())).thenReturn(contextHistory(List.of(user())));
         when(store.reserveModelCall(eq(claim), eq(2), any(Instant.class))).thenReturn(OptionalInt.of(1));
         ConversationModel model = model(TEST_ROUTE_ID, (request, reservation, usage) -> {
             reservation.reserve();
@@ -154,7 +154,7 @@ class MessageJobToolExecutionTest {
         ConversationStore store = mockStore();
         MessageWorkClaim claim = claim();
         AtomicInteger releases = new AtomicInteger();
-        when(store.loadHistory(claim.sessionId())).thenReturn(List.of(user()));
+        when(store.loadContextHistory(claim.sessionId())).thenReturn(contextHistory(List.of(user())));
         when(store.reserveModelCall(eq(claim), eq(1), any(Instant.class))).thenReturn(OptionalInt.of(1));
         ConversationModel model = model(TEST_ROUTE_ID, (request, reservation, usage) -> {
             reservation.reserve();
@@ -170,7 +170,7 @@ class MessageJobToolExecutionTest {
     void commits_native_assistant_calls_and_ordered_outputs_as_one_batch() {
         ConversationStore store = mockStore();
         MessageWorkClaim claim = claim();
-        when(store.loadHistory(claim.sessionId())).thenReturn(List.of(user())).thenReturn(List.of(user()));
+        when(store.loadContextHistory(claim.sessionId())).thenReturn(contextHistory(List.of(user()))).thenReturn(contextHistory(List.of(user())));
         when(store.reserveModelCall(eq(claim), eq(2), any(Instant.class))).thenReturn(OptionalInt.of(1), OptionalInt.of(2));
         ConversationModel model = model(TEST_ROUTE_ID, (request, reservation, usage) -> {
             reservation.reserve();
@@ -199,7 +199,7 @@ class MessageJobToolExecutionTest {
         MessageWorkClaim claim = claim();
         ModelContinuation continuation = new ModelContinuation(new ModelRouteId("gemini-primary"), "opaque-v1", new byte[] {1, 2, 3});
         List<ModelRequest> requests = new ArrayList<>();
-        when(store.loadHistory(claim.sessionId())).thenReturn(List.of(user())).thenReturn(List.of(user()));
+        when(store.loadContextHistory(claim.sessionId())).thenReturn(contextHistory(List.of(user()))).thenReturn(contextHistory(List.of(user())));
         when(store.loadContinuations(claim)).thenReturn(Map.of())
                 .thenReturn(Map.of(new SessionSequence(2), continuation));
         when(store.reserveModelCall(eq(claim), eq(2), any(Instant.class))).thenReturn(OptionalInt.of(1), OptionalInt.of(2));
@@ -228,7 +228,7 @@ class MessageJobToolExecutionTest {
         LinkedHashMap<String, Object> arguments = new LinkedHashMap<>();
         arguments.put("filters", new LinkedHashMap<>(Map.of("branch", "main")));
         arguments.put("paths", new ArrayList<>(List.of("src")));
-        when(store.loadHistory(claim.sessionId())).thenReturn(List.of(user())).thenReturn(List.of(user()));
+        when(store.loadContextHistory(claim.sessionId())).thenReturn(contextHistory(List.of(user()))).thenReturn(contextHistory(List.of(user())));
         when(store.reserveModelCall(eq(claim), eq(2), any(Instant.class))).thenReturn(OptionalInt.of(1), OptionalInt.of(2));
         ToolCatalog catalog = () -> new ToolSnapshot(List.of(binding("first", supplied -> {
             Map<?, ?> filters = (Map<?, ?>) supplied.get("filters");
@@ -259,7 +259,7 @@ class MessageJobToolExecutionTest {
     void executes_later_calls_after_an_ordinary_middle_failure() {
         ConversationStore store = mockStore();
         MessageWorkClaim claim = claim();
-        when(store.loadHistory(claim.sessionId())).thenReturn(List.of(user())).thenReturn(List.of(user()));
+        when(store.loadContextHistory(claim.sessionId())).thenReturn(contextHistory(List.of(user()))).thenReturn(contextHistory(List.of(user())));
         when(store.reserveModelCall(eq(claim), eq(2), any(Instant.class))).thenReturn(OptionalInt.of(1), OptionalInt.of(2));
         List<String> executed = new ArrayList<>();
         ToolCatalog catalog = () -> new ToolSnapshot(List.of(
@@ -294,7 +294,7 @@ class MessageJobToolExecutionTest {
     void keeps_a_response_on_the_final_ordinal_from_executing_tools() {
         ConversationStore store = mockStore();
         MessageWorkClaim claim = claim();
-        when(store.loadHistory(claim.sessionId())).thenReturn(List.of(user()));
+        when(store.loadContextHistory(claim.sessionId())).thenReturn(contextHistory(List.of(user())));
         when(store.reserveModelCall(eq(claim), eq(1), any(Instant.class))).thenReturn(OptionalInt.of(1));
         AtomicBoolean invoked = new AtomicBoolean();
         ToolCatalog catalog = () -> new ToolSnapshot(List.of(binding("first", arguments -> {
@@ -319,7 +319,7 @@ class MessageJobToolExecutionTest {
         ConversationStore store = mockStore();
         MessageWorkClaim claim = claim();
         List<SessionMessage> replayedHistory = nativeHistory();
-        when(store.loadHistory(claim.sessionId())).thenReturn(List.of(user())).thenReturn(replayedHistory);
+        when(store.loadContextHistory(claim.sessionId())).thenReturn(contextHistory(List.of(user()))).thenReturn(contextHistory(replayedHistory));
         when(store.reserveModelCall(eq(claim), eq(2), any(Instant.class))).thenReturn(OptionalInt.of(1), OptionalInt.of(2));
         ToolSnapshot firstSnapshot = new ToolSnapshot(List.of(binding("first", arguments -> new ToolOutput(false, Map.of("snapshot", "first")))));
         ToolSnapshot refreshedSnapshot = new ToolSnapshot(List.of(binding("second", arguments -> new ToolOutput(false, Map.of("snapshot", "second")))));

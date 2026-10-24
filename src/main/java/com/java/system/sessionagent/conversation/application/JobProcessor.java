@@ -1,6 +1,10 @@
 package com.java.system.sessionagent.conversation.application;
 
 import com.java.system.sessionagent.conversation.domain.MessageWorkClaim;
+import com.java.system.sessionagent.conversation.domain.ConversationHistory;
+import com.java.system.sessionagent.conversation.domain.SkillCommandState;
+import com.java.system.sessionagent.skill.domain.SkillReadResult;
+import com.java.system.sessionagent.skill.port.SkillLibrary;
 import com.java.system.sessionagent.conversation.domain.JobFailure;
 import com.java.system.sessionagent.conversation.domain.JobPhase;
 import com.java.system.sessionagent.conversation.domain.JobProgress;
@@ -13,6 +17,7 @@ import com.java.system.sessionagent.conversation.domain.ContextCompactionRequest
 import com.java.system.sessionagent.conversation.domain.ContextSummary;
 import com.java.system.sessionagent.conversation.domain.ContextUsageEstimator;
 import com.java.system.sessionagent.conversation.domain.ContextUsageProjection;
+import com.java.system.sessionagent.conversation.domain.ContextHistoryView;
 import com.java.system.sessionagent.conversation.domain.ModelDescriptor;
 import com.java.system.sessionagent.conversation.domain.ModelContinuation;
 import com.java.system.sessionagent.conversation.domain.ModelRouteId;
@@ -65,6 +70,7 @@ public final class JobProcessor implements MessageJobPort {
     private final ConversationStore conversationStore;
     private final ConversationModels conversationModels;
     private final ToolCatalog toolCatalog;
+    private final SkillLibrary skillLibrary;
     private final Clock clock;
     private final int maxModelCalls;
     private final MessageJobRetryPolicy retryPolicy;
@@ -75,6 +81,7 @@ public final class JobProcessor implements MessageJobPort {
             ConversationStore conversationStore,
             ConversationModels conversationModels,
             ToolCatalog toolCatalog,
+            SkillLibrary skillLibrary,
             Clock clock,
             int maxModelCalls,
             MessageJobRetryPolicy retryPolicy,
@@ -82,6 +89,7 @@ public final class JobProcessor implements MessageJobPort {
         this.conversationStore = Objects.requireNonNull(conversationStore, "Conversation store must not be null");
         this.conversationModels = Objects.requireNonNull(conversationModels, "Conversation models must not be null");
         this.toolCatalog = Objects.requireNonNull(toolCatalog, "Tool catalog must not be null");
+        this.skillLibrary = Objects.requireNonNull(skillLibrary, "Skill library must not be null");
         this.clock = Objects.requireNonNull(clock, "Clock must not be null");
         Assert.isTrue(maxModelCalls > 0, "Maximum model calls must be positive");
         this.maxModelCalls = maxModelCalls;
@@ -133,7 +141,15 @@ public final class JobProcessor implements MessageJobPort {
         }
         while (guard.stillOwned()) {
             checkCancellation(claim);
-            List<SessionMessage> history = conversationStore.loadHistory(claim.sessionId());
+            ConversationHistory history = conversationStore.loadContextHistory(claim.sessionId());
+            SkillCommandState command = history.commands().get(claim.messageJobId());
+            if (!prepareSkillCommand(claim, guard, resultTracker, command)) {
+                return;
+            }
+            if (Objects.nonNull(command) && command.disposition() == SkillCommandState.Disposition.PENDING) {
+                history = conversationStore.loadContextHistory(claim.sessionId());
+            }
+            ContextHistoryView historyView = new ContextHistoryView(history);
             Map<SessionSequence, ModelContinuation> continuations = Optional.ofNullable(conversationStore.loadContinuations(claim))
                     .orElseGet(Map::of);
             if (hasContinuationForAnotherRoute(continuations, routeId)) {
@@ -142,7 +158,7 @@ public final class JobProcessor implements MessageJobPort {
             }
             try (ToolSnapshot tools = toolCatalog.snapshot()) {
                 ReservationState reservation = new ReservationState();
-                ContextState context = contextState(claim, history, continuations, tools, activeModelDescriptor, conversationModel);
+                ContextState context = contextState(claim, historyView, continuations, tools, activeModelDescriptor, conversationModel);
                 if (context.requiresCompaction()) {
                     if (!compact(claim, guard, reservation, context, ContextCompaction.Reason.THRESHOLD, resultTracker, conversationModel)) {
                         return;
@@ -158,7 +174,7 @@ public final class JobProcessor implements MessageJobPort {
                 checkCancellation(claim);
                 try {
                     result = conversationModel.respond(request, () -> reserveAndLogModelRequest(claim, guard, reservation,
-                            activeModelDescriptor, history.size(), tools.definitions().size()), usage -> { });
+                            activeModelDescriptor, request.history().size(), tools.definitions().size()), usage -> { });
                     checkCancellation(claim);
                     reply = result.reply();
                     continuation = result.continuation();
@@ -222,6 +238,39 @@ public final class JobProcessor implements MessageJobPort {
         }
     }
 
+    private boolean prepareSkillCommand(MessageWorkClaim claim, WorkGuard guard, ProcessingResultTracker tracker,
+            SkillCommandState command) {
+        if (Objects.isNull(command)) {
+            return true;
+        }
+        if (command.disposition() == SkillCommandState.Disposition.REJECTED) {
+            tracker.committed(JobStatus.DONE);
+            return false;
+        }
+        if (command.disposition() == SkillCommandState.Disposition.ACCEPTED) {
+            return true;
+        }
+        checkCancellation(claim);
+        if (!guard.confirmOwnership()) {
+            tracker.ownershipLost();
+            return false;
+        }
+        SkillReadResult read = skillLibrary.metadata().stream()
+                .filter(metadata -> metadata.name().equals(command.command().requestedName()))
+                .findFirst()
+                .<SkillReadResult>map(metadata -> skillLibrary.read(metadata.uri()))
+                .orElseGet(() -> new SkillReadResult.Failure("SKILL_UNAVAILABLE"));
+        checkCancellation(claim);
+        if (!guard.confirmOwnership()) {
+            tracker.ownershipLost();
+            return false;
+        }
+        tracker.appendOutcomeUncertain = true;
+        JobStatus status = conversationStore.resolveSkillCommand(claim, read, clock.instant());
+        tracker.committed(status);
+        return !status.isTerminal() && guard.stillOwned();
+    }
+
     private Optional<ConversationStore.UsageCheckpointData> checkpoint(
             ModelCallResult result,
             ModelSelection selection,
@@ -237,22 +286,22 @@ public final class JobProcessor implements MessageJobPort {
 
     private ContextState contextState(
             MessageWorkClaim claim,
-            List<SessionMessage> history,
+            ContextHistoryView history,
             Map<SessionSequence, ModelContinuation> continuations,
             ToolSnapshot tools,
             ModelDescriptor descriptor,
             ConversationModel conversationModel) {
         if (Objects.isNull(descriptor) || "unspecified".equals(descriptor.modelId())
                 || !org.springframework.util.StringUtils.hasText(conversationModel.systemPrompt())) {
-            return new ContextState(new ModelRequest(history, continuations, tools), "", Optional.empty(), 0, false, Optional.empty());
+            return new ContextState(new ModelRequest(history.between(0, Long.MAX_VALUE), continuations, tools), "", Optional.empty(), 0, false, Optional.empty());
         }
         Optional<ContextCompaction> compaction = conversationStore.loadCompaction(claim.sessionId());
-        List<SessionMessage> visibleHistory = compactedSuffix(history, compaction);
+        List<SessionMessage> visibleHistory = history.between(compaction.map(value -> value.coveredThrough().value()).orElse(0L), Long.MAX_VALUE);
         Map<SessionSequence, ModelContinuation> visibleContinuations = continuationsAfter(continuations, compaction);
         Optional<ContextSummary> summary = compaction.map(value -> value.summary());
         long generation = compaction.map(value -> value.generation()).orElse(0L);
         ContextUsageProjection projection = new ContextUsageProjection(descriptor, conversationModel.systemPrompt(), tools.definitions(),
-                visibleHistory, generation, summary);
+                visibleHistory, generation, summary, history.eligibilityFingerprint());
         String fingerprint = contextUsageEstimator.requestShapeFingerprint(projection);
         long estimate = contextUsageEstimator.estimate(projection,
                 conversationStore.loadUsageCheckpoint(claim.sessionId(), claim.modelSelection(), descriptor, fingerprint, generation)).tokens();
@@ -297,7 +346,7 @@ public final class JobProcessor implements MessageJobPort {
             return false;
         }
         ContextUsageProjection projection = context.projection().orElseThrow();
-        Optional<CompactionBoundary> boundary = selectBoundary(claim, context, projection.model(), conversationModel);
+        Optional<CompactionBoundary> boundary = selectBoundary(context, projection.model(), conversationModel);
         if (boundary.isEmpty()) {
             logCompaction(claim, "compact_failure", "NO_BOUNDARY", context.estimateTokens(), projection.model().contextWindowTokens());
             appendRuntime(claim, guard, CONTEXT_TOO_LARGE,
@@ -336,7 +385,7 @@ public final class JobProcessor implements MessageJobPort {
         }
         ContextUsageProjection afterProjection = new ContextUsageProjection(projection.model(), projection.systemPrompt(),
                 projection.toolDefinitions(), selected.suffix(), context.compaction().map(value -> value.generation()).orElse(0L) + 1,
-                Optional.of(compactedSummary));
+                Optional.of(compactedSummary), projection.eligibilityFingerprint());
         long afterEstimate = contextUsageEstimator.estimate(afterProjection, Optional.empty()).tokens();
         if (afterEstimate >= fourFifths(projection.model().contextWindowTokens())) {
             logCompaction(claim, "compact_failure", "SUMMARY_TOO_LARGE", afterEstimate, projection.model().contextWindowTokens());
@@ -375,20 +424,19 @@ public final class JobProcessor implements MessageJobPort {
     }
 
     private Optional<CompactionBoundary> selectBoundary(
-            MessageWorkClaim claim,
             ContextState context,
             ModelDescriptor descriptor,
             ConversationModel conversationModel) {
-        List<SessionMessage> full = conversationStore.loadHistory(claim.sessionId());
-        int start = context.compaction().map(compaction -> indexAfter(full, compaction.coveredThrough())).orElse(0);
-        for (int index = full.size() - 1; index >= start; index--) {
+        ContextUsageProjection projection = context.projection().orElseThrow();
+        List<SessionMessage> full = projection.history();
+        for (int index = full.size() - 1; index >= 0; index--) {
             int end = completeBoundaryEnd(full, index);
             if (end < index || !isResponseBoundary(full.get(index))) {
                 continue;
             }
-            List<SessionMessage> candidate = full.subList(start, end + 1);
+            List<SessionMessage> candidate = full.subList(0, end + 1);
             ContextUsageProjection summaryProjection = new ContextUsageProjection(descriptor, conversationModel.compactionPrompt(), List.of(), candidate,
-                    0, context.compaction().map(value -> value.summary()));
+                    0, context.compaction().map(value -> value.summary()), projection.eligibilityFingerprint());
             long summaryEstimate = contextUsageEstimator.estimate(summaryProjection, Optional.empty()).tokens();
             if (summaryEstimate < descriptor.contextWindowTokens()) {
                 return Optional.of(new CompactionBoundary(new SessionSequence(full.get(end).sequence().value()), List.copyOf(candidate),
@@ -439,18 +487,6 @@ public final class JobProcessor implements MessageJobPort {
                 || message instanceof com.java.system.sessionagent.conversation.domain.RuntimeMessage;
     }
 
-    private static int indexAfter(List<SessionMessage> history, SessionSequence boundary) {
-        for (int index = 0; index < history.size(); index++) {
-            if (history.get(index).sequence().equals(boundary)) {
-                return index + 1;
-            }
-        }
-        return history.size();
-    }
-
-    private static List<SessionMessage> compactedSuffix(List<SessionMessage> history, Optional<ContextCompaction> compaction) {
-        return compaction.map(value -> List.copyOf(history.subList(indexAfter(history, value.coveredThrough()), history.size()))).orElse(history);
-    }
 
     private static Map<SessionSequence, ModelContinuation> continuationsAfter(
             Map<SessionSequence, ModelContinuation> continuations, Optional<ContextCompaction> compaction) {

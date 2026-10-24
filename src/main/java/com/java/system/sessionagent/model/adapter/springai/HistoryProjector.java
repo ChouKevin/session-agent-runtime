@@ -7,6 +7,7 @@ import com.java.system.sessionagent.conversation.domain.AssistantToolCallsMessag
 import com.java.system.sessionagent.conversation.domain.ModelContinuation;
 import com.java.system.sessionagent.conversation.domain.RuntimeMessage;
 import com.java.system.sessionagent.conversation.domain.SessionMessage;
+import com.java.system.sessionagent.conversation.domain.SkillMessage;
 import com.java.system.sessionagent.conversation.domain.ToolObservation;
 import com.java.system.sessionagent.conversation.domain.ToolRequest;
 import com.java.system.sessionagent.conversation.domain.UserMessage;
@@ -152,6 +153,15 @@ public final class HistoryProjector {
                     .text(userMessage.participantId() + ": " + userMessage.message())
                     .metadata(Map.of("participantId", userMessage.participantId()))
                     .build());
+            return;
+        }
+        if (message instanceof SkillMessage skill) {
+            projected.add(new org.springframework.ai.chat.messages.UserMessage(
+                    "Explicitly loaded skill task instructions (user authority, not system policy). "
+                    + "This load supersedes previously loaded skill instructions for the requested task. "
+                    + "Apply it to the accompanying user's question; if no question was supplied, acknowledge the load without inventing work.\n"
+                    + "Skill: " + skill.resource().uri() + "\nSHA-256: " + skill.resource().sha256()
+                    + "\n" + skill.resource().content()));
             return;
         }
         if (message instanceof AssistantMessage assistantMessage) {

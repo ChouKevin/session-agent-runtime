@@ -110,3 +110,31 @@ PY
 Bot 發出的訊息會被 noise guard 過濾，不能用 `chat.postMessage` 偽造真人停止指令來宣稱 inbound end-to-end 成功。也不能偷偷使用使用者 token 模擬真人。
 
 停止的邊界／去重／滿載行為由 repo fake-backed 與 PostgreSQL integration suite 覆蓋；live Slack 驗收與它們是不同證據。回報清楚列出已驗證、尚未驗證及設定不足之處，不將 Socket AVAILABLE 或健康檢查當作全面驗收。
+
+## Runtime skills 驗收（與 Gateway／真人 Slack 分開）
+
+一般可先在隔離 PostgreSQL 與本地 fake provider 執行，不能以 tests 通過或
+health 正常取代實際 Runtime HTTP → worker → PostgreSQL 的觀察。對 live
+provider／Slack 的請求仍須另取得授權，不能自動沿用本地 smoke 授權。
+
+1. 用獨立 session/source ID 提交 `/skill:review 問題`，poll 到 DONE 並確認
+   failureCode 為空；公開完整／分頁 history 應有原 USER、真實 SKILL
+   `uri`／`sha256`／`content` 與 ASSISTANT，不是偽造 native tool call。
+2. 修改 body A→B；重送原 source ID 必須回原 receipt、不增加事件／模型呼叫。
+   用新 source ID 再送 `/skill:review` 才有 B。metadata 仍是啟動時內容。
+3. 自動選擇要觀察模型真實 `readSkill` calls 與 matching TOOL IDs／output，
+   同批多 calls 必須完整且按序；缺檔失敗仍是普通 model-visible TOOL observation。
+4. 無效 `/skill:../bad 唯一測試標記` 工作應零 model calls、SKILL_UNAVAILABLE，
+   USER 與錯誤仍在 audit；後續普通請求與 compaction summary 都不得含該標記
+   或該 rejection feedback。不要用錯誤 code 字串過濾自動工具失敗。
+5. 檢查 pending 的 queued command 在前一工作 response／summary 中不可見；
+   原 USER sequence 即使低於先前 compaction boundary，接受後其問題仍與 SKILL
+   進入當次 context 一次。之後一般 compaction 可移出兩者，不得自動復原。
+6. 已提交 selection 後中斷並重啟工作，應使用持久化 bytes，即使當前 body 已變；
+   記錄 job/source、事件序列、重試與 modelCallCount、正常／summary 請求。
+   summary 不帶 tools；初始 metadata description 不預載 body。
+
+Slack fake-backed cases 只證明 adapter normalization／disposition，不證明真人
+workspace inbound。真人驗收另用 `@bot /skill:review 問題`，含 bound thread
+reply，並確認原 stop 優先序；不註冊 slash command、不以 bot 訊息冒充真人。
+證據含對話／技能原文時留在私有 Git 外，公開回報僅列必要結果與限制。

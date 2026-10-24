@@ -27,6 +27,49 @@ import java.util.UUID;
 @Mapper
 public interface PostgresConversationMapper extends BaseMapper<PostgresConversationMapper.MessageJobEntity> {
 
+    @Insert("""
+            insert into skill_command(message_job_id, session_id, requested_name, question)
+            values (#{jobId}, #{sessionId}, #{name}, #{question})
+            """)
+    int insertSkillCommand(@Param("jobId") UUID jobId, @Param("sessionId") UUID sessionId,
+                           @Param("name") String name, @Param("question") String question);
+
+    @Select("select message_job_id, requested_name, question, disposition, resolution_sequence from skill_command where session_id = #{sessionId}")
+    @Options(flushCache = Options.FlushCachePolicy.FALSE, useCache = false)
+    List<SkillCommandRow> loadSkillCommands(@Param("sessionId") UUID sessionId);
+
+    @Select("""
+            select message_job_id, requested_name, question, disposition, resolution_sequence from skill_command
+            where message_job_id = #{jobId} and session_id = #{sessionId}
+            """)
+    @Options(flushCache = Options.FlushCachePolicy.FALSE, useCache = false)
+    List<SkillCommandRow> loadSkillCommand(@Param("jobId") UUID jobId, @Param("sessionId") UUID sessionId);
+
+    @Update("""
+            update skill_command set disposition = #{disposition}, resolution_sequence = #{sequence}
+            where message_job_id = #{jobId} and session_id = #{sessionId} and disposition = 'PENDING'
+            """)
+    int resolveSkillCommand(@Param("jobId") UUID jobId, @Param("sessionId") UUID sessionId,
+                            @Param("disposition") String disposition, @Param("sequence") long sequence);
+
+    @Insert("""
+            insert into skill_message(session_id, sequence, uri, sha256, content)
+            values (#{sessionId}, #{sequence}, #{uri}, #{sha256}, #{content})
+            """)
+    int insertSkillMessage(@Param("sessionId") UUID sessionId, @Param("sequence") long sequence,
+                           @Param("uri") String uri, @Param("sha256") String sha256, @Param("content") String content);
+
+    @Select("""
+            select message.sequence, message.message_job_id, message.created_at, detail.uri, detail.sha256, detail.content
+            from session_message message join skill_message detail using (session_id, sequence)
+            where message.session_id = #{sessionId}
+            """)
+    @Options(flushCache = Options.FlushCachePolicy.FALSE, useCache = false)
+    List<SkillMessageRow> loadSkillMessages(@Param("sessionId") UUID sessionId);
+
+    record SkillCommandRow(UUID messageJobId, String requestedName, String question, String disposition, Long resolutionSequence) {}
+    record SkillMessageRow(long sequence, UUID messageJobId, OffsetDateTime createdAt, String uri, String sha256, String content) {}
+
     @Select("select pg_advisory_xact_lock(#{firstLockKey}, #{secondLockKey})")
     String lockSourceIdentity(@Param("firstLockKey") int firstLockKey, @Param("secondLockKey") int secondLockKey);
 
@@ -176,7 +219,8 @@ public interface PostgresConversationMapper extends BaseMapper<PostgresConversat
                 message.created_at, message.role, user_detail.participant_id, user_detail.message as user_message,
                 assistant_detail.message as assistant_message, calls_detail.message as assistant_tool_calls_message,
                 calls_detail.calls, observation_detail.tool_call_id, observation_detail.tool_name, observation_detail.output,
-                runtime_detail.code, runtime_detail.message as runtime_message
+                runtime_detail.code, runtime_detail.message as runtime_message,
+                skill_detail.uri, skill_detail.sha256, skill_detail.content
             from conversation_session session
             left join session_message message on message.session_id = session.session_id and message.sequence > #{afterSequence}
             left join user_message user_detail on user_detail.session_id = message.session_id
@@ -191,6 +235,8 @@ public interface PostgresConversationMapper extends BaseMapper<PostgresConversat
                 and observation_detail.sequence = message.sequence
             left join runtime_message runtime_detail on runtime_detail.session_id = message.session_id
                 and runtime_detail.sequence = message.sequence
+            left join skill_message skill_detail on skill_detail.session_id = message.session_id
+                and skill_detail.sequence = message.sequence
             where session.session_id = #{sessionId}
             order by message.sequence asc
             limit #{limit}
@@ -725,7 +771,10 @@ public interface PostgresConversationMapper extends BaseMapper<PostgresConversat
             String toolName,
             String output,
             String code,
-            String runtimeMessage) {
+            String runtimeMessage,
+            String uri,
+            String sha256,
+            String content) {
     }
 
     record UserMessageRow(

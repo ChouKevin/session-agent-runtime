@@ -1,5 +1,7 @@
 package com.java.system.sessionagent.bootstrap.configuration;
 
+import com.java.system.sessionagent.skill.adapter.filesystem.FileSystemSkillLibrary;
+import com.java.system.sessionagent.skill.configuration.SkillProperties;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.java.system.sessionagent.conversation.application.JobProcessor;
 import com.java.system.sessionagent.conversation.application.MessageJobRetryPolicy;
@@ -78,7 +80,7 @@ class ConfiguredModelSessionPostgresIT {
         try (ConfiguredModels models = configuredModels(server)) {
             ConversationStore store = new PostgresConversationStore(dataSource(), Clock.systemUTC(), new ObjectMapper());
             MessageService intake = new MessageService(store, models, new NoOpConversationTelemetry());
-            JobProcessor processor = new JobProcessor(store, models, catalog(), Clock.systemUTC(), 3,
+            JobProcessor processor = new JobProcessor(store, models, catalog(), new FileSystemSkillLibrary(new SkillProperties()), Clock.systemUTC(), 3,
                     new MessageJobRetryPolicy(3, Duration.ofSeconds(1)), new NoOpConversationTelemetry());
 
             MessageReceipt first = intake.receive(new IncomingMessage("thread", "alice", "source-a", "find the fee"));
@@ -292,7 +294,7 @@ class ConfiguredModelSessionPostgresIT {
     }
 
     private static JobProcessor processor(ConversationStore store, ConfiguredModels models) {
-        return new JobProcessor(store, models, catalog(), Clock.systemUTC(), 3,
+        return new JobProcessor(store, models, catalog(), new FileSystemSkillLibrary(new SkillProperties()), Clock.systemUTC(), 3,
                 new MessageJobRetryPolicy(3, Duration.ofSeconds(1)), new NoOpConversationTelemetry());
     }
 

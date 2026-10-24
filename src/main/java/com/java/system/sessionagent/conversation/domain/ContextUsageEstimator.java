@@ -17,7 +17,7 @@ public final class ContextUsageEstimator {
 
     public String requestShapeFingerprint(ContextUsageProjection projection) {
         Assert.notNull(projection, "Context usage projection must not be null");
-        return sha256(serializedRequestShape(projection));
+        return sha256(serializedRequestShape(projection) + "eligibility:" + projection.eligibilityFingerprint());
     }
 
     public ContextEstimate estimate(ContextUsageProjection projection, Optional<ContextUsageCheckpoint> checkpoint) {
@@ -79,6 +79,9 @@ public final class ContextUsageEstimator {
                 appendString(serialized, "user", userMessage.participantId() + ": " + userMessage.message());
             } else if (message instanceof AssistantMessage assistantMessage) {
                 appendString(serialized, "assistant", assistantMessage.message());
+            } else if (message instanceof SkillMessage skill) {
+                appendString(serialized, "skill", skill.resource().uri() + "\n" + skill.resource().sha256()
+                        + "\n" + skill.resource().content());
             } else if (message instanceof RuntimeMessage runtimeMessage) {
                 appendString(serialized, "runtime", "Runtime: " + runtimeMessage.code() + " - " + runtimeMessage.message());
             } else if (message instanceof AssistantToolCallsMessage calls) {

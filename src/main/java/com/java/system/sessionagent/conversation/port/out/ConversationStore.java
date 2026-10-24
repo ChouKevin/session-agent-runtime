@@ -1,5 +1,8 @@
 package com.java.system.sessionagent.conversation.port.out;
 
+import com.java.system.sessionagent.conversation.domain.ConversationHistory;
+import com.java.system.sessionagent.skill.domain.SkillResource;
+import com.java.system.sessionagent.skill.domain.SkillReadResult;
 import com.java.system.sessionagent.conversation.domain.IncomingMessage;
 import com.java.system.sessionagent.conversation.domain.JobStatus;
 import com.java.system.sessionagent.conversation.domain.JobFailure;
@@ -51,6 +54,10 @@ public interface ConversationStore {
     boolean extendClaim(MessageWorkClaim claim, Duration leaseDuration);
 
     List<SessionMessage> loadHistory(SessionId sessionId);
+
+    ConversationHistory loadContextHistory(SessionId sessionId);
+
+    JobStatus resolveSkillCommand(MessageWorkClaim claim, SkillReadResult result, Instant createdAt);
 
     default Optional<List<SessionMessage>> loadHistoryPage(SessionId sessionId, long afterSequence, int limit) {
         SessionId requiredSessionId = Objects.requireNonNull(sessionId, "Session ID must not be null");
@@ -144,7 +151,13 @@ public interface ConversationStore {
         CANCEL
     }
 
-    sealed interface MessageData permits AssistantData, AssistantToolCallsData, ToolObservationData, RuntimeData {
+    sealed interface MessageData permits AssistantData, AssistantToolCallsData, ToolObservationData, RuntimeData, SkillData {
+    }
+
+    record SkillData(SkillResource resource) implements MessageData {
+        public SkillData {
+            Objects.requireNonNull(resource, "Skill resource must not be null");
+        }
     }
 
     record AssistantData(String message) implements MessageData {

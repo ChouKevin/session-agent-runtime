@@ -1,5 +1,7 @@
 package com.java.system.sessionagent.storage.adapter.postgres;
 
+import com.java.system.sessionagent.skill.adapter.filesystem.FileSystemSkillLibrary;
+import com.java.system.sessionagent.skill.configuration.SkillProperties;
 import com.java.system.sessionagent.conversation.domain.IncomingMessage;
 import com.java.system.sessionagent.conversation.domain.JobStatus;
 import com.java.system.sessionagent.conversation.domain.JobCancellation;
@@ -19,6 +21,7 @@ import com.java.system.sessionagent.conversation.domain.ToolCallId;
 import com.java.system.sessionagent.conversation.domain.AssistantToolCallsMessage;
 import com.java.system.sessionagent.conversation.domain.ContextUsageEstimator;
 import com.java.system.sessionagent.conversation.domain.ContextUsageProjection;
+import com.java.system.sessionagent.conversation.domain.ContextHistoryView;
 import com.java.system.sessionagent.conversation.domain.ModelRequest;
 import com.java.system.sessionagent.conversation.domain.ModelSelection;
 import com.java.system.sessionagent.conversation.domain.ModelUsage;
@@ -128,7 +131,7 @@ class PostgresConversationCommitPostgresIT {
         assertThat(tables).containsExactlyInAnyOrder("conversation_session", "source_message", "session_message", "user_message",
                 "message_job", "assistant_message", "assistant_tool_calls", "model_continuation", "tool_observation", "runtime_message",
                 "context_usage_checkpoint", "session_compaction", "slack_thread_binding", "slack_event_receipt", "slack_message_receipt",
-                "slack_delivery", "slack_delivery_part");
+                "slack_delivery", "slack_delivery_part", "skill_command", "skill_message");
         assertThat(observationColumns).containsExactlyInAnyOrder("session_id", "sequence", "role", "tool_call_id", "tool_name", "output");
         assertThat(jobColumns).contains("model_route_id", "phase", "phase_started_at", "current_tool_name", "failure_code")
                 .doesNotContain("reply_sequence");
@@ -346,7 +349,7 @@ class PostgresConversationCommitPostgresIT {
             }
         };
         ToolCatalog toolCatalog = () -> new ToolSnapshot(List.of());
-        JobProcessor service = new JobProcessor(store, TestConfiguredModels.withModel(model), toolCatalog,
+        JobProcessor service = new JobProcessor(store, TestConfiguredModels.withModel(model), toolCatalog, new FileSystemSkillLibrary(new SkillProperties()),
                 Clock.fixed(NOW, ZoneOffset.UTC), 3, new com.java.system.sessionagent.conversation.application.MessageJobRetryPolicy(3,
                 Duration.ofSeconds(1)), new com.java.system.sessionagent.conversation.port.out.NoOpConversationTelemetry());
 
@@ -355,7 +358,9 @@ class PostgresConversationCommitPostgresIT {
         ConversationStore restartedStore = store();
         List<SessionMessage> history = restartedStore.loadHistory(receipt.sessionId());
         String fingerprint = new ContextUsageEstimator().requestShapeFingerprint(new ContextUsageProjection(descriptor, model.systemPrompt(),
-                List.of(), history.subList(0, 1), 0));
+                List.of(), history.subList(0, 1), 0, Optional.empty(),
+                new ContextHistoryView(
+                        restartedStore.loadContextHistory(receipt.sessionId())).eligibilityFingerprint()));
         assertThat(history).extracting(message -> message.sequence().value()).containsExactly(1L, 2L);
         assertThat(history.get(1)).isInstanceOfSatisfying(AssistantMessage.class,
                 assistant -> assertThat(assistant.message()).isEqualTo("done"));

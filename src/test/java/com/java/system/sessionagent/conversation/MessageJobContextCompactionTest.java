@@ -20,6 +20,12 @@ import com.java.system.sessionagent.conversation.domain.SessionSequence;
 import com.java.system.sessionagent.conversation.domain.ToolCallId;
 import com.java.system.sessionagent.conversation.domain.ToolObservation;
 import com.java.system.sessionagent.conversation.domain.UserMessage;
+import com.java.system.sessionagent.conversation.domain.ConversationHistory;
+import com.java.system.sessionagent.conversation.domain.SkillCommand;
+import com.java.system.sessionagent.conversation.domain.SkillCommandState;
+import com.java.system.sessionagent.conversation.domain.SkillMessage;
+import com.java.system.sessionagent.conversation.domain.RuntimeMessage;
+import com.java.system.sessionagent.skill.domain.SkillResource;
 import com.java.system.sessionagent.conversation.port.in.MessageJobProcessingResult;
 import com.java.system.sessionagent.conversation.port.out.ConversationModel;
 import com.java.system.sessionagent.conversation.port.out.ConversationStore;
@@ -50,6 +56,119 @@ import static org.mockito.Mockito.when;
 class MessageJobContextCompactionTest {
 
     @Test
+    void skill_load_alone_is_not_a_complete_response_boundary() {
+        ConversationStore store = mockStore();
+        MessageWorkClaim claim = claim();
+        UserMessage command = new UserMessage(claim.sessionId(), new SessionSequence(1), Optional.of(claim.messageJobId()),
+                Instant.EPOCH, MessageRole.USER, "alice", "/skill:review");
+        SkillMessage skill = new SkillMessage(claim.sessionId(), new SessionSequence(2), Optional.of(claim.messageJobId()),
+                Instant.EPOCH, MessageRole.SKILL, new SkillResource("skill://review/SKILL.md", "a".repeat(64), "x".repeat(40_000)));
+        when(store.loadContextHistory(claim.sessionId())).thenReturn(new ConversationHistory(List.of(command, skill), Map.of(claim.messageJobId(),
+                new SkillCommandState(claim.messageJobId(), SkillCommand.parse("/skill:review").orElseThrow(),
+                        SkillCommandState.Disposition.ACCEPTED, Optional.of(skill.sequence())))));
+        ConversationModel model = new ConversationModel() {
+            @Override public ModelRouteId routeId() { return TEST_ROUTE_ID; }
+            @Override public ModelDescriptor descriptor() { return new ModelDescriptor(TEST_ROUTE_ID, "test-capacity", 12_000); }
+            @Override public String systemPrompt() { return "system"; }
+            @Override public String summarize(ContextCompactionRequest request, ModelCallReservation reservation) {
+                throw new AssertionError("SKILL is not a native assistant response");
+            }
+            @Override public ModelCallResult respond(ModelRequest request, ModelCallReservation reservation, Consumer<ModelUsage> usage) {
+                throw new AssertionError("Oversized context must not reach response");
+            }
+        };
+
+        service(store, model, catalog()).process(claim, () -> true);
+
+        verify(store, Mockito.never()).compact(any(), any(), any());
+        ArgumentCaptor<ConversationStore.MessageBatch> batch = ArgumentCaptor.forClass(ConversationStore.MessageBatch.class);
+        verify(store).append(eq(claim), batch.capture(), any(Instant.class));
+        assertTerminalFailure(batch.getValue(), "CONTEXT_TOO_LARGE");
+    }
+
+    @Test
+    void pending_or_rejected_command_never_reaches_response_or_summary() {
+        MessageWorkClaim claim = claim();
+        ConversationStore store = mockStore();
+        MessageJobId pending = new MessageJobId("pending");
+        MessageJobId rejected = new MessageJobId("rejected");
+        List<SessionMessage> audit = List.of(
+                new UserMessage(claim.sessionId(), new SessionSequence(1), Optional.empty(), Instant.EPOCH, MessageRole.USER, "alice", "x".repeat(40_000)),
+                new UserMessage(claim.sessionId(), new SessionSequence(2), Optional.of(pending), Instant.EPOCH, MessageRole.USER, "alice", "/skill:review pending secret"),
+                new UserMessage(claim.sessionId(), new SessionSequence(3), Optional.of(rejected), Instant.EPOCH, MessageRole.USER, "alice", "/skill:missing rejected secret"),
+                new RuntimeMessage(claim.sessionId(), new SessionSequence(4), Optional.of(rejected), Instant.EPOCH, MessageRole.RUNTIME, "SKILL_UNAVAILABLE", "safe rejection"),
+                new AssistantMessage(claim.sessionId(), new SessionSequence(5), Optional.of(new MessageJobId("old")), Instant.EPOCH, MessageRole.ASSISTANT, "old answer"),
+                new UserMessage(claim.sessionId(), new SessionSequence(6), Optional.of(claim.messageJobId()), Instant.EPOCH, MessageRole.USER, "alice", "continue"));
+        ConversationHistory history = new ConversationHistory(audit, Map.of(
+                pending, new SkillCommandState(pending, SkillCommand.parse("/skill:review pending secret").orElseThrow(),
+                        SkillCommandState.Disposition.PENDING, Optional.empty()),
+                rejected, new SkillCommandState(rejected, SkillCommand.parse("/skill:missing rejected secret").orElseThrow(),
+                        SkillCommandState.Disposition.REJECTED, Optional.of(new SessionSequence(4)))));
+        assertCompactionInputs(store, claim, history, Optional.empty(), List.of(audit.get(0), audit.get(4)), List.of(audit.get(5)), 5);
+    }
+
+    @Test
+    void compacts_delayed_resolution_after_old_boundary_without_restoring_the_pair() {
+        MessageWorkClaim claim = claim();
+        ConversationStore store = mockStore();
+        MessageJobId command = new MessageJobId("command");
+        List<SessionMessage> audit = List.of(
+                new UserMessage(claim.sessionId(), new SessionSequence(1), Optional.empty(), Instant.EPOCH, MessageRole.USER, "alice", "old"),
+                new UserMessage(claim.sessionId(), new SessionSequence(2), Optional.of(command), Instant.EPOCH, MessageRole.USER, "alice", "/skill:review actual question"),
+                new AssistantMessage(claim.sessionId(), new SessionSequence(3), Optional.of(new MessageJobId("old")), Instant.EPOCH, MessageRole.ASSISTANT, "old answer"),
+                new SkillMessage(claim.sessionId(), new SessionSequence(4), Optional.of(command), Instant.EPOCH, MessageRole.SKILL,
+                        new SkillResource("skill://review/SKILL.md", "a".repeat(64), "x".repeat(40_000))),
+                new AssistantMessage(claim.sessionId(), new SessionSequence(5), Optional.of(command), Instant.EPOCH, MessageRole.ASSISTANT, "reviewed"),
+                new UserMessage(claim.sessionId(), new SessionSequence(6), Optional.of(claim.messageJobId()), Instant.EPOCH, MessageRole.USER, "alice", "continue"));
+        ConversationHistory history = new ConversationHistory(audit, Map.of(command, new SkillCommandState(command,
+                SkillCommand.parse("/skill:review actual question").orElseThrow(), SkillCommandState.Disposition.ACCEPTED, Optional.of(new SessionSequence(4)))));
+        ModelDescriptor descriptor = new ModelDescriptor(TEST_ROUTE_ID, "test-capacity", 12_000);
+        ContextCompaction prior = new ContextCompaction(1, new MessageJobId("old"), ContextCompaction.Reason.THRESHOLD,
+                new ContextSummary("prior summary"), new SessionSequence(3), descriptor, "prior-shape", 100, 10, Instant.EPOCH);
+
+        assertCompactionInputs(store, claim, history, Optional.of(prior),
+                List.of(audit.get(1), audit.get(3), audit.get(4)), List.of(audit.get(5)), 5);
+    }
+
+    private static void assertCompactionInputs(ConversationStore store, MessageWorkClaim claim, ConversationHistory history,
+            Optional<ContextCompaction> prior, List<SessionMessage> expectedSummary, List<SessionMessage> expectedSuffix, long boundary) {
+        AtomicReference<Optional<ContextCompaction>> compacted = new AtomicReference<>(prior);
+        when(store.loadContextHistory(claim.sessionId())).thenReturn(history);
+        when(store.loadHistory(claim.sessionId())).thenThrow(new AssertionError("Model context must never read raw audit history"));
+        when(store.loadCompaction(claim.sessionId())).thenAnswer(invocation -> compacted.get());
+        when(store.reserveModelCall(eq(claim), eq(2), any(Instant.class))).thenReturn(OptionalInt.of(1), OptionalInt.of(2));
+        Mockito.doAnswer(invocation -> {
+            ConversationStore.CompactionData data = invocation.getArgument(1);
+            assertThat(data.coveredThrough().value()).isEqualTo(boundary);
+            compacted.set(Optional.of(new ContextCompaction(data.generation(), claim.messageJobId(), data.reason(), new ContextSummary(data.summary()),
+                    data.coveredThrough(), data.model(), data.requestShapeFingerprint(), data.estimateBeforeTokens(), data.estimateAfterTokens(), Instant.EPOCH)));
+            return null;
+        }).when(store).compact(eq(claim), any(), any());
+        List<String> requests = new ArrayList<>();
+        ConversationModel model = new ConversationModel() {
+            @Override public ModelRouteId routeId() { return TEST_ROUTE_ID; }
+            @Override public ModelDescriptor descriptor() { return new ModelDescriptor(TEST_ROUTE_ID, "test-capacity", 12_000); }
+            @Override public String systemPrompt() { return "system"; }
+            @Override public String summarize(ContextCompactionRequest request, ModelCallReservation reservation) {
+                requests.add("summary");
+                assertThat(request.history()).containsExactlyElementsOf(expectedSummary);
+                assertThat(request.previousSummary()).isEqualTo(prior.map(ContextCompaction::summary));
+                reservation.reserve();
+                return "compacted";
+            }
+            @Override public ModelCallResult respond(ModelRequest request, ModelCallReservation reservation, Consumer<ModelUsage> usage) {
+                requests.add("response");
+                assertThat(request.history()).containsExactlyElementsOf(expectedSuffix);
+                reservation.reserve();
+                return result(new ModelReply.Text("done"));
+            }
+        };
+
+        assertThat(service(store, model, catalog()).process(claim, () -> true)).isEqualTo(MessageJobProcessingResult.COMPLETED);
+        assertThat(requests).containsExactly("summary", "response");
+    }
+
+    @Test
     void compacts_a_complete_tool_batch_before_the_ordinary_request_and_keeps_raw_history() {
         ConversationStore store = mockStore();
         MessageWorkClaim claim = claim();
@@ -65,7 +184,7 @@ class MessageJobContextCompactionTest {
                 new UserMessage(claim.sessionId(), new SessionSequence(4), Optional.of(claim.messageJobId()), Instant.EPOCH,
                         MessageRole.USER, "alice", "continue"));
         AtomicReference<ContextCompaction> compacted = new AtomicReference<>();
-        when(store.loadHistory(claim.sessionId())).thenReturn(rawHistory);
+        when(store.loadContextHistory(claim.sessionId())).thenReturn(contextHistory(rawHistory));
         when(store.loadCompaction(claim.sessionId())).thenAnswer(invocation -> Optional.ofNullable(compacted.get()));
         when(store.reserveModelCall(eq(claim), eq(2), any(Instant.class))).thenReturn(OptionalInt.of(1), OptionalInt.of(2));
         Mockito.doAnswer(invocation -> {
@@ -116,7 +235,7 @@ class MessageJobContextCompactionTest {
                 new UserMessage(claim.sessionId(), new SessionSequence(3), Optional.of(claim.messageJobId()), Instant.EPOCH,
                         MessageRole.USER, "alice", "continue"));
         AtomicReference<ContextCompaction> compacted = new AtomicReference<>();
-        when(store.loadHistory(claim.sessionId())).thenReturn(history);
+        when(store.loadContextHistory(claim.sessionId())).thenReturn(contextHistory(history));
         when(store.loadCompaction(claim.sessionId())).thenAnswer(invocation -> Optional.ofNullable(compacted.get()));
         when(store.reserveModelCall(eq(claim), eq(2), any(Instant.class))).thenReturn(OptionalInt.of(1));
         Mockito.doAnswer(invocation -> {
@@ -169,7 +288,7 @@ class MessageJobContextCompactionTest {
                         Map.of("isError", false, "result", Map.of("value", "y".repeat(20_000)))));
         AtomicReference<ContextCompaction> compacted = new AtomicReference<>();
         AtomicReference<Map<SessionSequence, ModelContinuation>> continuations = new AtomicReference<>(Map.of());
-        when(store.loadHistory(claim.sessionId())).thenReturn(List.of(currentUser)).thenReturn(committedHistory);
+        when(store.loadContextHistory(claim.sessionId())).thenReturn(contextHistory(List.of(currentUser))).thenReturn(contextHistory(committedHistory));
         when(store.loadContinuations(claim)).thenAnswer(invocation -> continuations.get());
         when(store.loadCompaction(claim.sessionId())).thenAnswer(invocation -> Optional.ofNullable(compacted.get()));
         when(store.reserveModelCall(eq(claim), eq(3), any(Instant.class))).thenReturn(OptionalInt.of(1), OptionalInt.of(2), OptionalInt.of(3));
@@ -240,7 +359,7 @@ class MessageJobContextCompactionTest {
                 new ToolObservation(claim.sessionId(), new SessionSequence(3),
                         Optional.of(claim.messageJobId()), Instant.EPOCH, MessageRole.TOOL, new ToolCallId("call-1"), "first",
                         Map.of("isError", false, "result", Map.of("value", "x".repeat(40_000)))));
-        when(store.loadHistory(claim.sessionId())).thenReturn(incompleteHistory);
+        when(store.loadContextHistory(claim.sessionId())).thenReturn(contextHistory(incompleteHistory));
         ModelDescriptor descriptor = new ModelDescriptor(TEST_ROUTE_ID, "test-capacity", 12_000);
         ConversationModel model = new ConversationModel() {
             @Override public ModelRouteId routeId() { return TEST_ROUTE_ID; }
@@ -275,7 +394,7 @@ class MessageJobContextCompactionTest {
                 new UserMessage(claim.sessionId(), new SessionSequence(3), Optional.of(claim.messageJobId()), Instant.EPOCH,
                         MessageRole.USER, "alice", "continue"));
         AtomicReference<ContextCompaction> compacted = new AtomicReference<>();
-        when(store.loadHistory(claim.sessionId())).thenReturn(history);
+        when(store.loadContextHistory(claim.sessionId())).thenReturn(contextHistory(history));
         when(store.loadCompaction(claim.sessionId())).thenAnswer(invocation -> Optional.ofNullable(compacted.get()));
         when(store.hasOverflowCompaction(claim.messageJobId())).thenReturn(false);
         when(store.reserveModelCall(eq(claim), eq(3), any(Instant.class))).thenReturn(OptionalInt.of(1), OptionalInt.of(2), OptionalInt.of(3));

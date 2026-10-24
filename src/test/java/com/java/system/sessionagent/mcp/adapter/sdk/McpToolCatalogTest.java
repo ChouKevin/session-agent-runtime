@@ -3,6 +3,7 @@ package com.java.system.sessionagent.mcp.adapter.sdk;
 import com.java.system.sessionagent.mcp.configuration.McpConnectionProperties;
 import com.java.system.sessionagent.mcp.domain.McpConnectionState;
 import com.java.system.sessionagent.tool.domain.ToolName;
+import com.java.system.sessionagent.tool.port.CompositeToolCatalog;
 import com.java.system.sessionagent.tool.port.ToolSnapshot;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.modelcontextprotocol.spec.McpSchema;
@@ -50,7 +51,7 @@ class McpToolCatalogTest {
         McpConnectionManager manager = manager();
         McpToolCatalog catalog = new McpToolCatalog(manager, OBJECT_MAPPER);
         manager.publish("semantic", originalClient, List.of(tool("search_code", "Search code")));
-        ToolSnapshot originalSnapshot = catalog.snapshot();
+        ToolSnapshot originalSnapshot = new CompositeToolCatalog(List.of(catalog)).snapshot();
         manager.publish("semantic", replacementClient, List.of(tool("search_code", "Search code")));
 
         originalSnapshot.invoke(new ToolName("semantic_search_code"), Map.of("query", "first"));
@@ -81,6 +82,23 @@ class McpToolCatalogTest {
                 .hasMessage("schema traversal failed");
         manager.publish("semantic", replacementClient, List.of(tool("lookup_invoice", "Lookup invoice")));
 
+        assertThat(originalClient.closeCount()).isEqualTo(1);
+    }
+
+    @Test
+    void composite_failure_releases_a_retained_mcp_client() {
+        RecordingClient originalClient = new RecordingClient();
+        McpConnectionManager manager = manager();
+        McpToolCatalog catalog = new McpToolCatalog(manager, OBJECT_MAPPER);
+        manager.publish("semantic", originalClient, List.of(tool("search_code", "Search code")));
+        CompositeToolCatalog composite = new CompositeToolCatalog(List.of(catalog, () -> {
+            manager.publish("semantic", new RecordingClient(), List.of(tool("search_code", "Search code")));
+            org.assertj.core.api.Assertions.assertThat(originalClient.closeCount()).isZero();
+            throw new IllegalStateException("later acquisition failed");
+        }));
+
+        org.assertj.core.api.Assertions.assertThatThrownBy(composite::snapshot)
+                .isInstanceOf(IllegalStateException.class).hasMessage("later acquisition failed");
         assertThat(originalClient.closeCount()).isEqualTo(1);
     }
 

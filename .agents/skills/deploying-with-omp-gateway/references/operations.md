@@ -178,3 +178,16 @@ systemctl --user start session-agent-runtime
 ## OMP 更新是獨立操作
 
 Runtime update 不等於 OMP update。使用者另行要求更新 OMP 時，採用安裝的 `updating-omp-priority` skill（若可用）及該發行流程，保留既有 provider 登入、broker/gateway bearer 與回退版本。事先核對 gateway Chat Completions、模型 catalog、reasoning／工具呼叫轉換和重試行為；重啟相關 services 後重新驗證。不要在 Runtime update 中隱含執行 `latest` 升級或 `token --regenerate`。
+
+## Runtime skills 內容更新與復原
+
+- bodies／references 更新後，下次新讀取才用新 bytes；不會改寫既有對話。新提交
+  `/skill:name` 可明確重讀，同 source redelivery 不會建立新讀取。
+- 新增／改名、description 或 roots 設定異動要依排空流程重啟 Runtime；
+  MCP refresh 不會重建 skill registry。不要以 symlink release 指標替代 root。
+- 已提交 SKILL 的工作復原使用 PostgreSQL 中的 bytes，不因目前檔案修改或刪除
+  而改寫該次載入；未提交的新選擇仍須讀當前檔案。保留 audit 與 source IDs。
+- 內容按一般 compaction 處理，summary 可取代原文；不以重啟強制還原技能。
+- 備份操作者管理的 skill 內容與私有 roots 設定，和資料庫備份分開記錄；
+  SHA-256 是歷史證據，不提供舊檔版本倉庫或自動回滾。維持唯讀 mount／權限，
+  不把 Runtime 維護或部署操作交給業務 skill 執行。

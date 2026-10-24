@@ -2,6 +2,26 @@ package com.java.system.sessionagent.conversation;
 
 import com.java.system.sessionagent.conversation.application.ConversationQueryService;
 import com.java.system.sessionagent.conversation.domain.ContextUsageEstimator;
+import com.java.system.sessionagent.conversation.domain.ConversationHistory;
+import com.java.system.sessionagent.conversation.domain.ModelCallResult;
+import com.java.system.sessionagent.conversation.domain.ModelUsage;
+import com.java.system.sessionagent.conversation.port.out.ModelCallReservation;
+import com.java.system.sessionagent.conversation.domain.ContextHistoryView;
+import com.java.system.sessionagent.conversation.domain.ContextUsageProjection;
+import com.java.system.sessionagent.conversation.domain.ContextUsageCheckpoint;
+import com.java.system.sessionagent.conversation.domain.ContextCompaction;
+import com.java.system.sessionagent.conversation.domain.ContextSummary;
+import com.java.system.sessionagent.conversation.domain.ContextEstimate;
+import com.java.system.sessionagent.conversation.domain.MessageWorkClaim;
+import com.java.system.sessionagent.conversation.domain.ModelRequest;
+import com.java.system.sessionagent.conversation.domain.ModelReply;
+import com.java.system.sessionagent.conversation.domain.SessionMessage;
+import com.java.system.sessionagent.conversation.domain.AssistantMessage;
+import com.java.system.sessionagent.conversation.domain.SkillCommand;
+import com.java.system.sessionagent.conversation.domain.SkillCommandState;
+import com.java.system.sessionagent.conversation.domain.SkillMessage;
+import com.java.system.sessionagent.conversation.domain.RuntimeMessage;
+import com.java.system.sessionagent.skill.domain.SkillResource;
 import com.java.system.sessionagent.conversation.domain.JobFailure;
 import com.java.system.sessionagent.conversation.domain.JobPhase;
 import com.java.system.sessionagent.conversation.domain.JobProgress;
@@ -23,10 +43,18 @@ import org.junit.jupiter.api.Test;
 
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
+import java.util.OptionalInt;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.Optional;
+import java.util.function.Consumer;
 
+import static com.java.system.sessionagent.conversation.MessageJobTestFixtures.*;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -36,6 +64,68 @@ class SessionQueryServiceTest {
 
     private static final String SESSION_ID = "a1d4cefe-d5b5-4f40-b9f6-beb41a6831af";
     private static final Instant CREATED_AT = Instant.parse("2026-08-31T10:00:01Z");
+
+    @Test
+    void query_usage_matches_actual_worker_context_after_delayed_admission_and_ignores_stale_checkpoint() {
+        ConversationStore store = mockStore();
+        MessageWorkClaim claim = claim();
+        SessionId session = claim.sessionId();
+        MessageJobId command = new MessageJobId("accepted");
+        MessageJobId pending = new MessageJobId("pending");
+        MessageJobId rejected = new MessageJobId("rejected");
+        List<SessionMessage> audit = List.of(
+                new UserMessage(session, new SessionSequence(1), Optional.empty(), CREATED_AT, MessageRole.USER, "alice", "old"),
+                new UserMessage(session, new SessionSequence(2), Optional.of(command), CREATED_AT, MessageRole.USER, "alice", "/skill:review actual question"),
+                new AssistantMessage(session, new SessionSequence(3), Optional.of(new MessageJobId("old")), CREATED_AT, MessageRole.ASSISTANT, "old answer"),
+                new SkillMessage(session, new SessionSequence(4), Optional.of(command), CREATED_AT, MessageRole.SKILL,
+                        new SkillResource("skill://review/SKILL.md", "a".repeat(64), "review instructions")),
+                new UserMessage(session, new SessionSequence(5), Optional.of(pending), CREATED_AT, MessageRole.USER, "alice", "/skill:review " + "secret".repeat(1000)),
+                new UserMessage(session, new SessionSequence(6), Optional.of(rejected), CREATED_AT, MessageRole.USER, "alice", "/skill:missing secret"),
+                new RuntimeMessage(session, new SessionSequence(7), Optional.of(rejected), CREATED_AT, MessageRole.RUNTIME, "SKILL_UNAVAILABLE", "safe rejection"));
+        SkillCommand parsed = SkillCommand.parse("/skill:review actual question").orElseThrow();
+        ConversationHistory history = new ConversationHistory(audit, Map.of(
+                command, new SkillCommandState(command, parsed, SkillCommandState.Disposition.ACCEPTED, Optional.of(new SessionSequence(4))),
+                pending, new SkillCommandState(pending, parsed, SkillCommandState.Disposition.PENDING, Optional.empty()),
+                rejected, new SkillCommandState(rejected, parsed, SkillCommandState.Disposition.REJECTED, Optional.of(new SessionSequence(7)))));
+        ModelDescriptor descriptor = new ModelDescriptor(TEST_ROUTE_ID, "capacity", 100_000);
+        ContextSummary summary = new ContextSummary("previous summary");
+        ContextCompaction compaction = new ContextCompaction(1, new MessageJobId("old"), ContextCompaction.Reason.THRESHOLD,
+                summary, new SessionSequence(3), descriptor, "old-shape", 100, 10, CREATED_AT);
+        when(store.loadContextHistory(session)).thenReturn(history);
+        when(store.loadHistory(session)).thenReturn(audit);
+        when(store.readSession(session)).thenReturn(Optional.of(new ConversationStore.SessionProjection(session, CREATED_AT, Optional.empty(), "test")));
+        when(store.loadCompaction(session)).thenReturn(Optional.of(compaction));
+        when(store.reserveModelCall(any(), anyInt(), any())).thenReturn(OptionalInt.of(1));
+        when(store.loadUsageCheckpoint(any(), any(), any(), any(), anyLong())).thenReturn(Optional.of(
+                new ContextUsageCheckpoint(descriptor, 1, new SessionSequence(3), 900_000, 99_999, 999_999, "stale-eligibility", 1, CREATED_AT)));
+        AtomicReference<ModelRequest> actual = new AtomicReference<>();
+        ConversationModel model = new ConversationModel() {
+            @Override public ModelRouteId routeId() { return TEST_ROUTE_ID; }
+            @Override public ModelDescriptor descriptor() { return descriptor; }
+            @Override public String systemPrompt() { return "system"; }
+            @Override public ModelCallResult respond(ModelRequest request, ModelCallReservation reservation, Consumer<ModelUsage> observer) {
+                actual.set(request);
+                reservation.reserve();
+                return result(new ModelReply.Text("done"));
+            }
+        };
+        ToolCatalog tools = () -> new ToolSnapshot(List.of());
+
+        service(store, model, tools).process(claim, () -> true);
+        ConversationQueryService query = new ConversationQueryService(store, TestConfiguredModels.withModel(model), tools, new ContextUsageEstimator());
+        SessionDetailView detail = query.session(session.value()).orElseThrow();
+
+        assertThat(actual.get()).isNotNull();
+        assertThat(actual.get().history()).containsExactly(audit.get(1), audit.get(3));
+        ContextUsageEstimator estimator = new ContextUsageEstimator();
+        ContextUsageProjection expected = new ContextUsageProjection(descriptor, "system", List.of(), actual.get().history(), 1,
+                Optional.of(summary), new ContextHistoryView(history).eligibilityFingerprint());
+        assertThat(detail.context().estimatedUsedTokens()).isEqualTo(estimator.estimate(expected, Optional.empty()).tokens());
+        assertThat(detail.context().basis()).isEqualTo(ContextEstimate.Basis.FULL_ESTIMATE);
+        assertThat(query.messages(session.value())).contains(audit);
+        verify(store, times(2)).loadUsageCheckpoint(session, claim.modelSelection(), descriptor,
+                estimator.requestShapeFingerprint(expected), 1);
+    }
 
     @Test
     void loads_a_paged_history_window_without_loading_complete_history_and_keeps_exhausted_and_missing_distinct() {
@@ -70,8 +160,8 @@ class SessionQueryServiceTest {
         when(store.readSession(sessionId)).thenReturn(Optional.of(new ConversationStore.SessionProjection(sessionId, CREATED_AT,
                 Optional.of(new ConversationStore.MessageJobProjection(new MessageJobId("f47bdb7e-75c3-4dbf-bdd4-1f8681705b62"), sessionId,
                         JobStatus.WORKING, 1, 2, Optional.of(activeProgress), Optional.empty(), Optional.of(cancellationRequestedAt))), "test")));
-        when(store.loadHistory(sessionId)).thenReturn(List.of(new UserMessage(sessionId, new SessionSequence(1),
-                Optional.of(new MessageJobId("f47bdb7e-75c3-4dbf-bdd4-1f8681705b62")), CREATED_AT, MessageRole.USER, "U01", "private text")));
+        when(store.loadContextHistory(sessionId)).thenReturn(new ConversationHistory(List.of(new UserMessage(sessionId, new SessionSequence(1),
+                Optional.of(new MessageJobId("f47bdb7e-75c3-4dbf-bdd4-1f8681705b62")), CREATED_AT, MessageRole.USER, "U01", "private text")), Map.of()));
         when(store.loadCompaction(sessionId)).thenReturn(Optional.empty());
         ModelDescriptor descriptor = new ModelDescriptor(new ModelRouteId("google-genai"), "gemini-3.1-flash-lite", 1_048_576);
         ConversationModel model = model(descriptor);

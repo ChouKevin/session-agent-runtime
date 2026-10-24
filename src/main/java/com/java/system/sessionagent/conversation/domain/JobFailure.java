@@ -1,6 +1,7 @@
 package com.java.system.sessionagent.conversation.domain;
 
 public enum JobFailure {
+    SKILL_UNAVAILABLE("Requested skill is unavailable."),
     MODEL_CALL_LIMIT_REACHED("Runtime model call limit reached."),
     MODEL_OUTPUT_INVALID("Runtime model output is invalid."),
     MODEL_UNAVAILABLE("Runtime model is unavailable."),

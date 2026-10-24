@@ -63,7 +63,7 @@ class MessageJobCancellationTest {
         MessageWorkClaim claim = claim();
         AtomicBoolean cancelled = new AtomicBoolean();
         when(store.isCancellationRequested(claim)).thenAnswer(invocation -> cancelled.get());
-        when(store.loadHistory(claim.sessionId())).thenReturn(List.of(user()));
+        when(store.loadContextHistory(claim.sessionId())).thenReturn(contextHistory(List.of(user())));
         when(store.reserveModelCall(eq(claim), eq(2), any())).thenAnswer(invocation -> {
             cancelled.set(true);
             throw new JobCancellationRequestedException();
@@ -105,7 +105,7 @@ class MessageJobCancellationTest {
         MessageWorkClaim claim = claim();
         AtomicBoolean cancelled = new AtomicBoolean();
         when(store.isCancellationRequested(claim)).thenAnswer(invocation -> cancelled.get());
-        when(store.loadHistory(claim.sessionId())).thenReturn(List.of(user()));
+        when(store.loadContextHistory(claim.sessionId())).thenReturn(contextHistory(List.of(user())));
         when(store.reserveModelCall(eq(claim), eq(2), any())).thenReturn(OptionalInt.of(1));
         doReturn(JobStatus.CANCELLED).when(store).append(eq(claim), any(), any());
         AtomicInteger requests = new AtomicInteger();
@@ -135,7 +135,7 @@ class MessageJobCancellationTest {
         AtomicBoolean cancelled = new AtomicBoolean();
         List<String> invoked = new ArrayList<>();
         when(store.isCancellationRequested(claim)).thenAnswer(invocation -> cancelled.get());
-        when(store.loadHistory(claim.sessionId())).thenReturn(List.of(user()));
+        when(store.loadContextHistory(claim.sessionId())).thenReturn(contextHistory(List.of(user())));
         when(store.reserveModelCall(eq(claim), eq(2), any())).thenReturn(OptionalInt.of(1));
         doReturn(JobStatus.CANCELLED).when(store).append(eq(claim), any(), any());
         ToolOutput actual = new ToolOutput(firstFails, Map.of("actual", "completed"));
@@ -200,7 +200,7 @@ class MessageJobCancellationTest {
             }
             return JobStatus.CANCELLED;
         }).when(store).append(eq(claim), any(), any());
-        when(store.loadHistory(claim.sessionId())).thenReturn(List.of(user()));
+        when(store.loadContextHistory(claim.sessionId())).thenReturn(contextHistory(List.of(user())));
         when(store.reserveModelCall(eq(claim), eq(2), any())).thenReturn(OptionalInt.of(1));
         ToolOutput actual = new ToolOutput(false, Map.of("actual", "completed"));
         ToolCatalog catalog = () -> new ToolSnapshot(List.of(
@@ -275,7 +275,7 @@ class MessageJobCancellationTest {
                             JobFailure.STORAGE_UNAVAILABLE.message()));
             return cancellationWins ? JobStatus.CANCELLED : JobStatus.DONE;
         }).when(store).append(eq(claim), any(), any());
-        when(store.loadHistory(claim.sessionId())).thenReturn(List.of(user()));
+        when(store.loadContextHistory(claim.sessionId())).thenReturn(contextHistory(List.of(user())));
         when(store.reserveModelCall(eq(claim), eq(2), any())).thenReturn(OptionalInt.of(1));
         ToolOutput firstActual = new ToolOutput(false, Map.of("actual", "first"));
         ToolOutput secondActual = new ToolOutput(false, Map.of("actual", "second"));
@@ -331,7 +331,7 @@ class MessageJobCancellationTest {
         AtomicInteger modelCalls = new AtomicInteger();
         List<String> invoked = new ArrayList<>();
         when(store.isCancellationRequested(claim)).thenAnswer(invocation -> cancelled.get());
-        when(store.loadHistory(claim.sessionId())).thenReturn(List.of(user()));
+        when(store.loadContextHistory(claim.sessionId())).thenReturn(contextHistory(List.of(user())));
         when(store.reserveModelCall(eq(claim), eq(2), any())).thenReturn(OptionalInt.of(1));
         doAnswer(invocation -> {
             throw ConversationStoreFailure.transientFailure(new IllegalStateException("append outcome unknown"));
@@ -368,7 +368,7 @@ class MessageJobCancellationTest {
         MessageWorkClaim claim = claim();
         AtomicBoolean cancelled = new AtomicBoolean();
         when(store.isCancellationRequested(claim)).thenAnswer(invocation -> cancelled.get());
-        when(store.loadHistory(claim.sessionId())).thenReturn(List.of(user()));
+        when(store.loadContextHistory(claim.sessionId())).thenReturn(contextHistory(List.of(user())));
         when(store.reserveModelCall(eq(claim), eq(2), any())).thenReturn(OptionalInt.of(1));
         doReturn(JobStatus.CANCELLED).when(store).append(eq(claim), any(), any());
         doAnswer(invocation -> {
@@ -400,7 +400,7 @@ class MessageJobCancellationTest {
     void reports_the_cancelled_commit_winner_without_polling_again() {
         ConversationStore store = mockStore();
         MessageWorkClaim claim = claim();
-        when(store.loadHistory(claim.sessionId())).thenReturn(List.of(user()));
+        when(store.loadContextHistory(claim.sessionId())).thenReturn(contextHistory(List.of(user())));
         when(store.reserveModelCall(eq(claim), eq(2), any())).thenReturn(OptionalInt.of(1));
         doReturn(JobStatus.CANCELLED).when(store).append(eq(claim), any(), any());
         ConversationModel model = model(TEST_ROUTE_ID, (request, reservation, usage) -> {
@@ -425,7 +425,7 @@ class MessageJobCancellationTest {
                         Instant.EPOCH, MessageRole.ASSISTANT, "x".repeat(40_000)),
                 new UserMessage(claim.sessionId(), new SessionSequence(2),
                         Optional.of(claim.messageJobId()), Instant.EPOCH, MessageRole.USER, "alice", "continue"));
-        when(store.loadHistory(claim.sessionId())).thenReturn(history);
+        when(store.loadContextHistory(claim.sessionId())).thenReturn(contextHistory(history));
         when(store.reserveModelCall(eq(claim), eq(2), any())).thenReturn(OptionalInt.of(1));
         doReturn(JobStatus.CANCELLED).when(store).append(eq(claim), any(), any());
         AtomicInteger summaries = new AtomicInteger();
@@ -461,7 +461,7 @@ class MessageJobCancellationTest {
         MessageWorkClaim claim = claim();
         AtomicBoolean cancelled = new AtomicBoolean();
         when(store.isCancellationRequested(claim)).thenAnswer(invocation -> cancelled.get());
-        when(store.loadHistory(claim.sessionId())).thenAnswer(invocation -> {
+        when(store.loadContextHistory(claim.sessionId())).thenAnswer(invocation -> {
             cancelled.set(true);
             throw ConversationStoreFailure.transientFailure(new IllegalStateException("storage failed"));
         });
@@ -481,7 +481,7 @@ class MessageJobCancellationTest {
         MessageWorkClaim claim = claim();
         AtomicBoolean cancelled = new AtomicBoolean();
         when(store.isCancellationRequested(claim)).thenAnswer(invocation -> cancelled.get());
-        when(store.loadHistory(claim.sessionId())).thenThrow(
+        when(store.loadContextHistory(claim.sessionId())).thenThrow(
                 ConversationStoreFailure.transientFailure(new IllegalStateException("storage failed")));
         when(store.readJob(claim.messageJobId())).thenReturn(Optional.of(new ConversationStore.MessageJobProjection(
                 claim.messageJobId(), claim.sessionId(), JobStatus.WORKING, 0, 0,

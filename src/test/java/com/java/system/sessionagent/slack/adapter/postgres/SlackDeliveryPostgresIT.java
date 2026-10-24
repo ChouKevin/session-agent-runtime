@@ -1,5 +1,7 @@
 package com.java.system.sessionagent.slack.adapter.postgres;
 
+import com.java.system.sessionagent.skill.adapter.filesystem.FileSystemSkillLibrary;
+import com.java.system.sessionagent.skill.configuration.SkillProperties;
 import com.java.system.sessionagent.slack.application.MessageHandler;
 import com.java.system.sessionagent.slack.application.SlackDeliveryWorker;
 import com.java.system.sessionagent.slack.domain.IncomingEvent;
@@ -155,7 +157,7 @@ class SlackDeliveryPostgresIT {
         };
         ExecutorService executor = Executors.newSingleThreadExecutor();
         try {
-            JobProcessor processor = new JobProcessor(store, TestConfiguredModels.withModel(model), emptyToolCatalog(), clock, 3,
+            JobProcessor processor = new JobProcessor(store, TestConfiguredModels.withModel(model), emptyToolCatalog(), new FileSystemSkillLibrary(new SkillProperties()), clock, 3,
                     new MessageJobRetryPolicy(3, Duration.ofSeconds(1)), new NoOpConversationTelemetry());
             Future<?> processing = executor.submit(() -> processor.process(claim, () -> true));
             assertThat(modelStarted.await(5, TimeUnit.SECONDS)).isTrue();
@@ -902,7 +904,7 @@ class SlackDeliveryPostgresIT {
             assertThat(adapter.handle(event)).isEqualTo(SlackEventOutcome.ACCEPTED);
             MessageWorkClaim claim = conversationStore.claimNext("conversation-worker", Duration.ofSeconds(30)).orElseThrow();
             ConversationModel model = successfulModel();
-            JobProcessor service = new JobProcessor(conversationStore, TestConfiguredModels.withModel(model), emptyToolCatalog(),
+            JobProcessor service = new JobProcessor(conversationStore, TestConfiguredModels.withModel(model), emptyToolCatalog(), new FileSystemSkillLibrary(new SkillProperties()),
                     Clock.fixed(NOW, ZoneOffset.UTC), 3, new MessageJobRetryPolicy(3, Duration.ofSeconds(1)),
                     new NoOpConversationTelemetry());
             service.process(claim, () -> true);

@@ -1,7 +1,7 @@
 # Current package architecture
 
 This guide describes the production packages that exist in the repository today.
-The source root is `src/main/java/com/java/system/sessionagent/`. The nine
+The source root is `src/main/java/com/java/system/sessionagent/`. The ten
 top-level packages below are the closed Spring Modulith modules. Subpackages
 express the role of the code that is present now; a module does not gain an
 empty layer merely to complete a pattern.
@@ -12,6 +12,7 @@ empty layer merely to complete a pattern.
 | --- | --- |
 | `conversation` — `domain`, `application`, `port/in`, `port/out` | Owns session, message, job, history, context, and model/tool loop rules. `domain` holds provider-neutral state and invariants; `application` coordinates intake, queries, and message-job processing; `port/in` holds contracts called by adapters and workers; `port/out` holds model, storage, and telemetry contracts implemented outside the module. |
 | `tool` — `domain`, `port` | Defines generic tool names, definitions, snapshots, calls, executors, and outputs. Tool names, schemas, arguments, and results remain provider data; this module does not know an MCP or model SDK. |
+| `skill` — `domain`, `port`, `configuration`, `adapter/filesystem`, `adapter/tool` | Owns startup-only skill metadata, bounded current-file reads, and the provider-neutral `readSkill` tool. Bootstrap owns the library lifecycle and composes skill and MCP leaves into the sole catalog. |
 | `model` — `adapter/springai` | Maps the provider-neutral conversation model contract to Spring AI and Google GenAI, including prompts, history projection, tool callbacks, usage, and continuation data. Provider types stay inside this adapter. |
 | `mcp` — `domain`, `configuration`, `adapter/sdk`, `adapter/actuator` | Owns named MCP connection state and properties, SDK connection lifecycle, discovery, tool routing/adaptation, refresh/reconnect, and safe actuator diagnostics. Raw MCP metadata, schemas, and results do not become Runtime DTOs. |
 | `storage` — `adapter/postgres`, `adapter/postgres/jdbc` | Implements conversation persistence with PostgreSQL, Flyway-backed tables, MyBatis mappers, ordered history, job claims, and atomic history writes. The narrow JDBC export owns shared intake admission and UUID mapping for PostgreSQL adapters. |
@@ -35,6 +36,7 @@ The complete named-interface map is intentionally kept in one assertion in
 | Module | Named interfaces |
 | --- | --- |
 | `tool` | `domain`; `port` |
+| `skill` | `domain`; `port`; `configuration`; `adapter.filesystem`; `adapter.tool` |
 | `conversation` | `domain`; `application`; `port.in`; `port.out` |
 | `model` | `adapter.springai` |
 | `mcp` | `configuration`; `adapter.sdk`; `adapter.actuator` |
@@ -46,21 +48,27 @@ The complete named-interface map is intentionally kept in one assertion in
 
 The exact allowed dependency map and the currently used direct production
 dependencies are shown together below. Same-module imports are omitted. The
-unused allowances are deliberate: `web` may use `tool :: domain`, and
-`bootstrap` may use the bare `web` module. Every other allowance is currently
-used by production code.
+unused allowances are deliberate: `web` may use `tool :: domain`,
+`skill` may use `tool :: domain`, and `bootstrap` may use the bare `web` module.
+Every other allowance is currently used by production code.
 
 | Module | Allowed dependencies | Current direct production dependencies |
 | --- | --- | --- |
 | `tool` | none | none |
-| `conversation` | `tool :: domain`; `tool :: port` | `tool :: domain`; `tool :: port` |
-| `model` | `conversation :: domain`; `conversation :: port.out`; `tool :: domain`; `tool :: port` | `conversation :: domain`; `conversation :: port.out`; `tool :: domain`; `tool :: port` |
+| `skill` | `tool :: domain`; `tool :: port` | `tool :: port` |
+| `conversation` | `tool :: domain`; `tool :: port`; `skill :: domain`; `skill :: port` | `tool :: domain`; `tool :: port`; `skill :: domain`; `skill :: port` |
+| `model` | `conversation :: domain`; `conversation :: port.out`; `tool :: domain`; `tool :: port`; `skill :: domain` | `conversation :: domain`; `conversation :: port.out`; `tool :: domain`; `tool :: port`; `skill :: domain` |
 | `mcp` | `tool :: port` | `tool :: port` |
-| `storage` | `conversation :: domain`; `conversation :: port.in`; `conversation :: port.out`; `tool :: domain` | `conversation :: domain`; `conversation :: port.in`; `conversation :: port.out`; `tool :: domain` |
-| `web` | `conversation :: domain`; `conversation :: port.in`; `tool :: domain` | `conversation :: domain`; `conversation :: port.in` |
+| `storage` | `conversation :: domain`; `conversation :: port.in`; `conversation :: port.out`; `tool :: domain`; `skill :: domain` | `conversation :: domain`; `conversation :: port.in`; `conversation :: port.out`; `tool :: domain`; `skill :: domain` |
+| `web` | `conversation :: domain`; `conversation :: port.in`; `tool :: domain`; `slack :: domain`; `slack :: port.out`; `skill :: domain` | `conversation :: domain`; `conversation :: port.in`; `slack :: domain`; `slack :: port.out`; `skill :: domain` |
 | `worker` | `conversation :: domain`; `conversation :: port.in`; `conversation :: port.out` | `conversation :: domain`; `conversation :: port.in`; `conversation :: port.out` |
 | `slack` | `conversation :: domain`; `conversation :: port.in`; `storage :: adapter.postgres.jdbc` | `conversation :: domain`; `conversation :: port.in`; `storage :: adapter.postgres.jdbc` |
-| `bootstrap` | `tool :: port`; `mcp :: configuration`; `mcp :: adapter.sdk`; `mcp :: adapter.actuator`; `conversation :: application`; `conversation :: domain`; `conversation :: port.in`; `conversation :: port.out`; `model :: adapter.springai`; `storage :: adapter.postgres`; `storage :: adapter.postgres.jdbc`; `web`; `worker :: application`; `worker :: configuration`; `slack :: domain`; `slack :: application`; `slack :: port.out`; `slack :: adapter.sdk`; `slack :: adapter.postgres`; `slack :: configuration` | `tool :: port`; `mcp :: configuration`; `mcp :: adapter.sdk`; `mcp :: adapter.actuator`; `conversation :: application`; `conversation :: domain`; `conversation :: port.in`; `conversation :: port.out`; `model :: adapter.springai`; `storage :: adapter.postgres`; `storage :: adapter.postgres.jdbc`; `worker :: application`; `worker :: configuration`; `slack :: domain`; `slack :: application`; `slack :: port.out`; `slack :: adapter.sdk`; `slack :: adapter.postgres`; `slack :: configuration` |
+| `bootstrap` | `tool :: port`; `skill :: port`; `skill :: configuration`; `skill :: adapter.filesystem`; `skill :: adapter.tool`; `mcp :: configuration`; `mcp :: adapter.sdk`; `mcp :: adapter.actuator`; `conversation :: application`; `conversation :: domain`; `conversation :: port.in`; `conversation :: port.out`; `model :: adapter.springai`; `storage :: adapter.postgres`; `storage :: adapter.postgres.jdbc`; `web`; `worker :: application`; `worker :: configuration`; `slack :: domain`; `slack :: application`; `slack :: port.out`; `slack :: adapter.sdk`; `slack :: adapter.postgres`; `slack :: configuration` | `tool :: port`; `skill :: port`; `skill :: configuration`; `skill :: adapter.filesystem`; `skill :: adapter.tool`; `mcp :: configuration`; `mcp :: adapter.sdk`; `mcp :: adapter.actuator`; `conversation :: application`; `conversation :: domain`; `conversation :: port.in`; `conversation :: port.out`; `model :: adapter.springai`; `storage :: adapter.postgres`; `storage :: adapter.postgres.jdbc`; `worker :: application`; `worker :: configuration`; `slack :: domain`; `slack :: application`; `slack :: port.out`; `slack :: adapter.sdk`; `slack :: adapter.postgres`; `slack :: configuration` |
+
+`JobProcessor` resolves only the claim's PENDING selection before responses or
+summaries and reloads its committed context. ACCEPTED selections reuse stored
+bytes. Resolution shares the ordinary append uncertainty tracker: an ambiguous
+write stops the attempt without resubmission or a replacement failure batch.
 
 `storage :: adapter.postgres.jdbc` exposes only shared PostgreSQL integration
 components: `PostgresIntakeCapacity` and `PostgresUuidTypeHandler`. Slack depends
@@ -92,6 +100,50 @@ unavailable named server must not hide tools from another available server or
 prevent startup. Tool execution remains sequential in the model-provided order,
 with opaque observations passed back through the generic tool and conversation
 contracts.
+
+## Audit history and model admission
+
+`ConversationStore.loadHistory` and its paged variant remain complete audit APIs.
+Model response history, compaction input/suffix, and session usage instead use
+`ContextHistoryView` over one `loadContextHistory` snapshot. Pending/rejected skill
+command USER events and rejected-command runtime feedback are excluded by durable
+disposition, never by matching error text. Automatic tool failures remain visible.
+An accepted command's original USER identity moves logically to immediately before
+its resolving SKILL event. Range boundaries use that resolution position for both
+events, so an old audit USER can cross an earlier summary boundary once, but neither
+event is restored after its resolution is summarized. Native tool batches keep
+their original contiguous audit sequences and IDs.
+
+Usage projections include a deterministic eligibility fingerprint of sorted command
+IDs, dispositions, and resolution positions. It participates in request-shape
+matching, not body token estimation, invalidating provider checkpoints after an
+admission change. Summary candidates and retained suffixes come from the same
+eligible history snapshot; SKILL alone is not a response boundary.
+
+The library is configured explicitly through `session-agent.skills.roots` (empty
+by default), `max-file-bytes` (65536), and `max-skills` (128). Bootstrap scans
+direct child `SKILL.md` frontmatter once; normal request tool descriptions contain
+that metadata, never preloaded bodies. Each read reopens bounded current UTF-8
+bytes using no-follow directory handles; the returned hash records evidence, not
+a version lock. `/skill:name` on a newly submitted source message rereads, while
+source replay and recovery after a committed selection reuse durable history.
+Summarization has no tool definitions, and neither automatic TOOL bodies nor
+explicit SKILL bodies are pinned or restored after ordinary compaction.
+
+Enabled roots require a Java filesystem provider supporting
+`SecureDirectoryStream`; unsupported providers fail startup closed. The intended
+environment is Linux with a supporting local filesystem provider, not a guarantee
+for every Linux filesystem or mount. The read limit bounds returned bytes, not
+file-open latency: regular-file checks and no-follow opens do not provide a
+timeout against a privileged concurrent writer replacing an entry with a FIFO or
+another special file. Roots must remain trusted operator-managed content, not a
+hostile-writer boundary.
+
+Only operator-managed shared roots belong at this boundary. Service accounts and
+container mounts should be read-only, including references; all Runtime users can
+request those files. There is no shell execution, automatic home/repository skill
+discovery, or implicit import of this repository's maintenance/deployment skills.
+The [README example](../README.md) describes the on-disk definition and command.
 
 ## Test responsibilities and locations
 

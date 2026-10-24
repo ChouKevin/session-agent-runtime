@@ -34,6 +34,22 @@ class PostgresMessageIntakePostgresIT {
     private static final ModelSelection TEST_SELECTION = new ModelSelection("test", "v1:test");
     @BeforeEach void migrate() { POSTGRES.start(); flyway().clean(); flyway().migrate(); }
     @AfterEach void clean() { flyway().clean(); }
+    @Test void explicit_source_replay_precedes_full_capacity_and_new_command_classification() {
+        ConversationStore store = new PostgresConversationStore(dataSource(), Clock.systemUTC(), new ObjectMapper());
+        IncomingMessage command = new IncomingMessage("thread", "alice", "explicit", "/skill:review  question");
+        MessageReceipt receipt = receive(store, command);
+        for (int index = 0; index < 99; index++) {
+            receive(store, new IncomingMessage("other-" + index, "alice", "other-" + index, "ordinary"));
+        }
+        assertThat(store.receive(command, TEST_SELECTION,
+                model -> { throw new AssertionError("Duplicate must not select a model"); })).isEqualTo(receipt);
+        assertThatThrownBy(() -> store.receive(
+                new IncomingMessage("overflow", "alice", "overflow", "/skill:missing question"), TEST_SELECTION,
+                model -> { throw new AssertionError("Capacity rejection must precede model lookup"); }))
+                .hasMessage("Unfinished job capacity is full");
+        assertThat(new JdbcTemplate(dataSource()).queryForObject("select count(*) from skill_command", Integer.class)).isEqualTo(1);
+        assertThat(store.loadContextHistory(receipt.sessionId()).commands()).hasSize(1);
+    }
     @Test void retains_inbound_idempotency_and_rejects_conflicting_duplicate_content() {
         ConversationStore store = new PostgresConversationStore(dataSource(), Clock.fixed(Instant.parse("2026-08-31T10:00:01Z"), ZoneOffset.UTC), new ObjectMapper());
         MessageReceipt first = receive(store, new IncomingMessage("thread", "alice", "source", "first"));
