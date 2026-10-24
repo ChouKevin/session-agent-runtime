@@ -1,0 +1,20 @@
+[Unit]
+Description=Session Agent Runtime with OMP gateway
+After=network-online.target session-agent-omp-gateway.service
+Requires=session-agent-omp-gateway.service
+
+[Service]
+Type=simple
+WorkingDirectory=%h/.local/share/session-agent-runtime
+EnvironmentFile=%h/.local/share/session-agent-runtime/runtime.env
+EnvironmentFile=%h/.local/share/session-agent-runtime/gateway.env
+Environment=SPRING_CONFIG_LOCATION=file:%h/.local/share/session-agent-runtime/application.yml
+Environment=LOGGING_CONFIG=%h/.local/share/session-agent-runtime/logback.xml
+ExecStart=/usr/bin/java -jar %h/.local/share/session-agent-runtime/session-agent-runtime.jar
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=45
+UMask=0077
+
+[Install]
+WantedBy=default.target

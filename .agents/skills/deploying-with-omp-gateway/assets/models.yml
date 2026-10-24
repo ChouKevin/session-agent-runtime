@@ -1,0 +1,13 @@
+session-agent:
+  model:
+    default-model: omp-codex
+    models:
+      omp-codex:
+        provider: openai
+        model-id: openai-codex/gpt-6.1-sol
+        api-key: ${OPENAI_API_KEY}
+        base-url: http://127.0.0.1:4000/v1
+        context-window-tokens: 500000
+        max-output-tokens: 8192
+        reasoning-effort: medium
+        timeout: 180s

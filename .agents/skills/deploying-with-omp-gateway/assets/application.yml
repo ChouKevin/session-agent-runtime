@@ -1,0 +1,61 @@
+server:
+  address: 127.0.0.1
+  port: 8090
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,mcpConnections
+session-agent:
+  mcp:
+    refresh-interval: 60s
+    request-timeout: 30s
+    initial-backoff: 1s
+    maximum-backoff: 60s
+    shutdown-timeout: 5s
+  model:
+    max-model-calls-per-message: 12
+  worker:
+    concurrency: 4
+    max-unfinished-jobs: 100
+    poll-delay: 1s
+    lock-duration: 30s
+    transient-retries: 3
+    maximum-backoff: 60s
+  slack:
+    app-token: ${SLACK_APP_TOKEN:}
+    bot-token: ${SLACK_BOT_TOKEN:}
+    bot-user-id: ${SLACK_BOT_USER_ID:}
+    reconnect-delay: 5s
+    shutdown-timeout: 5s
+    delivery:
+      poll-delay: 1s
+      lease-duration: 30s
+      call-timeout: 25s
+      initial-backoff: 1s
+      maximum-backoff: 60s
+      maximum-attempts: 5
+spring:
+  config:
+    import: models.yml
+  jackson:
+    deserialization:
+      fail-on-unknown-properties: true
+  datasource:
+    url: jdbc:postgresql://127.0.0.1:15432/session_agent
+    username: session_agent
+    password: ${SESSION_AGENT_POSTGRES_PASSWORD}
+  ai:
+    retry:
+      max-attempts: 1
+    chat:
+      client:
+        tool-calling:
+          enabled: false
+mybatis-plus:
+  configuration:
+    cache-enabled: false
+    local-cache-scope: STATEMENT
+    return-instance-for-empty-row: true
+    map-underscore-to-camel-case: true
+    arg-name-based-constructor-auto-mapping: true

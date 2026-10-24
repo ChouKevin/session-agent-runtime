@@ -1,0 +1,16 @@
+[Unit]
+Description=OMP model gateway for Session Agent Runtime
+After=network-online.target session-agent-omp-broker.service
+Requires=session-agent-omp-broker.service
+
+[Service]
+Type=simple
+WorkingDirectory=%h
+Environment=OMP_AUTH_BROKER_URL=http://127.0.0.1:8765
+ExecStart=%h/.local/bin/omp auth-gateway serve --bind=127.0.0.1:4000
+Restart=on-failure
+RestartSec=5
+UMask=0077
+
+[Install]
+WantedBy=default.target

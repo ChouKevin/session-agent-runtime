@@ -199,12 +199,20 @@ Tool execution has no runtime deduplication layer. A read-only tool can run agai
 
 ## Model configuration
 
+The preferred deployment currently uses **OMP Auth Gateway**, a host Java 21
+Runtime, and Docker PostgreSQL. Start with the repository skill
+[`deploying-with-omp-gateway`](.agents/skills/deploying-with-omp-gateway/SKILL.md).
+It separates installation, model/Slack/MCP configuration, updates/rollback, and
+verification, and includes portable, non-secret templates. The example model is
+`openai-codex/gpt-6.1-sol` with `reasoning-effort: medium`; verify availability and
+capacity against your gateway catalog before deployment.
+
 The build pins Spring AI **2.1.0-M1**, a milestone/pre-release rather than a stable
 release. The upgrade retains the existing Google and OpenAI adapters; availability
 of Responses API support in the dependency does not enable it in this runtime or
 add native Codex OAuth login/refresh.
 
-`src/main/resources/models.yml` is the single model configuration source imported by `application.yml` and bundled into the built image. It contains the default Google entry and an inactive OpenAI fragment. Model credentials are environment placeholders only; do not put a key in configuration committed to a repository.
+`src/main/resources/models.yml` is the bundled model configuration imported by the default `application.yml`. It contains a Google entry and an inactive OpenAI fragment for direct-provider/container deployments. The OMP deployment skill instead selects a complete external `application.yml` with `SPRING_CONFIG_LOCATION`, importing its own `models.yml` without retaining the unused Google entry. Model credentials are environment placeholders only; do not put a key in configuration committed to a repository.
 
 To deploy OpenAI alongside the existing Google entry, edit `src/main/resources/models.yml` to enable the OpenAI fragment, provide both credentials through the deployment environment, and rebuild the image. The entry must have complete, explicit capacities. For example, the non-secret shape is:
 
@@ -245,18 +253,21 @@ Runtime `max-output-tokens` is therefore not a guaranteed provider-side output
 cap on this route. Recheck these boundaries when upgrading or replacing OMP;
 this feature does not change gateway behavior.
 
-On a workstation with the separately installed OMP-backed MVP deployment, use
-`~/.local/bin/session-agent-mvp check|start|stop|restart|status|logs`. Its private
-configuration, pinned artifacts, and operating instructions live outside the
-repository at `~/.local/share/session-agent-runtime-mvp/OPERATIONS.md`. This is a
-host-local installation, not something created by the Docker helper below.
-Do not start both deployment methods on the same ports.
+The OMP deployment skill installs host-local configuration and versioned artifacts
+outside the repository, under `$HOME/.local/share/session-agent-runtime` by
+default, with `session-agent-runtime`, `session-agent-omp-broker`, and
+`session-agent-omp-gateway` systemd user services. Existing installations must
+retain their actual service paths, environment files, Compose project, and
+database volume; use the update instructions rather than overwrite them with
+fresh-install templates. Do not start this host deployment and the Docker Runtime
+below on the same ports. OMP remains an external dependency and is not upgraded
+as part of a Runtime update.
 
 ## Database and local runtime
 
 The shipped database contract is a fresh schema applied through ordered Flyway migrations V1 through V7. V5 adds durable job progress and safe failure codes; historical terminal failures are backfilled only from an allowlisted final runtime event, not an earlier recoverable failure. Existing working rows may initially have no phase until reclaimed. V6 adds durable cancellation requests and the `CANCELLED` terminal state without rewriting existing history or progress. V7 adds durable Slack stop-command receipts and `STOP` delivery notices. Compatibility with removed pre-release schemas is not supported. Do not reset or delete the current database or its data as part of starting this version. The Compose service binds the runtime HTTP port to loopback only. Required local credentials are intentionally not committed.
 
-Conversations and tool results are retained indefinitely. This POC adds no TTL, automatic cleanup, or backup/recovery workflow. Existing temporary continuation cleanup and Docker/host log rotation remain unchanged.
+Conversations and tool results are retained indefinitely. This POC adds no TTL or automatic cleanup. The OMP deployment skill documents operator-run database backup and schema-aware rollback; it does not add automatic backup scheduling or guarantee lossless restoration. Existing temporary continuation cleanup and Docker/host log retention remain unchanged.
 
 ## Docker JSON logs
 
