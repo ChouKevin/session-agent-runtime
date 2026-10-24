@@ -201,8 +201,11 @@ Tool execution has no runtime deduplication layer. A read-only tool can run agai
 
 ## Model configuration
 
-The preferred deployment currently uses **OMP Auth Gateway**, a host Java 21
-Runtime, and Docker PostgreSQL. Start with the repository skill
+The preferred deployment uses **native OMP Auth Gateway** (`omp auth-gateway`),
+a host Java 21 Runtime, and Docker PostgreSQL. It does not use `omp-priority` or
+a custom forwarding service. This is **model-request forwarding**, not delegation
+to the OMP agent: Java Runtime still owns the agent loop, sessions, history, and
+MCP tool execution. Start with the repository skill
 [`deploying-with-omp-gateway`](.agents/skills/deploying-with-omp-gateway/SKILL.md).
 It separates installation, model/Slack/MCP configuration, updates/rollback, and
 verification, and includes portable, non-secret templates. The example model is
@@ -248,6 +251,17 @@ messages/tools into the Codex protocol, manages OAuth and transport, and can app
 protocol/history normalization and internal retries. It is not a byte-for-byte
 relay. Runtime's `modelCallCount` counts requests to that gateway, not all
 underlying Codex attempts.
+
+**Gateway compatibility requirement:** unpatched OMP 18.12.6 drops tool
+`strict: false` while translating Chat Completions into the provider protocol.
+The deployed workaround is a native OMP source build with that conversion fixed,
+not a different agent or proxy implementation. Explicit `false`/`true` must survive,
+and omitted Chat Completions strictness must retain its non-strict default.
+Use a verified fixed build or an upstream release containing the fix; do not replace
+it with an unpatched binary merely because both report the same OMP version.
+Record the source revision/patch and executable checksum, and rerun the
+[MCP model-to-tool acceptance](.agents/skills/deploying-with-omp-gateway/references/mcp.md)
+after changing the Gateway. A local patched build is not an official upstream release.
 
 For this pinned Codex route, the gateway does not forward the OpenAI
 `max_tokens`/`max_completion_tokens`, temperature, or top-p settings. Configuring
