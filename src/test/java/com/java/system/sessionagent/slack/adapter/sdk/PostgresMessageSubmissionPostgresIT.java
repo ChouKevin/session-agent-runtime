@@ -1,5 +1,7 @@
 package com.java.system.sessionagent.slack.adapter.sdk;
 
+import com.java.system.sessionagent.conversation.application.ConversationQueryService;
+import com.java.system.sessionagent.conversation.domain.ContextUsageEstimator;
 import com.java.system.sessionagent.conversation.domain.ModelCallObservation;
 import com.java.system.sessionagent.conversation.domain.IntentRequest;
 import com.java.system.sessionagent.conversation.domain.IntentResult;
@@ -221,7 +223,9 @@ class PostgresMessageSubmissionPostgresIT {
         PostgresMessageSubmission intake = intake(1);
         assertThat(intake.receive(rootIntake("T1", "C1", "1.000001")).outcome()).isEqualTo(SlackEventOutcome.ACCEPTED);
         assertThat(intake.receive(rootIntake("T1", "C1", "2.000001")).outcome()).isEqualTo(SlackEventOutcome.BUSY);
-        SlackPostgresDeliveryStore deliveryStore = new SlackPostgresDeliveryStore(dataSource());
+        SlackPostgresDeliveryStore deliveryStore = new SlackPostgresDeliveryStore(dataSource(),
+                new ConversationQueryService(new PostgresConversationStore(dataSource(), Clock.systemUTC(), new ObjectMapper()),
+                        TestConfiguredModels.withDefault("test"), () -> new ToolSnapshot(List.of()), new ContextUsageEstimator()));
 
         SlackDeliveryClaim queuedClaim = deliveryStore.claimNext("delivery-worker", Duration.ofSeconds(30), 5).orElseThrow();
         assertThat(queuedClaim.kind()).isEqualTo(SlackDeliveryKind.QUEUED);
@@ -230,6 +234,8 @@ class PostgresMessageSubmissionPostgresIT {
                 "10.000001")).isTrue();
         SlackDeliveryClaim busyClaim = deliveryStore.claimNext("delivery-worker", Duration.ofSeconds(30), 5).orElseThrow();
         assertThat(busyClaim.kind()).isEqualTo(SlackDeliveryKind.BUSY);
+        assertThat(deliveryStore.nextPart(busyClaim, Duration.ofSeconds(30)).orElseThrow().text())
+                .isEqualTo(busyClaim.postRequest().text()).doesNotContain("Context cache");
         assertThat(deliveryStore.markPartFailed(busyClaim,
                 deliveryStore.nextPart(busyClaim, Duration.ofSeconds(30)).orElseThrow(),
                 SlackDeliveryFailureCategory.PERMANENT, Optional.empty())).isTrue();

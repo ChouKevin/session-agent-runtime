@@ -366,14 +366,31 @@ the existing durable delivery/retry mechanism and are queryable by Slack source.
 
 Ordinary assistant answers are one native Slack `markdown` block with a fixed
 accessible top-level notification. Markdown is never parsed, split, repaired, or
-truncated. Answers at or below both 10,000 Unicode code points and 10,000 UTF-16
-units stay inline; exceeding either bound attaches the exact UTF-8 answer as
-`answer.md` with a fixed explanatory notice and no extra model call. Runtime
-notices (including queue, cancellation, and terminal runtime errors) stay plain text.
+truncated. The inline limit measures the composed answer, two-newline separator
+and cache footer: at most 10,000 UTF-16 units (also bounding code points).
+Overflow attaches exactly the original UTF-8 answer as `answer.md`; the
+explanatory text carries the footer, never the file. No extra model call occurs.
+Runtime notices (including queue, cancellation, and terminal runtime errors)
+stay plain text.
 Unsupported native Markdown or attachments fail delivery visibly; Runtime does not
 silently fall back to plain text, strip tables/fences, truncate, or generate a new
 summary. Native Slack support (including workspace/platform feature availability)
 must be checked separately from preserving the original Markdown value.
+
+Slack consumes the same neutral per-job cache report as HTTP, once in durable
+ANSWER part 0 for normal answers, waiting-for-input answers, terminal failures
+and cancellations. The percentage is rounded HALF_UP to one decimal directly
+from summed integer input/cached tokens; 25000 / 45000 displays `55.6%`.
+Partial data is labelled `資料不完整`, identifies the known subset, and includes
+known/total request coverage. Unknown usage displays `未提供`, no requests
+displays `未呼叫模型`, and a known zero denominator displays `不適用` without a
+numeric percentage. Partial zero-input data retains its partial/coverage labels.
+QUEUED/BUSY/STOP receipts and progress updates have no cache footer.
+The footer is prepared transactionally with delivery parts, not written to raw
+history or artifacts; retries/reclaim reuse those prepared bytes. Untracked old
+jobs remain undecorated and existing prepared deliveries are not backfilled.
+This does not change the existing remote text-post acknowledgement ambiguity.
+
 
 
 Delivery snapshots every required text/file item and all released tool artifacts

@@ -4,6 +4,9 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.java.system.sessionagent.slack.configuration.SlackProperties;
 import com.java.system.sessionagent.slack.domain.SlackAnswerPresentation;
+import com.java.system.sessionagent.slack.domain.SlackCacheReportPresentation;
+import com.java.system.sessionagent.conversation.domain.JobCacheReport;
+import com.java.system.sessionagent.conversation.domain.JobStatus;
 import com.java.system.sessionagent.slack.domain.SlackDeliveryFailureCategory;
 import com.java.system.sessionagent.slack.domain.SlackPostFailure;
 import com.java.system.sessionagent.slack.domain.SlackPostRequest;
@@ -48,8 +51,10 @@ class SlackSdkArtifactTest {
         server.start();
         String markdown = "# Report\n\n```java\nString x = \"中😀\";\n```\n\n| a | b |\n|---|---|\n| 1 | 2 |\n";
         byte[] bytes = markdown.getBytes(StandardCharsets.UTF_8);
+        String footer = SlackCacheReportPresentation.format(JobCacheReport.from(JobStatus.DONE, 3, 3, 45_000, 25_000));
+        SlackAnswerPresentation.Result presented = SlackAnswerPresentation.present(markdown, footer);
         try (SlackSdkWebApi api = localApi(server)) {
-            api.post(new SlackPostRequest("C-original", "1.000001", markdown, SlackPresentation.MARKDOWN));
+            api.post(new SlackPostRequest("C-original", "1.000001", presented.text(), presented.presentation()));
             api.post(new SlackPostRequest("C-original", "1.000001", "Queued *literally*"));
             SlackUploadTicket ticket = api.allocateUpload("answer.md", bytes.length);
             assertThat(ticket.fileId()).isEqualTo("F42");
@@ -67,7 +72,7 @@ class SlackSdkArtifactTest {
         JsonNode blocks = new ObjectMapper().readTree(post.get("blocks"));
         assertThat(blocks.size()).isOne();
         assertThat(blocks.get(0).path("type").asText()).isEqualTo("markdown");
-        assertThat(blocks.get(0).path("text").asText()).isEqualTo(markdown);
+        assertThat(blocks.get(0).path("text").asText()).isEqualTo(markdown + "\n\n" + footer).contains("55.6%");
         Map<String, String> notice = form(calls.get(1).body());
         assertThat(notice).containsEntry("text", "Queued *literally*").doesNotContainKey("blocks");
         assertThat(notice.get("mrkdwn")).as("Slack boolean encoding disables Markdown").isIn("false", "0");

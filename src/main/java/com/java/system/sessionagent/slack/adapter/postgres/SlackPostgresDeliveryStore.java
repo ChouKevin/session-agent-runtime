@@ -1,5 +1,8 @@
 package com.java.system.sessionagent.slack.adapter.postgres;
 
+import com.java.system.sessionagent.conversation.port.in.ConversationQueryPort;
+import com.java.system.sessionagent.conversation.port.in.MessageJobView;
+import com.java.system.sessionagent.slack.domain.SlackCacheReportPresentation;
 import com.java.system.sessionagent.slack.domain.SlackAnswerPresentation;
 import com.java.system.sessionagent.slack.domain.SlackDeliveryClaim;
 import com.java.system.sessionagent.slack.domain.SlackDeliveryFailureCategory;
@@ -30,14 +33,16 @@ public final class SlackPostgresDeliveryStore implements SlackDeliveryStore {
     private final SlackDatabaseMapper mapper;
     private final JdbcTemplate jdbc;
     private final TransactionTemplate transactionTemplate;
+    private final ConversationQueryPort conversations;
 
-    public SlackPostgresDeliveryStore(DataSource dataSource) {
-        this(SlackMybatisMapperFactory.create(dataSource), dataSource);
+    public SlackPostgresDeliveryStore(DataSource dataSource, ConversationQueryPort conversations) {
+        this(SlackMybatisMapperFactory.create(dataSource), dataSource, conversations);
     }
 
-    public SlackPostgresDeliveryStore(SlackDatabaseMapper mapper, DataSource dataSource) {
+    public SlackPostgresDeliveryStore(SlackDatabaseMapper mapper, DataSource dataSource, ConversationQueryPort conversations) {
         DataSource requiredDataSource = Objects.requireNonNull(dataSource, "Data source must not be null");
         this.mapper = Objects.requireNonNull(mapper, "Slack database mapper must not be null");
+        this.conversations = Objects.requireNonNull(conversations, "Conversation query port must not be null");
         this.jdbc = new JdbcTemplate(requiredDataSource);
         this.transactionTemplate = new TransactionTemplate(new DataSourceTransactionManager(requiredDataSource));
     }
@@ -133,15 +138,19 @@ public final class SlackPostgresDeliveryStore implements SlackDeliveryStore {
 
     private void prepareItems(SlackDeliveryClaim claim) {
         String text = claim.postRequest().text();
+        String footer = claim.kind() == SlackDeliveryKind.ANSWER
+                ? conversations.findJob(claim.messageJobId().orElseThrow().toString())
+                        .flatMap(MessageJobView::cacheReport).map(SlackCacheReportPresentation::format).orElse("")
+                : "";
         boolean assistantAnswer = claim.kind() == SlackDeliveryKind.ANSWER && Boolean.TRUE.equals(jdbc.queryForObject("""
                 select exists(select 1 from slack_delivery d join assistant_message a
                     on a.session_id=d.terminal_session_id and a.sequence=d.terminal_sequence where d.delivery_id=?)
                 """, Boolean.class, claim.deliveryId()));
         if (!assistantAnswer) {
-            insertText(claim.deliveryId(), 0, text, SlackPresentation.PLAIN);
+            insertText(claim.deliveryId(), 0, footer.isEmpty() ? text : text + "\n\n" + footer, SlackPresentation.PLAIN);
             return;
         }
-        SlackAnswerPresentation.Result result = SlackAnswerPresentation.present(text);
+        SlackAnswerPresentation.Result result = SlackAnswerPresentation.present(text, footer);
         insertText(claim.deliveryId(), 0, result.text(), result.presentation());
         int index = 1;
         if (result.answerFile().isPresent()) {

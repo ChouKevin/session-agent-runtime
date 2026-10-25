@@ -459,8 +459,8 @@ public class RuntimeConfiguration {
     }
 
     @Bean
-    SlackDeliveryStore slackDeliveryStore(SlackDatabaseMapper mapper, DataSource dataSource) {
-        return new SlackPostgresDeliveryStore(mapper, dataSource);
+    SlackDeliveryStore slackDeliveryStore(SlackDatabaseMapper mapper, DataSource dataSource, ConversationQueryPort conversations) {
+        return new SlackPostgresDeliveryStore(mapper, dataSource, conversations);
     }
 
     @Bean(destroyMethod = "close")

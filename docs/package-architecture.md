@@ -111,10 +111,11 @@ accuracy; model-output quality requires separate evidence review.
 
 
 Slack presents final assistant text as a whole native Markdown block (fixed
-accessible notification) or exact UTF-8 `answer.md` above the conservative
-10,000-code-point/UTF-16-unit boundary. Notices remain plain text. Typed ordered
-delivery items and the released artifact set are prepared atomically before any
-parent completion. PostgreSQL owns upload capabilities, file IDs, stages, and the
+accessible notification) or exact UTF-8 `answer.md` when answer + two-newline
+separator + cache footer exceeds 10,000 UTF-16 units (also a conservative
+code-point bound). Runtime notices remain plain text. Typed ordered delivery
+items and the released artifact set are prepared atomically before any parent
+completion. PostgreSQL owns upload capabilities, file IDs, stages, and the
 delivery claim fence. Each allocation/byte-upload/finalization is bounded by a
 renewed lease; successful stages release and reschedule rather than holding a
 database transaction over HTTP. Finalization intent is persisted first, and
@@ -478,6 +479,23 @@ neither history/checkpoint atomicity nor tool-batch recovery semantics change.
 usage, complete usage, and complete zero-input usage. Ratios use summed cached
 input divided by summed input, rounded to six decimals with HALF_UP; zero input
 has no ratio. Only DONE/CANCELLED reports are FINAL, independently of completeness.
+
+`SlackPostgresDeliveryStore` consumes the existing `ConversationQueryPort.findJob`
+projection inside the prepared-item transaction; its real query service delegates
+to `ConversationStore.readJob` on the same data source. `SlackCacheReportPresentation`
+formats that neutral report, not a separate provider query or aggregation.
+Tracked jobs receive one footer in ANSWER part 0, including waiting, failure and
+cancellation outcomes; QUEUED/BUSY/STOP and progress updates remain undecorated.
+Partial reports always identify the known subset and usage coverage, including
+when its denominator is zero. Percentages use the integer sums directly at one
+decimal HALF_UP, independently of the rounded HTTP fraction.
+The prepared footer and released artifact set survive retries/reclaim/restart
+without new accounting writes. Raw assistant/runtime history, `answer.md` and
+tool artifact bytes never contain presentation decoration. Historical untracked
+jobs and already-prepared deliveries are not regenerated or backfilled.
+Once-per-job refers to this durable composed delivery, not resolution of the
+existing remote text-post acknowledgement ambiguity.
+
 
 Spring AI retries are disabled with `spring.ai.retry.max-attempts=1`. Retrying transient provider failures is owned by the runtime's conversation-job loop, which preserves the already-counted model call and avoids duplicate history. With a direct provider connection, each reservation corresponds to a provider request; when a gateway retries internally, it does not bound the gateway's underlying provider attempts.
 

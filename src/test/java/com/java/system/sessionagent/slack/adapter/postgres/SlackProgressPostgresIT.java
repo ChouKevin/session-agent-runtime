@@ -1,5 +1,7 @@
 package com.java.system.sessionagent.slack.adapter.postgres;
 
+import com.java.system.sessionagent.conversation.application.ConversationQueryService;
+import com.java.system.sessionagent.conversation.domain.ContextUsageEstimator;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.java.system.sessionagent.conversation.TestConfiguredModels;
 import com.java.system.sessionagent.conversation.application.MessageService;
@@ -74,9 +76,10 @@ class SlackProgressPostgresIT {
         flyway.clean();
         flyway.migrate();
         jdbc = new JdbcTemplate(dataSource);
-        delivery = new SlackPostgresDeliveryStore(dataSource);
         progress = store();
         PostgresConversationStore conversations = new PostgresConversationStore(dataSource, Clock.systemUTC(), new ObjectMapper());
+        delivery = new SlackPostgresDeliveryStore(dataSource, new ConversationQueryService(conversations,
+                TestConfiguredModels.withDefault("test"), () -> new ToolSnapshot(List.of()), new ContextUsageEstimator()));
         handler = new MessageHandler("UBOT", new PostgresMessageSubmission(dataSource,
                 new MessageService(conversations, TestConfiguredModels.withDefault("test"), new NoOpConversationTelemetry()),
                 new JobCancellationService(conversations), Clock.systemUTC(), new PostgresIntakeCapacity(dataSource)));
@@ -498,7 +501,10 @@ class SlackProgressPostgresIT {
         assertThat(worker.poll()).isFalse();
         jdbc.update("update slack_question_progress set locked_until=clock_timestamp()-interval '1 second'");
         assertThat(worker.poll()).isTrue();
-        assertThat(requests).hasSize(2).allSatisfy(request -> assertThat(request.messageTs()).isEqualTo("notice"));
+        assertThat(requests).hasSize(2).allSatisfy(request -> {
+            assertThat(request.messageTs()).isEqualTo("notice");
+            assertThat(request.text()).doesNotContain("Context cache");
+        });
         assertThat(requests.get(0).text()).contains("排隊");
         assertThat(requests.get(1).text()).contains("已取消");
         assertThat(jdbc.queryForObject("select retired from slack_question_progress", Boolean.class)).isFalse();
@@ -508,7 +514,7 @@ class SlackProgressPostgresIT {
         jdbc.update("update slack_question_progress set terminal_settle_until=clock_timestamp()-interval '1 second',next_due_at=clock_timestamp()-interval '1 second'");
         assertThat(worker.poll()).isTrue();
         assertThat(requests).hasSize(3);
-        assertThat(requests.get(2).text()).contains("已取消");
+        assertThat(requests.get(2).text()).contains("已取消").doesNotContain("Context cache");
         assertThat(jdbc.queryForObject("select retired from slack_question_progress", Boolean.class)).isTrue();
     }
 
