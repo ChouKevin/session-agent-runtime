@@ -1,4 +1,35 @@
+# Local environment files; keep non-secret configuration templates.
 .env
+.env.*
+*.env
+!*.env.example
+!.env.example
+!.env.*.example
+!*.env.sample
+!.env.sample
+!.env.*.sample
+
+# Private keys and credential stores.
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+/secrets/
+/credentials/
+
+# Local IDE metadata.
+/.classpath
+/.project
+/.settings/
+/.vscode/
+/.idea/
+*.iml
+
+# Local agent execution artifacts.
+/.superpowers/
+
+# Build output and runtime diagnostics.
 .worktrees/
 build/
 reports/
