@@ -36,8 +36,8 @@ final class CacheTokenUsageExtractor {
             return Optional.empty();
         }
         Object preserved = response.getMetadata().get(OpenAiUsagePreservingClient.RAW_USAGE_METADATA);
-        Optional<String> rawJson = preserved instanceof String text ? Optional.of(text)
-                : preserved instanceof JsonValue value ? value.asString() : Optional.empty();
+        Optional<?> rawValue = preserved instanceof JsonValue value ? value.asString() : Optional.ofNullable(preserved);
+        Optional<String> rawJson = rawValue.orElse(null) instanceof String text ? Optional.of(text) : Optional.empty();
         if (rawJson.isPresent()) {
             try {
                 return extractOpenAi(ObjectMappers.jsonMapper().readValue(rawJson.get(), CompletionUsage.class));
