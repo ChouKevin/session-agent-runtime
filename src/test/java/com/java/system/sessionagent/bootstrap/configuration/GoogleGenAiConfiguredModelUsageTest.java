@@ -63,7 +63,7 @@ class GoogleGenAiConfiguredModelUsageTest {
                 new SpringAiMessagePartsHandler(GOOGLE_ROUTE_ID));
 
         ModelCallResult result = model.respond(
-                new ModelRequest(List.of(), new ToolSnapshot(List.of())), () -> 1);
+                new ModelRequest(List.of(), new ToolSnapshot(List.of()), ModelRequest.Purpose.ANSWER), () -> 1);
 
         assertThat(result.reply()).as(scenario).isEqualTo(new ModelReply.Text("Google response."));
         assertThat(result.usage()).as(scenario)

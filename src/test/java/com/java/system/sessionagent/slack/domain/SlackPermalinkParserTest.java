@@ -3,6 +3,7 @@ package com.java.system.sessionagent.slack.domain;
 import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException;
 
 class SlackPermalinkParserTest {
@@ -19,6 +20,18 @@ class SlackPermalinkParserTest {
         assertThat(root).isEqualTo(new SlackPermalink("C01ABCDEF", "1712345678.123456"));
         assertThat(uppercaseHost).isEqualTo(new SlackPermalink("C01ABCDEF", "1712345678.123456"));
         assertThat(reply).isEqualTo(new SlackPermalink("C01ABCDEF", "1712345678.123456"));
+    }
+
+    @Test
+    void resolves_a_canonical_root_permalink_with_a_self_thread_query_to_that_same_root() {
+        SlackPermalinkParser parser = new SlackPermalinkParser();
+        String link = "https://acme.slack.com/archives/C01ABCDEF/p1712345678123456"
+                + "?thread_ts=1712345678.123456&cid=C01ABCDEF";
+
+        assertThatCode(() -> {
+            assertThat(parser.parse(link)).isEqualTo(new SlackPermalink("C01ABCDEF", "1712345678.123456"));
+            parser.requireMessage(link, "C01ABCDEF", "1712345678.123456");
+        }).doesNotThrowAnyException();
     }
 
     @Test
@@ -41,7 +54,5 @@ class SlackPermalinkParserTest {
                 () -> parser.parse("https://acme.slack.com/archives/C01ABCDEF/p1712345678123456?"));
         assertThatIllegalArgumentException().isThrownBy(
                 () -> parser.parse("https://acme.slack.com/archives/C01ABCDEF/p1712345678123456?thread_ts=1712345678.123456"));
-        assertThatIllegalArgumentException().isThrownBy(
-                () -> parser.parse("https://acme.slack.com/archives/C01ABCDEF/p1712345678123456?thread_ts=1712345678.123456&cid=C01ABCDEF"));
     }
 }

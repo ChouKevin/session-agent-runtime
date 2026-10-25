@@ -191,3 +191,28 @@ Runtime update 不等於 OMP update。使用者另行要求更新 OMP 時，採�
 - 備份操作者管理的 skill 內容與私有 roots 設定，和資料庫備份分開記錄；
   SHA-256 是歷史證據，不提供舊檔版本倉庫或自動回滾。維持唯讀 mount／權限，
   不把 Runtime 維護或部署操作交給業務 skill 執行。
+- loaded 狀態只確認已提交內容，不保證遵循或報表正確。反覆出現來源／欄位／
+  coverage 錯誤時保留證據、停止盲目重試並升級模型品質／架構接受度決策，
+  不以成功上傳、已載入或更多 prompt 修飾代替驗收。
+
+## V11 continuation／技能通知升級
+
+- 依前述流程停止新提交、排空 conversation jobs 與 Slack deliveries，再停舊
+  worker、複查、備份 DB／jar／實際 private config。不得混跑舊新版本；舊 worker
+  不會遵守持久化 report-only／one-shot control。
+- 在隔離新 PostgreSQL restore 備份，用 candidate application 實際啟動 Flyway
+  V11；Slack 關閉，模型端不可呼叫，MCP 不連正式服務。核對 schema version、
+  history row/count/content、job total model calls 保持，ordinary usage 保守回填，
+  不因歷史錯誤推測等待狀態。健康成功不等於已做模型或 Slack 驗收。
+- 新版以單一 V11 migration 加入 purpose/mode/wait 與 skill attempt/progress
+  metadata；不手工改 flyway history、不跳過 constraint、不靠舊 processor
+  操作歷史 schema。出現 checksum／migration 錯誤先保留現場。
+- 等待選擇是已完成 job 的 session metadata，不是需要強制重播的卡住工作。
+  自然語言續查建立新 job；整理模式只用既有證據與本地 report tools。
+  不把 paused job 的 artifact 改成 released，也不轉移到另一個 job。
+- INTENT／WRAP_UP 已保留但結果遺失時不會自動再呼叫；安全釐清／等待通知
+  是 fail-closed 行為，不以改 DB flags 或提高 allowance 掩蓋。
+- 技能結果提交後直到精確 Slack revision ack 前仍會待送；重啟不表示重新載入。
+  正常 ack 後 badge 消失，不刪 operational rows 來製造成功顯示。
+- 回滾前確認 schema 與 binary 相容性；必要時只能按已驗證備份復原 DB。
+  不因 jar 可切回就假定 V11 可由舊 worker 安全處理。保留原 DB volume。

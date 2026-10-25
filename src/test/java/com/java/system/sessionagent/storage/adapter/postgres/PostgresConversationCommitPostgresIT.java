@@ -1,7 +1,17 @@
 package com.java.system.sessionagent.storage.adapter.postgres;
 
+import com.java.system.sessionagent.conversation.domain.IntentRequest;
+import com.java.system.sessionagent.conversation.domain.IntentResult;
+
 import com.java.system.sessionagent.skill.adapter.filesystem.FileSystemSkillLibrary;
 import com.java.system.sessionagent.skill.configuration.SkillProperties;
+import com.java.system.sessionagent.conversation.domain.WaitingChoice;
+import com.java.system.sessionagent.conversation.domain.FollowUpIntent;
+import com.java.system.sessionagent.conversation.domain.ModelCallPurpose;
+import com.java.system.sessionagent.conversation.domain.ToolRequest;
+import com.java.system.sessionagent.tool.domain.ToolName;
+import com.java.system.sessionagent.conversation.port.in.MessageJobProcessingResult;
+import java.util.concurrent.atomic.AtomicInteger;
 import com.java.system.sessionagent.conversation.domain.IncomingMessage;
 import com.java.system.sessionagent.conversation.domain.JobStatus;
 import com.java.system.sessionagent.conversation.domain.JobCancellation;
@@ -42,6 +52,12 @@ import com.java.system.sessionagent.model.adapter.springai.HistoryProjector;
 import com.java.system.sessionagent.model.adapter.springai.InvalidConversationHistoryException;
 import com.java.system.sessionagent.tool.port.ToolCatalog;
 import com.java.system.sessionagent.tool.port.ToolSnapshot;
+import com.java.system.sessionagent.tool.port.SkillReadReceipt;
+import com.java.system.sessionagent.tool.port.ToolOutput;
+import com.java.system.sessionagent.tool.port.ToolInvocation;
+import com.java.system.sessionagent.tool.port.ToolExecutionContext;
+import com.java.system.sessionagent.tool.port.ToolExecutionAuthority;
+import com.java.system.sessionagent.skill.domain.SkillResource;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -98,6 +114,85 @@ class PostgresConversationCommitPostgresIT {
     }
 
     @Test
+    void waiting_history_and_generation_roll_back_together_when_wait_persistence_fails() {
+        ConversationStore store = store();
+        MessageReceipt receipt = receive(store, new IncomingMessage("rollback-wait", "alice", "origin", "investigate"));
+        MessageWorkClaim claim = store.claimNext("worker", Duration.ofMinutes(1)).orElseThrow();
+        store.enterWrapUp(claim, NOW);
+        jdbcTemplate.execute("""
+                create function reject_waiting_choice() returns trigger language plpgsql as $$
+                begin raise exception 'injected waiting write failure'; end; $$
+                """);
+        jdbcTemplate.execute("create trigger reject_waiting_choice before insert on session_waiting_choice for each row execute function reject_waiting_choice()");
+        assertThatThrownBy(() -> store.append(claim, waitingBatch("Continue or organize?"), NOW)).isInstanceOf(RuntimeException.class);
+        assertThat(store.loadHistory(receipt.sessionId())).hasSize(1);
+        assertThat(store.readJob(receipt.messageJobId()).orElseThrow().status()).isEqualTo(JobStatus.WORKING);
+        assertThat(jdbcTemplate.queryForObject("select count(*) from session_waiting_choice", Integer.class)).isZero();
+    }
+
+    @Test
+    void clarification_preserves_source_generation_and_the_persisted_decision_cannot_be_reinterpreted() {
+        ConversationStore store = store();
+        receive(store, new IncomingMessage("clarification", "alice", "origin", "investigate"));
+        MessageWorkClaim origin = store.claimNext("worker", Duration.ofMinutes(1)).orElseThrow();
+        store.enterWrapUp(origin, NOW);
+        store.append(origin, waitingBatch("Continue or organize?"), NOW);
+        receive(store, new IncomingMessage("clarification", "alice", "ambiguous", "yes"));
+        MessageWorkClaim ambiguous = store.claimNext("worker", Duration.ofMinutes(1)).orElseThrow();
+        WaitingChoice original = store.loadJobControl(ambiguous).waiting().orElseThrow();
+        store.reserveModelCall(ambiguous, ModelCallPurpose.INTENT, 2, NOW);
+        store.resolveFollowUp(ambiguous, original, FollowUpIntent.CLARIFY, NOW);
+        assertThat(store.resolveFollowUp(ambiguous, original, FollowUpIntent.DELIVER, NOW).waiting()).contains(original);
+        store.append(ambiguous, waitingBatch("Which option did you mean?"), NOW);
+        receive(store, new IncomingMessage("clarification", "alice", "choice", "continue investigating"));
+        MessageWorkClaim next = store.claimNext("worker", Duration.ofMinutes(1)).orElseThrow();
+        assertThat(store.loadJobControl(next).waiting()).contains(original);
+        assertThat(store.loadHistory(next.sessionId()).stream().filter(AssistantMessage.class::isInstance)).hasSize(2);
+    }
+
+    @Test
+    void a_lost_waiting_append_response_leaves_a_recoverable_committed_completion_without_requery() {
+        ConversationStore actual = store();
+        ConversationStore interrupted = org.mockito.Mockito.spy(actual);
+        MessageReceipt receipt = receive(actual, new IncomingMessage("lost-wait-reply", "alice", "origin", "investigate"));
+        MessageWorkClaim claim = actual.claimNext("worker", Duration.ofMinutes(1)).orElseThrow();
+        org.mockito.Mockito.doAnswer(invocation -> {
+            invocation.callRealMethod();
+            throw ConversationStoreFailure.transientFailure(new IllegalStateException("append response lost after commit"));
+        }).when(interrupted).append(org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any());
+        AtomicInteger requests = new AtomicInteger();
+        ConversationModel model = new ConversationModel() {
+            @Override public IntentResult classifyIntent(IntentRequest request, ModelCallReservation reservation) {
+                throw new AssertionError("Unexpected intent request in ordinary-job fixture");
+            }
+            @Override public ModelRouteId routeId() { return new ModelRouteId("test"); }
+            @Override public ModelCallResult respond(ModelRequest request, ModelCallReservation reservation, Consumer<ModelUsage> observer) {
+                reservation.reserve();
+                requests.incrementAndGet();
+                return new ModelCallResult(request.purpose() == ModelRequest.Purpose.WRAP_UP
+                        ? new ModelReply.Text("Continue or organize?")
+                        : new ModelReply.UseTools(Optional.empty(), List.of(new ToolRequest(new ToolCallId("discarded"),
+                                new ToolName("opaque"), Map.of()))), Optional.empty());
+            }
+        };
+        JobProcessor processor = new JobProcessor(interrupted, TestConfiguredModels.withModel(model), () -> new ToolSnapshot(List.of()),
+                new FileSystemSkillLibrary(new SkillProperties()), Clock.systemUTC(), 1,
+                new com.java.system.sessionagent.conversation.application.MessageJobRetryPolicy(3, Duration.ofSeconds(60)),
+                new com.java.system.sessionagent.conversation.port.out.NoOpConversationTelemetry());
+        assertThat(processor.process(claim, () -> true)).isEqualTo(MessageJobProcessingResult.STATE_UNCONFIRMED);
+        assertThat(actual.readJob(receipt.messageJobId()).orElseThrow().status()).isEqualTo(JobStatus.DONE);
+        assertThat(actual.loadHistory(receipt.sessionId())).extracting(SessionMessage::role).containsExactly(MessageRole.USER, MessageRole.ASSISTANT);
+        assertThat(jdbcTemplate.queryForObject("select pending from session_waiting_choice", Boolean.class)).isTrue();
+        assertThat(actual.claimNext("recovery", Duration.ofMinutes(1))).isEmpty();
+        assertThat(requests).hasValue(2);
+    }
+
+    private static ConversationStore.MessageBatch waitingBatch(String message) {
+        return new ConversationStore.MessageBatch(List.of(new ConversationStore.AssistantData(message)), ConversationStore.JobUpdate.COMPLETE,
+                Optional.empty(), Optional.empty(), Optional.empty(), ConversationStore.CompletionDisposition.WAITING);
+    }
+
+    @Test
     void retains_message_role_model_budget_and_compaction_reason_constraints() {
         String roleChecks = jdbcTemplate.queryForObject("""
                 select string_agg(pg_get_constraintdef(constraint_record.oid), ' ')
@@ -130,7 +225,7 @@ class PostgresConversationCommitPostgresIT {
                 new ConversationStore.AssistantToolCallsData(Optional.empty(), List.of(
                         new ConversationStore.ToolCallData(new ToolCallId("prior"), "first", Map.of()))),
                 new ConversationStore.ToolObservationData(new ToolCallId("prior"), "first", Map.of("result", "prior"))),
-                ConversationStore.JobUpdate.KEEP_WORKING, Optional.of(continuation)), NOW);
+                ConversationStore.JobUpdate.KEEP_WORKING, Optional.of(continuation), ConversationStore.CompletionDisposition.NONE), NOW);
         store.requestCancellation(receipt.messageJobId());
         ModelDescriptor descriptor = new ModelDescriptor(new ModelRouteId("test"), "fake", 32_000);
         String shape = "b".repeat(64);
@@ -142,7 +237,7 @@ class PostgresConversationCommitPostgresIT {
                 new ConversationStore.RuntimeData("MODEL_UNAVAILABLE", "superseded failure")),
                 ConversationStore.JobUpdate.KEEP_WORKING, Optional.of(continuation), Optional.of(
                         new ConversationStore.UsageCheckpointData(TEST_SELECTION, descriptor, 2, 20, 10, 30, shape, 0)),
-                Optional.of(JobFailure.MODEL_UNAVAILABLE)), NOW))
+                Optional.of(JobFailure.MODEL_UNAVAILABLE), ConversationStore.CompletionDisposition.NONE), NOW))
                 .isEqualTo(JobStatus.CANCELLED);
 
         List<SessionMessage> history = store().loadHistory(receipt.sessionId());
@@ -168,7 +263,7 @@ class PostgresConversationCommitPostgresIT {
                         new ConversationStore.ToolCallData(new ToolCallId("call-2"), "mcp_entries", java.util.Map.of()))),
                 new ConversationStore.ToolObservationData(new ToolCallId("call-1"), "mcp_lookup", java.util.Map.of("isError", false, "result", java.util.Map.of("hits", List.of(Map.of("id", 7))))),
                 new ConversationStore.ToolObservationData(new ToolCallId("call-2"), "mcp_entries", java.util.Map.of("isError", true, "result", Map.of("failure", Map.of("code", "TOOL_TIMEOUT"))))),
-                ConversationStore.JobUpdate.COMPLETE), NOW);
+                ConversationStore.JobUpdate.COMPLETE, ConversationStore.CompletionDisposition.NONE), NOW);
 
         ConversationStore restartedStore = store();
         List<com.java.system.sessionagent.conversation.domain.SessionMessage> history = restartedStore.loadHistory(receipt.sessionId());
@@ -206,7 +301,7 @@ class PostgresConversationCommitPostgresIT {
                 new ConversationStore.ToolObservationData(new ToolCallId("call-page"), "mcp_lookup",
                         Map.of("result", List.of(Map.of("id", 7)))),
                 new ConversationStore.RuntimeData("MODEL_UNAVAILABLE", "Runtime model is unavailable.")),
-                ConversationStore.JobUpdate.COMPLETE), NOW);
+                ConversationStore.JobUpdate.COMPLETE, ConversationStore.CompletionDisposition.NONE), NOW);
         insertMalformedAssistantCalls(receipt, claim, 6, "[1]");
 
         Optional<List<SessionMessage>> page = store().loadHistoryPage(receipt.sessionId(), 0, 5);
@@ -282,7 +377,7 @@ class PostgresConversationCommitPostgresIT {
                 com.java.system.sessionagent.conversation.domain.ContextCompaction.Reason.THRESHOLD, "first summary", new SessionSequence(1),
                 descriptor, "a".repeat(64), 100, 10), NOW);
         store.append(firstClaim, new ConversationStore.MessageBatch(List.of(new ConversationStore.AssistantData("first answer")),
-                ConversationStore.JobUpdate.COMPLETE), NOW);
+                ConversationStore.JobUpdate.COMPLETE, ConversationStore.CompletionDisposition.ANSWER), NOW);
 
         MessageReceipt second = receive(store, new IncomingMessage("thread", "alice", "source-2", "second"));
         MessageWorkClaim secondClaim = store.claimNext("worker", Duration.ofSeconds(30)).orElseThrow();
@@ -290,7 +385,7 @@ class PostgresConversationCommitPostgresIT {
                 com.java.system.sessionagent.conversation.domain.ContextCompaction.Reason.THRESHOLD, "second summary", new SessionSequence(2),
                 descriptor, "b".repeat(64), 100, 10), NOW.plusSeconds(1));
         store.append(secondClaim, new ConversationStore.MessageBatch(List.of(new ConversationStore.AssistantData("second answer")),
-                ConversationStore.JobUpdate.COMPLETE), NOW.plusSeconds(1));
+                ConversationStore.JobUpdate.COMPLETE, ConversationStore.CompletionDisposition.ANSWER), NOW.plusSeconds(1));
 
         ConversationStore restarted = store();
         assertThat(restarted.loadHistory(first.sessionId())).extracting(message -> message.sequence().value())
@@ -316,6 +411,9 @@ class PostgresConversationCommitPostgresIT {
         ModelDescriptor descriptor = new ModelDescriptor(new ModelRouteId("google-genai"), "gemini-3.1-flash-lite", 1_048_576);
         ModelUsage usage = new ModelUsage(50, 20, 70, true);
         ConversationModel model = new ConversationModel() {
+            @Override public IntentResult classifyIntent(IntentRequest request, ModelCallReservation reservation) {
+                throw new AssertionError("Unexpected intent request in ordinary-job fixture");
+            }
             @Override public ModelRouteId routeId() { return descriptor.routeId(); }
             @Override public ModelDescriptor descriptor() { return descriptor; }
             @Override public String systemPrompt() { return "Runtime system prompt"; }
@@ -337,10 +435,14 @@ class PostgresConversationCommitPostgresIT {
 
         ConversationStore restartedStore = store();
         List<SessionMessage> history = restartedStore.loadHistory(receipt.sessionId());
-        String fingerprint = new ContextUsageEstimator().requestShapeFingerprint(new ContextUsageProjection(descriptor, model.systemPrompt(),
-                List.of(), history.subList(0, 1), 0, Optional.empty(),
-                new ContextHistoryView(
-                        restartedStore.loadContextHistory(receipt.sessionId())).eligibilityFingerprint()));
+        ContextUsageEstimator estimator = new ContextUsageEstimator();
+        String fingerprint;
+        try (ToolSnapshot tools = new ToolSnapshot(List.of())) {
+            fingerprint = estimator.requestShapeFingerprint(new ContextUsageProjection(descriptor, model.systemPrompt(),
+                    List.of(), history.subList(0, 1), 0, Optional.empty(),
+                    estimator.eligibilityFingerprint(new ContextHistoryView(
+                            restartedStore.loadContextHistory(receipt.sessionId())).eligibilityFingerprint(), tools)));
+        }
         assertThat(history).extracting(message -> message.sequence().value()).containsExactly(1L, 2L);
         assertThat(history.get(1)).isInstanceOfSatisfying(AssistantMessage.class,
                 assistant -> assertThat(assistant.message()).isEqualTo("done"));
@@ -365,7 +467,7 @@ class PostgresConversationCommitPostgresIT {
                 new ConversationStore.AssistantToolCallsData(java.util.Optional.empty(), List.of(
                         new ConversationStore.ToolCallData(new ToolCallId("call-1"), "mcp_lookup", Map.of()))),
                 new ConversationStore.ToolObservationData(new ToolCallId("call-1"), "mcp_lookup", Map.of("isError", false, "result", Map.of()))),
-                ConversationStore.JobUpdate.KEEP_WORKING, java.util.Optional.of(continuation)), NOW);
+                ConversationStore.JobUpdate.KEEP_WORKING, java.util.Optional.of(continuation), ConversationStore.CompletionDisposition.NONE), NOW);
 
         ConversationStore reconstructedStore = store();
         assertThat(reconstructedStore.loadContinuations(claim)).containsOnlyKeys(new com.java.system.sessionagent.conversation.domain.SessionSequence(2));
@@ -373,7 +475,7 @@ class PostgresConversationCommitPostgresIT {
                 .isEqualTo(continuation);
 
         reconstructedStore.append(claim, new ConversationStore.MessageBatch(List.of(new ConversationStore.AssistantData("done")),
-                ConversationStore.JobUpdate.COMPLETE), NOW.plusSeconds(1));
+                ConversationStore.JobUpdate.COMPLETE, ConversationStore.CompletionDisposition.ANSWER), NOW.plusSeconds(1));
 
         assertThat(reconstructedStore.loadContinuations(claim)).isEmpty();
         assertThat(reconstructedStore.loadHistory(receipt.sessionId())).extracting(message -> message.role())
@@ -398,7 +500,7 @@ class PostgresConversationCommitPostgresIT {
             }
             Future<?> append = executor.submit(() -> store.append(claim,
                     new ConversationStore.MessageBatch(List.of(new ConversationStore.AssistantData("still working")),
-                            ConversationStore.JobUpdate.KEEP_WORKING), NOW));
+                            ConversationStore.JobUpdate.KEEP_WORKING, ConversationStore.CompletionDisposition.NONE), NOW));
             waitForSessionLock();
             try (PreparedStatement statement = connection.prepareStatement("select pg_sleep(1.1)")) {
                 statement.executeQuery();
@@ -422,7 +524,7 @@ class PostgresConversationCommitPostgresIT {
         MessageReceipt receipt = receive(store, new IncomingMessage("thread", "alice", "source", "hello"));
         MessageWorkClaim claim = store.claimNext("worker", Duration.ofSeconds(30)).orElseThrow();
         store.append(claim, new ConversationStore.MessageBatch(List.of(new ConversationStore.AssistantData("original")),
-                ConversationStore.JobUpdate.COMPLETE), NOW);
+                ConversationStore.JobUpdate.COMPLETE, ConversationStore.CompletionDisposition.ANSWER), NOW);
 
         assertThatThrownBy(() -> jdbcTemplate.update("update assistant_message set message = 'changed'"))
                 .isInstanceOf(RuntimeException.class);
@@ -457,7 +559,7 @@ class PostgresConversationCommitPostgresIT {
                 new ConversationStore.ToolObservationData(new ToolCallId("call-2"), "mcp_entries", Map.of("isError", false, "result", Map.of()))),
                 ConversationStore.JobUpdate.KEEP_WORKING, java.util.Optional.of(continuation), java.util.Optional.of(
                         new ConversationStore.UsageCheckpointData(claim.modelSelection(), descriptor, 1, 50, 20, 70,
-                                "a".repeat(64), 0))), NOW)).isInstanceOf(RuntimeException.class);
+                                "a".repeat(64), 0)), ConversationStore.CompletionDisposition.NONE), NOW)).isInstanceOf(RuntimeException.class);
 
         assertThat(jdbcTemplate.queryForObject("select count(*) from session_message", Integer.class)).isEqualTo(1);
         assertThat(jdbcTemplate.queryForObject("select count(*) from assistant_message", Integer.class)).isZero();
@@ -468,6 +570,107 @@ class PostgresConversationCommitPostgresIT {
         assertThat(jdbcTemplate.queryForObject("select next_sequence from conversation_session", Long.class)).isEqualTo(2L);
         assertThat(jdbcTemplate.queryForObject("select status from message_job where message_job_id = ?", String.class,
                 java.util.UUID.fromString(receipt.messageJobId().value()))).isEqualTo("WORKING");
+    }
+
+    @Test
+    void automatic_skill_outcome_rolls_back_with_a_later_observation_and_retries_with_the_same_atomic_link() {
+        ConversationStore store = store();
+        MessageReceipt receipt = receive(store, new IncomingMessage("thread", "alice", "source", "read instructions"));
+        MessageWorkClaim claim = store.claimNext("worker", Duration.ofMinutes(1)).orElseThrow();
+        ToolOutput output = automaticSkillOutput(store, claim);
+        ConversationStore.MessageBatch batch = skillBatch(output);
+        jdbcTemplate.execute("""
+                create function fail_after_skill() returns trigger language plpgsql as $$
+                begin if new.tool_call_id='later' then raise exception 'later result failed'; end if; return new; end;
+                $$;
+                create trigger fail_after_skill before insert on tool_observation
+                    for each row execute function fail_after_skill();
+                """);
+
+        assertThatThrownBy(() -> store.append(claim, batch, NOW)).isInstanceOf(ConversationStoreFailure.class);
+        assertThat(store.loadHistory(receipt.sessionId())).hasSize(1);
+        assertThat(jdbcTemplate.queryForObject("select status from skill_load_attempt", String.class)).isEqualTo("STARTED");
+        assertThat(jdbcTemplate.queryForObject("select history_sequence from skill_load_attempt", Long.class)).isNull();
+        jdbcTemplate.execute("drop trigger fail_after_skill on tool_observation");
+        jdbcTemplate.execute("drop function fail_after_skill()");
+
+        store.append(claim, batch, NOW);
+        assertThat(jdbcTemplate.queryForObject("""
+                select count(*) from skill_load_attempt load join session_message message
+                    on message.session_id=load.session_id and message.sequence=load.history_sequence
+                where load.status='COMMITTED_SUCCESS' and message.role='TOOL'
+                    and message.message_job_id=load.message_job_id
+                """, Integer.class)).isOne();
+        assertThat(store().loadHistory(receipt.sessionId())).hasSize(4);
+        assertThat(jdbcTemplate.queryForObject("select output::text from tool_observation where tool_call_id='skill'", String.class))
+                .doesNotContain(output.skillReadReceipt().orElseThrow().attemptId().toString(), "skillReadReceipt");
+    }
+
+    @Test
+    void cancellation_preserves_a_truly_committed_automatic_skill_outcome_but_rejects_new_starts() {
+        ConversationStore store = store();
+        MessageReceipt receipt = receive(store, new IncomingMessage("thread", "alice", "source", "read instructions"));
+        MessageWorkClaim claim = store.claimNext("worker", Duration.ofMinutes(1)).orElseThrow();
+        ToolOutput output = automaticSkillOutput(store, claim);
+        store.requestCancellation(receipt.messageJobId());
+
+        assertThat(store.append(claim, skillBatch(output), NOW)).isEqualTo(JobStatus.CANCELLED);
+        assertThat(jdbcTemplate.queryForObject("select status from skill_load_attempt", String.class)).isEqualTo("COMMITTED_SUCCESS");
+        assertThat(jdbcTemplate.queryForObject("select history_sequence from skill_load_attempt", Long.class)).isNotNull();
+        assertThat(store.loadHistory(receipt.sessionId())).anyMatch(ToolObservation.class::isInstance);
+        assertThatThrownBy(() -> new PostgresSkillLoadObserver(dataSource()).started(
+                new ToolInvocation(new ToolExecutionContext(UUID.fromString(claim.sessionId().value()),
+                        UUID.fromString(claim.messageJobId().value()), 1, 1),
+                        new ToolExecutionAuthority(claim.workerId(), claim.claimNumber())), "skill://review"))
+                .isInstanceOf(StaleWorkClaimException.class);
+        assertThat(jdbcTemplate.queryForObject("select count(*) from skill_load_attempt", Integer.class)).isOne();
+    }
+
+    private ToolOutput automaticSkillOutput(ConversationStore store, MessageWorkClaim claim) {
+        store.reserveModelCall(claim, ModelCallPurpose.EXECUTION, 12, NOW);
+        ToolInvocation invocation = new ToolInvocation(new ToolExecutionContext(UUID.fromString(claim.sessionId().value()),
+                UUID.fromString(claim.messageJobId().value()), 1, 0),
+                new ToolExecutionAuthority(claim.workerId(), claim.claimNumber()));
+        UUID attempt = new PostgresSkillLoadObserver(dataSource()).started(invocation, "skill://review");
+        SkillResource resource = new SkillResource("skill://review", "a".repeat(64), "PRIVATE_SKILL_BODY");
+        SkillReadReceipt receipt = SkillReadReceipt.succeeded(attempt, resource.uri(), resource.uri(), resource.sha256());
+        return new ToolOutput(false, Map.of("uri", resource.uri(), "sha256", resource.sha256(), "content", resource.content()),
+                Optional.empty(), Optional.of(receipt));
+    }
+
+    private static ConversationStore.MessageBatch skillBatch(ToolOutput output) {
+        ToolCallId skill = new ToolCallId("skill");
+        ToolCallId later = new ToolCallId("later");
+        return new ConversationStore.MessageBatch(List.of(
+                new ConversationStore.AssistantToolCallsData(Optional.empty(), List.of(
+                        new ConversationStore.ToolCallData(skill, "readSkill", Map.of("uri", "skill://review")),
+                        new ConversationStore.ToolCallData(later, "opaque", Map.of()))),
+                new ConversationStore.ToolObservationData(skill, "readSkill", output.asStructuredValue(), Optional.empty(), output.skillReadReceipt()),
+                new ConversationStore.ToolObservationData(later, "opaque", Map.of("result", "ordinary result"))),
+                ConversationStore.JobUpdate.KEEP_WORKING, ConversationStore.CompletionDisposition.NONE);
+    }
+
+    @Test
+    void automatic_receipt_cannot_be_attached_to_a_different_tool_position() {
+        ConversationStore store = store();
+        MessageReceipt receipt = receive(store, new IncomingMessage("thread", "alice", "source", "read instructions"));
+        MessageWorkClaim claim = store.claimNext("worker", Duration.ofMinutes(1)).orElseThrow();
+        ToolOutput output = automaticSkillOutput(store, claim);
+        ToolCallId ordinary = new ToolCallId("ordinary");
+        ToolCallId skill = new ToolCallId("skill");
+        ConversationStore.MessageBatch swapped = new ConversationStore.MessageBatch(List.of(
+                new ConversationStore.AssistantToolCallsData(Optional.empty(), List.of(
+                        new ConversationStore.ToolCallData(ordinary, "opaque", Map.of()),
+                        new ConversationStore.ToolCallData(skill, "readSkill", Map.of("uri", "skill://review")))),
+                new ConversationStore.ToolObservationData(ordinary, "opaque", Map.of("result", "ordinary")),
+                new ConversationStore.ToolObservationData(skill, "readSkill", output.asStructuredValue(),
+                        Optional.empty(), output.skillReadReceipt())),
+                ConversationStore.JobUpdate.KEEP_WORKING, ConversationStore.CompletionDisposition.NONE);
+
+        assertThatThrownBy(() -> store.append(claim, swapped, NOW)).isInstanceOf(ConversationStoreFailure.class);
+        assertThat(store.loadHistory(receipt.sessionId())).hasSize(1);
+        assertThat(jdbcTemplate.queryForObject("select status from skill_load_attempt", String.class)).isEqualTo("STARTED");
+        assertThat(jdbcTemplate.queryForObject("select history_sequence from skill_load_attempt", Long.class)).isNull();
     }
 
     @Test

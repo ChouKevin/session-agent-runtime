@@ -4,6 +4,7 @@ import com.baomidou.mybatisplus.annotation.IdType;
 import com.baomidou.mybatisplus.annotation.TableId;
 import com.baomidou.mybatisplus.annotation.TableName;
 import com.baomidou.mybatisplus.core.mapper.BaseMapper;
+import com.java.system.sessionagent.tool.port.SkillReadReceipt;
 import org.apache.ibatis.annotations.Delete;
 import org.apache.ibatis.annotations.Insert;
 import org.apache.ibatis.annotations.Mapper;
@@ -26,6 +27,43 @@ import java.util.UUID;
  */
 @Mapper
 public interface PostgresConversationMapper extends BaseMapper<PostgresConversationMapper.MessageJobEntity> {
+
+    @Select(value = """
+            insert into skill_load_attempt(attempt_id,message_job_id,session_id,source,skill_name,resource_uri,resource_kind,
+                worker_id,claim_number,model_call_number,tool_ordinal)
+            select #{attemptId},#{jobId},#{sessionId},#{source},#{resource.name},#{resource.uri},#{resource.kind},
+                #{workerId},#{claimNumber},#{modelCall,jdbcType=BIGINT},#{toolOrdinal,jdbcType=INTEGER}
+            from message_job job where job.message_job_id=#{jobId}
+                and (#{source}='EXPLICIT' or job.model_calls=#{modelCall,jdbcType=BIGINT})
+            on conflict (message_job_id,source,claim_number,model_call_number,tool_ordinal)
+            do update set attempt_id=skill_load_attempt.attempt_id
+            returning attempt_id
+            """, affectData = true)
+    @Options(flushCache = Options.FlushCachePolicy.TRUE, useCache = false)
+    List<UUID> startSkillLoad(@Param("attemptId") UUID attemptId, @Param("jobId") UUID jobId,
+            @Param("sessionId") UUID sessionId, @Param("source") String source,
+            @Param("resource") SkillReadReceipt.Resource resource,
+            @Param("workerId") String workerId, @Param("claimNumber") long claimNumber,
+            @Param("modelCall") Long modelCall, @Param("toolOrdinal") Integer toolOrdinal);
+
+    @Update("""
+            update skill_load_attempt load set status=#{status},history_sequence=#{sequence},sha256=#{sha256},
+                error_code=#{errorCode},finished_at=clock_timestamp()
+            where attempt_id=#{receipt.attemptId} and message_job_id=#{jobId} and session_id=#{sessionId}
+                and worker_id=#{workerId} and claim_number=#{claimNumber} and status='STARTED'
+                and skill_name=#{receipt.skillName} and resource_uri=#{receipt.resourceUri}
+                and resource_kind=#{receipt.resourceKind} and source=#{source}
+                and (#{source}='EXPLICIT' or (tool_ordinal=#{toolOrdinal}
+                    and model_call_number=(select model_calls from message_job where message_job_id=#{jobId})))
+            """)
+    int commitSkillLoad(@Param("receipt") SkillReadReceipt receipt,
+            @Param("jobId") UUID jobId, @Param("sessionId") UUID sessionId, @Param("workerId") String workerId,
+            @Param("claimNumber") long claimNumber, @Param("source") String source, @Param("toolOrdinal") int toolOrdinal,
+            @Param("sequence") long sequence, @Param("status") String status, @Param("sha256") String sha256,
+            @Param("errorCode") String errorCode);
+
+    @Update("update message_job set completion_disposition=#{disposition} where message_job_id=#{jobId}")
+    int setCompletionDisposition(@Param("jobId") UUID jobId, @Param("disposition") String disposition);
 
     @Insert("""
             insert into skill_command(message_job_id, session_id, requested_name, question)
@@ -389,19 +427,75 @@ public interface PostgresConversationMapper extends BaseMapper<PostgresConversat
 
     @Select(value = """
             update message_job set model_calls = model_calls + 1,
+                ordinary_calls = ordinary_calls + case when #{ordinary} then 1 else 0 end,
+                intent_attempted = intent_attempted or #{purpose} = 'INTENT',
+                wrap_attempted = wrap_attempted or #{purpose} = 'WRAP_UP',
+                control_stage = case when #{purpose} = 'WRAP_UP' then 'WRAP_UP'
+                    when #{purpose} = 'INTENT' then 'INTENT' else 'EXECUTION' end,
                 phase = 'MODEL_CALL', phase_started_at = #{startedAt}, current_tool_name = null, failure_code = null
-            where message_job_id = #{messageJobId} and session_id = #{sessionId} and status = 'WORKING' and worker_id = #{workerId}
-              and claim_number = #{claimNumber} and locked_until > clock_timestamp() and model_calls < #{maxModelCalls}
-            returning model_calls
+            where message_job_id = #{messageJobId}
+            returning model_calls as total_ordinal, ordinary_calls as execution_ordinal
             """, affectData = true)
     @Options(flushCache = Options.FlushCachePolicy.TRUE, useCache = false)
-    List<Integer> reserveModelCall(
+    List<ReservationRow> reserveModelCall(
             @Param("messageJobId") UUID messageJobId,
-            @Param("sessionId") UUID sessionId,
-            @Param("workerId") String workerId,
-            @Param("claimNumber") long claimNumber,
-            @Param("maxModelCalls") int maxModelCalls,
+            @Param("purpose") String purpose,
+            @Param("ordinary") boolean ordinary,
             @Param("startedAt") OffsetDateTime startedAt);
+
+    record ReservationRow(int totalOrdinal, int executionOrdinal) {}
+
+    @Select("""
+            select job.execution_mode, job.control_stage, job.ordinary_calls, job.intent_attempted, job.wrap_attempted,
+                job.follow_up_intent, job.user_message_sequence, message.created_at, detail.participant_id, detail.message
+            from message_job job
+            join session_message message on message.session_id = job.session_id and message.sequence = job.user_message_sequence
+            join user_message detail on detail.session_id = message.session_id and detail.sequence = message.sequence
+            where job.message_job_id = #{messageJobId}
+            """)
+    @Options(flushCache = Options.FlushCachePolicy.FALSE, useCache = false)
+    ControlRow loadJobControl(@Param("messageJobId") UUID messageJobId);
+
+    record ControlRow(String executionMode, String controlStage, int ordinaryCalls,
+                      boolean intentAttempted, boolean wrapAttempted, String followUpIntent,
+                      long userMessageSequence, OffsetDateTime createdAt, String participantId, String message) {}
+
+    @Select("select origin_job, response_sequence, generation from session_waiting_choice where session_id = #{sessionId} and pending for update")
+    @Options(flushCache = Options.FlushCachePolicy.FALSE, useCache = false)
+    List<WaitingRow> loadWaiting(@Param("sessionId") UUID sessionId);
+
+    record WaitingRow(UUID originJob, long responseSequence, long generation) {}
+
+    @Update("""
+            update session_waiting_choice set pending = false
+            where session_id = #{sessionId} and pending and origin_job = #{originJob}
+                and response_sequence = #{sequence} and generation = #{generation}
+            """)
+    int consumeWaiting(@Param("sessionId") UUID sessionId, @Param("originJob") UUID originJob,
+                       @Param("sequence") long sequence, @Param("generation") long generation);
+
+    @Update("update session_waiting_choice set pending = false where session_id = #{sessionId} and pending")
+    int clearWaiting(@Param("sessionId") UUID sessionId);
+
+    @Update("""
+            update message_job set execution_mode = #{mode}, control_stage = #{stage}, follow_up_intent = #{intent}
+            where message_job_id = #{messageJobId}
+            """)
+    int resolveFollowUp(@Param("messageJobId") UUID messageJobId, @Param("mode") String mode,
+                        @Param("stage") String stage, @Param("intent") String intent);
+
+    @Update("update message_job set control_stage = 'WRAP_UP' where message_job_id = #{messageJobId}")
+    int enterWrapUp(@Param("messageJobId") UUID messageJobId);
+
+    @Insert("""
+            insert into session_waiting_choice(session_id, origin_job, response_sequence, generation, pending)
+            values (#{sessionId}, #{messageJobId}, #{sequence}, 1, true)
+            on conflict (session_id) do update set origin_job = excluded.origin_job,
+                response_sequence = excluded.response_sequence,
+                generation = session_waiting_choice.generation + 1, pending = true
+            """)
+    int recordWaiting(@Param("sessionId") UUID sessionId, @Param("messageJobId") UUID messageJobId,
+                      @Param("sequence") long sequence);
 
     @Update("""
             update message_job set phase = #{phase}, phase_started_at = #{startedAt},

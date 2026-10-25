@@ -5,6 +5,11 @@ import com.java.system.sessionagent.tool.port.ArtifactReceipt;
 import com.java.system.sessionagent.artifact.port.ArtifactStore;
 import com.java.system.sessionagent.tool.domain.ToolName;
 import com.java.system.sessionagent.tool.port.ToolCatalog;
+import com.java.system.sessionagent.tool.port.ToolBinding;
+import com.java.system.sessionagent.tool.port.ToolCapability;
+import com.java.system.sessionagent.tool.port.ToolDefinition;
+import com.java.system.sessionagent.tool.port.CompositeToolCatalog;
+import java.util.Set;
 import com.java.system.sessionagent.tool.port.ToolInvocation;
 import com.java.system.sessionagent.tool.port.ToolOutput;
 import com.java.system.sessionagent.tool.port.ToolSnapshot;
@@ -50,6 +55,29 @@ class ArtifactToolCatalogTest {
             assertThat(saved.artifactReceipt()).isPresent();
             assertThat(saved.asStructuredValue()).containsOnlyKeys("isError", "result");
             assertThat(new ToolOutput(false, saved.result()).artifactReceipt()).isEmpty();
+        }
+    }
+
+    @Test
+    void only_first_party_generation_remains_invokable_through_catalog_wrappers_in_report_only_mode() {
+        RecordingStore store = new RecordingStore();
+        AtomicInteger sourceCalls = new AtomicInteger();
+        ToolBinding source = new ToolBinding(ToolDefinition.fromExposedName("createCsvLookalike", "Opaque external tool", Map.of()),
+                (context, arguments) -> {
+                    sourceCalls.incrementAndGet();
+                    return new ToolOutput(false, Map.of());
+                }, ToolCapability.ORDINARY);
+        ToolCatalog base = new CompositeToolCatalog(List.of(() -> new ToolSnapshot(List.of(source))));
+        ArtifactToolCatalog catalog = new ArtifactToolCatalog(base, store, (session, job) -> true);
+        try (ToolSnapshot snapshot = catalog.snapshot(invocation().context().sessionId().toString(),
+                invocation().context().messageJobId().toString()).restrictedTo(Set.of(ToolCapability.REPORT_GENERATION))) {
+            assertThat(snapshot.definitions()).extracting(definition -> definition.name().value())
+                    .containsExactly("createMarkdownReport", "createCsv");
+            assertThat(snapshot.invoke(invocation(), new ToolName("createCsvLookalike"), Map.of()).isError()).isTrue();
+            assertThat(snapshot.invoke(invocation(), new ToolName("createCsv"),
+                    Map.of("title", "Evidence", "columns", List.of("status"), "rows", List.of(List.of("unknown")))).isError()).isFalse();
+            assertThat(sourceCalls).hasValue(0);
+            assertThat(store.calls).hasValue(1);
         }
     }
 

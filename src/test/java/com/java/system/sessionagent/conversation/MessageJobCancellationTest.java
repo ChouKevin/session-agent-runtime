@@ -1,5 +1,12 @@
 package com.java.system.sessionagent.conversation;
 
+import com.java.system.sessionagent.conversation.domain.IntentRequest;
+import com.java.system.sessionagent.conversation.domain.IntentResult;
+
+import com.java.system.sessionagent.conversation.domain.ModelCallPurpose;
+import com.java.system.sessionagent.conversation.domain.ModelCallReservationResult;
+import com.java.system.sessionagent.conversation.domain.JobControl;
+
 import com.java.system.sessionagent.conversation.domain.AssistantMessage;
 import com.java.system.sessionagent.conversation.domain.ContextCompactionRequest;
 import com.java.system.sessionagent.conversation.domain.JobCancellation;
@@ -34,7 +41,6 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.OptionalInt;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
@@ -56,6 +62,32 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class MessageJobCancellationTest {
+    @Test
+    void cancellation_after_wrap_response_prevents_a_waiting_prompt() {
+        ConversationStore store = mockStore();
+        MessageWorkClaim claim = claim();
+        AtomicBoolean cancelled = new AtomicBoolean();
+        when(store.isCancellationRequested(claim)).thenAnswer(invocation -> cancelled.get());
+        JobControl control = new JobControl(JobControl.Mode.NORMAL, JobControl.Stage.WRAP_UP, user(), Optional.empty(), 1, false, false);
+        when(store.loadJobControl(claim)).thenReturn(control);
+        when(store.enterWrapUp(eq(claim), any())).thenReturn(control);
+        when(store.loadContextHistory(claim.sessionId())).thenReturn(contextHistory(List.of(user())));
+        when(store.reserveModelCall(eq(claim), eq(ModelCallPurpose.WRAP_UP), eq(1), any()))
+                .thenReturn(new ModelCallReservationResult.Reserved(2, 1));
+        doReturn(JobStatus.CANCELLED).when(store).append(eq(claim), any(), any());
+        ConversationModel model = model(TEST_ROUTE_ID, (request, reservation, usage) -> {
+            reservation.reserve();
+            cancelled.set(true);
+            return result(new ModelReply.Text("Do not publish this waiting question"));
+        });
+
+        assertThat(service(store, model, catalog(), 1).process(claim, () -> true)).isEqualTo(MessageJobProcessingResult.CANCELLED);
+        ConversationStore.MessageBatch batch = capturedBatch(store, claim);
+        assertCancellation(batch);
+        assertThat(batch.completionDisposition()).isEqualTo(ConversationStore.CompletionDisposition.NONE);
+        assertThat(batch.messages()).noneMatch(ConversationStore.AssistantData.class::isInstance);
+    }
+
 
     @Test
     void cancellation_winning_model_reservation_prevents_the_provider_request() {
@@ -64,7 +96,7 @@ class MessageJobCancellationTest {
         AtomicBoolean cancelled = new AtomicBoolean();
         when(store.isCancellationRequested(claim)).thenAnswer(invocation -> cancelled.get());
         when(store.loadContextHistory(claim.sessionId())).thenReturn(contextHistory(List.of(user())));
-        when(store.reserveModelCall(eq(claim), eq(2), any())).thenAnswer(invocation -> {
+        when(store.reserveModelCall(eq(claim), any(ModelCallPurpose.class), eq(2), any())).thenAnswer(invocation -> {
             cancelled.set(true);
             throw new JobCancellationRequestedException();
         });
@@ -94,7 +126,7 @@ class MessageJobCancellationTest {
 
         verify(model, never()).routeId();
         verify(model, never()).respond(any(), any(), any());
-        verify(store, never()).reserveModelCall(any(), any(Integer.class), any());
+        verify(store, never()).reserveModelCall(any(), any(ModelCallPurpose.class), any(Integer.class), any());
         assertCancellation(capturedBatch(store, claim));
     }
 
@@ -106,7 +138,7 @@ class MessageJobCancellationTest {
         AtomicBoolean cancelled = new AtomicBoolean();
         when(store.isCancellationRequested(claim)).thenAnswer(invocation -> cancelled.get());
         when(store.loadContextHistory(claim.sessionId())).thenReturn(contextHistory(List.of(user())));
-        when(store.reserveModelCall(eq(claim), eq(2), any())).thenReturn(OptionalInt.of(1));
+        when(store.reserveModelCall(eq(claim), any(ModelCallPurpose.class), eq(2), any())).thenReturn(new ModelCallReservationResult.Reserved(1, 1));
         doReturn(JobStatus.CANCELLED).when(store).append(eq(claim), any(), any());
         AtomicInteger requests = new AtomicInteger();
         ConversationModel model = model(TEST_ROUTE_ID, (request, reservation, usage) -> {
@@ -136,7 +168,7 @@ class MessageJobCancellationTest {
         List<String> invoked = new ArrayList<>();
         when(store.isCancellationRequested(claim)).thenAnswer(invocation -> cancelled.get());
         when(store.loadContextHistory(claim.sessionId())).thenReturn(contextHistory(List.of(user())));
-        when(store.reserveModelCall(eq(claim), eq(2), any())).thenReturn(OptionalInt.of(1));
+        when(store.reserveModelCall(eq(claim), any(ModelCallPurpose.class), eq(2), any())).thenReturn(new ModelCallReservationResult.Reserved(1, 1));
         doReturn(JobStatus.CANCELLED).when(store).append(eq(claim), any(), any());
         ToolOutput actual = new ToolOutput(firstFails, Map.of("actual", "completed"));
         ToolCatalog catalog = () -> new ToolSnapshot(List.of(
@@ -164,7 +196,7 @@ class MessageJobCancellationTest {
                         new ConversationStore.ToolCallData(request("three", "third").toolCallId(), "third", Map.of()))),
                 new ConversationStore.ToolObservationData(request("one", "first").toolCallId(), "first", actual.asStructuredValue()),
                 cancelledTool("two", "second"), cancelledTool("three", "third"));
-        verify(store).reserveModelCall(eq(claim), eq(2), any());
+        verify(store).reserveModelCall(eq(claim), any(ModelCallPurpose.class), eq(2), any());
     }
 
     @ParameterizedTest
@@ -201,7 +233,7 @@ class MessageJobCancellationTest {
             return JobStatus.CANCELLED;
         }).when(store).append(eq(claim), any(), any());
         when(store.loadContextHistory(claim.sessionId())).thenReturn(contextHistory(List.of(user())));
-        when(store.reserveModelCall(eq(claim), eq(2), any())).thenReturn(OptionalInt.of(1));
+        when(store.reserveModelCall(eq(claim), any(ModelCallPurpose.class), eq(2), any())).thenReturn(new ModelCallReservationResult.Reserved(1, 1));
         ToolOutput actual = new ToolOutput(false, Map.of("actual", "completed"));
         ToolCatalog catalog = () -> new ToolSnapshot(List.of(
                 binding("first", arguments -> { invoked.add("first"); cancelled.set(true); return actual; }),
@@ -234,7 +266,7 @@ class MessageJobCancellationTest {
         assertThat(batch.failure()).isEmpty();
         assertThat(batch.continuation()).isEmpty();
         verify(store, never()).scheduleRetry(any(), any(), any());
-        verify(store).reserveModelCall(eq(claim), eq(2), any());
+        verify(store).reserveModelCall(eq(claim), any(ModelCallPurpose.class), eq(2), any());
     }
 
     @ParameterizedTest
@@ -276,7 +308,7 @@ class MessageJobCancellationTest {
             return cancellationWins ? JobStatus.CANCELLED : JobStatus.DONE;
         }).when(store).append(eq(claim), any(), any());
         when(store.loadContextHistory(claim.sessionId())).thenReturn(contextHistory(List.of(user())));
-        when(store.reserveModelCall(eq(claim), eq(2), any())).thenReturn(OptionalInt.of(1));
+        when(store.reserveModelCall(eq(claim), any(ModelCallPurpose.class), eq(2), any())).thenReturn(new ModelCallReservationResult.Reserved(1, 1));
         ToolOutput firstActual = new ToolOutput(false, Map.of("actual", "first"));
         ToolOutput secondActual = new ToolOutput(false, Map.of("actual", "second"));
         ToolCatalog catalog = () -> new ToolSnapshot(List.of(
@@ -284,6 +316,9 @@ class MessageJobCancellationTest {
                 binding("second", arguments -> { invoked.add("second"); return secondActual; })));
         ModelDescriptor descriptor = new ModelDescriptor(TEST_ROUTE_ID, "checkpoint-model", 12_000);
         ConversationModel model = new ConversationModel() {
+            @Override public IntentResult classifyIntent(IntentRequest request, ModelCallReservation reservation) {
+                throw new AssertionError("Unexpected intent request in ordinary-job fixture");
+            }
             @Override public ModelRouteId routeId() { return TEST_ROUTE_ID; }
             @Override public ModelDescriptor descriptor() { return descriptor; }
             @Override public String systemPrompt() { return "system"; }
@@ -320,7 +355,7 @@ class MessageJobCancellationTest {
         assertThat(submitted.usageCheckpoint().orElseThrow().promptTokens()).isEqualTo(17);
         assertThat(submitted.continuation()).isEmpty();
         verify(store, never()).scheduleRetry(any(), any(), any());
-        verify(store).reserveModelCall(eq(claim), eq(2), any());
+        verify(store).reserveModelCall(eq(claim), any(ModelCallPurpose.class), eq(2), any());
     }
 
     @Test
@@ -332,7 +367,7 @@ class MessageJobCancellationTest {
         List<String> invoked = new ArrayList<>();
         when(store.isCancellationRequested(claim)).thenAnswer(invocation -> cancelled.get());
         when(store.loadContextHistory(claim.sessionId())).thenReturn(contextHistory(List.of(user())));
-        when(store.reserveModelCall(eq(claim), eq(2), any())).thenReturn(OptionalInt.of(1));
+        when(store.reserveModelCall(eq(claim), any(ModelCallPurpose.class), eq(2), any())).thenReturn(new ModelCallReservationResult.Reserved(1, 1));
         doAnswer(invocation -> {
             throw ConversationStoreFailure.transientFailure(new IllegalStateException("append outcome unknown"));
         }).when(store).append(eq(claim), any(), any());
@@ -369,7 +404,7 @@ class MessageJobCancellationTest {
         AtomicBoolean cancelled = new AtomicBoolean();
         when(store.isCancellationRequested(claim)).thenAnswer(invocation -> cancelled.get());
         when(store.loadContextHistory(claim.sessionId())).thenReturn(contextHistory(List.of(user())));
-        when(store.reserveModelCall(eq(claim), eq(2), any())).thenReturn(OptionalInt.of(1));
+        when(store.reserveModelCall(eq(claim), any(ModelCallPurpose.class), eq(2), any())).thenReturn(new ModelCallReservationResult.Reserved(1, 1));
         doReturn(JobStatus.CANCELLED).when(store).append(eq(claim), any(), any());
         doAnswer(invocation -> {
             JobProgress progress = invocation.getArgument(1);
@@ -401,7 +436,7 @@ class MessageJobCancellationTest {
         ConversationStore store = mockStore();
         MessageWorkClaim claim = claim();
         when(store.loadContextHistory(claim.sessionId())).thenReturn(contextHistory(List.of(user())));
-        when(store.reserveModelCall(eq(claim), eq(2), any())).thenReturn(OptionalInt.of(1));
+        when(store.reserveModelCall(eq(claim), any(ModelCallPurpose.class), eq(2), any())).thenReturn(new ModelCallReservationResult.Reserved(1, 1));
         doReturn(JobStatus.CANCELLED).when(store).append(eq(claim), any(), any());
         ConversationModel model = model(TEST_ROUTE_ID, (request, reservation, usage) -> {
             reservation.reserve();
@@ -426,10 +461,13 @@ class MessageJobCancellationTest {
                 new UserMessage(claim.sessionId(), new SessionSequence(2),
                         Optional.of(claim.messageJobId()), Instant.EPOCH, MessageRole.USER, "alice", "continue"));
         when(store.loadContextHistory(claim.sessionId())).thenReturn(contextHistory(history));
-        when(store.reserveModelCall(eq(claim), eq(2), any())).thenReturn(OptionalInt.of(1));
+        when(store.reserveModelCall(eq(claim), any(ModelCallPurpose.class), eq(2), any())).thenReturn(new ModelCallReservationResult.Reserved(1, 1));
         doReturn(JobStatus.CANCELLED).when(store).append(eq(claim), any(), any());
         AtomicInteger summaries = new AtomicInteger();
         ConversationModel model = new ConversationModel() {
+            @Override public IntentResult classifyIntent(IntentRequest request, ModelCallReservation reservation) {
+                throw new AssertionError("Unexpected intent request in ordinary-job fixture");
+            }
             @Override public ModelRouteId routeId() { return TEST_ROUTE_ID; }
             @Override public ModelDescriptor descriptor() { return new ModelDescriptor(TEST_ROUTE_ID, "capacity", 12_000); }
             @Override public String systemPrompt() { return "system"; }

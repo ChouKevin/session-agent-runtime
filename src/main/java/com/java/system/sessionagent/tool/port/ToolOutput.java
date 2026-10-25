@@ -9,10 +9,15 @@ import java.util.Set;
 import java.util.Optional;
 
 public record ToolOutput(boolean isError, Object result,
-                         Optional<ArtifactReceipt> artifactReceipt) {
+                         Optional<ArtifactReceipt> artifactReceipt,
+                         Optional<SkillReadReceipt> skillReadReceipt) {
 
     public ToolOutput(boolean isError, Object result) {
-        this(isError, result, Optional.empty());
+        this(isError, result, Optional.empty(), Optional.empty());
+    }
+
+    public ToolOutput(boolean isError, Object result, Optional<ArtifactReceipt> artifactReceipt) {
+        this(isError, result, artifactReceipt, Optional.empty());
     }
 
     private static final Set<String> RUNTIME_FAILURE_CODES = Set.of(

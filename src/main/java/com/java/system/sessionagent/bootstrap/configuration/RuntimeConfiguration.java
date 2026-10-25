@@ -517,8 +517,10 @@ public class RuntimeConfiguration {
             RuntimeProperties properties,
             MessageJobRetryPolicy messageJobRetryPolicy,
             ConversationTelemetry conversationTelemetry) {
+        // Ordinary execution and compaction share this allowance; control calls are one-shot.
+        int maxExecutionCalls = properties.model().maxModelCallsPerMessage();
         return new JobProcessor(conversationStore, configuredModels, toolCatalog, skillLibrary, runtimeClock,
-                properties.model().maxModelCallsPerMessage(), messageJobRetryPolicy, conversationTelemetry);
+                maxExecutionCalls, messageJobRetryPolicy, conversationTelemetry);
     }
 
     @Bean

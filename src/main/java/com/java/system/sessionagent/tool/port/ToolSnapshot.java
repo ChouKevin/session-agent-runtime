@@ -8,6 +8,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -15,10 +16,13 @@ public final class ToolSnapshot implements AutoCloseable {
 
     private static final String TOOL_NOT_AVAILABLE = "TOOL_NOT_AVAILABLE";
     private static final String TOOL_NOT_AVAILABLE_MESSAGE = "The requested tool is not available.";
+    private static final Set<ToolCapability> ALL_CAPABILITIES = Set.of(ToolCapability.ORDINARY, ToolCapability.REPORT_GENERATION);
 
     private final Map<ToolName, ToolBinding> bindings;
+    private final List<ToolBinding> orderedBindings;
     private final List<ToolDefinition> definitions;
     private final Runnable closeAction;
+    private final Set<ToolCapability> allowedCapabilities;
     private final AtomicBoolean closed = new AtomicBoolean();
 
     public ToolSnapshot(List<ToolBinding> sourceBindings) {
@@ -26,6 +30,11 @@ public final class ToolSnapshot implements AutoCloseable {
     }
 
     public ToolSnapshot(List<ToolBinding> sourceBindings, Runnable closeAction) {
+        this(sourceBindings, closeAction, ALL_CAPABILITIES);
+    }
+
+    private ToolSnapshot(List<ToolBinding> sourceBindings, Runnable closeAction, Set<ToolCapability> allowedCapabilities) {
+        this.allowedCapabilities = Set.copyOf(allowedCapabilities);
         Assert.notNull(sourceBindings, "Tool bindings must not be null");
         Assert.notNull(closeAction, "Tool snapshot close action must not be null");
         LinkedHashMap<ToolName, ToolBinding> copiedBindings = new LinkedHashMap<>();
@@ -38,12 +47,30 @@ public final class ToolSnapshot implements AutoCloseable {
             copiedBindings.put(name, retainedBinding);
         }
         bindings = Collections.unmodifiableMap(copiedBindings);
-        definitions = bindings.values().stream().map(binding -> binding.definition()).toList();
+        orderedBindings = List.copyOf(copiedBindings.values());
+        definitions = orderedBindings.stream().map(ToolBinding::definition).toList();
         this.closeAction = closeAction;
     }
 
     public List<ToolDefinition> definitions() {
         return definitions;
+    }
+
+    public List<ToolBinding> bindings() {
+        return orderedBindings;
+    }
+    public Set<ToolCapability> allowedCapabilities() {
+        return allowedCapabilities;
+    }
+
+
+    /** Transfers resource ownership to the returned snapshot; use only that owner. */
+    public ToolSnapshot restrictedTo(Set<ToolCapability> allowed) {
+        Objects.requireNonNull(allowed, "Allowed capabilities must not be null");
+        Set<ToolCapability> retained = allowed.stream().filter(allowedCapabilities::contains)
+                .collect(java.util.stream.Collectors.toUnmodifiableSet());
+        return new ToolSnapshot(bindings.values().stream()
+                .filter(binding -> retained.contains(binding.capability())).toList(), this::close, retained);
     }
 
     public ToolOutput invoke(ToolInvocation invocation, ToolName name, Map<String, Object> arguments) {

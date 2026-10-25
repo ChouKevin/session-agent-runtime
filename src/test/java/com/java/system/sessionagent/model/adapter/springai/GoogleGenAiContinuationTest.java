@@ -76,14 +76,14 @@ class GoogleGenAiContinuationTest {
                     MessageRole.USER, "alice", "find the fee");
             AtomicInteger reservations = new AtomicInteger();
 
-            ModelCallResult first = model.respond(new ModelRequest(List.of(user), new ToolSnapshot(List.of())), reservations::incrementAndGet);
+            ModelCallResult first = model.respond(new ModelRequest(List.of(user), new ToolSnapshot(List.of()), ModelRequest.Purpose.ANSWER), reservations::incrementAndGet);
             ModelReply.UseTools reply = (ModelReply.UseTools) first.reply();
             AssistantToolCallsMessage calls = new AssistantToolCallsMessage(sessionId, new SessionSequence(2), jobId,
                     Instant.EPOCH, MessageRole.ASSISTANT_TOOL_CALLS, reply.message(), reply.requests());
             ToolObservation observation = new ToolObservation(sessionId, new SessionSequence(3), jobId, Instant.EPOCH,
                     MessageRole.TOOL, reply.requests().getFirst().toolCallId(), "lookup", Map.of("isError", false, "result", Map.of("fee", 9)));
             ModelCallResult result = model.respond(new ModelRequest(List.of(user, calls, observation),
-                    Map.of(calls.sequence(), first.continuation().orElseThrow()), new ToolSnapshot(List.of())), reservations::incrementAndGet);
+                    Map.of(calls.sequence(), first.continuation().orElseThrow()), new ToolSnapshot(List.of()), ModelRequest.Purpose.ANSWER), reservations::incrementAndGet);
 
             assertThat(reply.message()).contains("Checking.");
             assertThat(result.reply()).isEqualTo(new ModelReply.Text("The fee is 9."));

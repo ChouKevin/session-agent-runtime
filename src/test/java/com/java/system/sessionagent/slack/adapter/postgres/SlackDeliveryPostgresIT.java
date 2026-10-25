@@ -1,5 +1,11 @@
 package com.java.system.sessionagent.slack.adapter.postgres;
 
+import com.java.system.sessionagent.conversation.domain.IntentRequest;
+import com.java.system.sessionagent.conversation.domain.IntentResult;
+
+import com.java.system.sessionagent.conversation.domain.ModelCallPurpose;
+import com.java.system.sessionagent.conversation.domain.ModelCallReservationResult;
+
 import com.java.system.sessionagent.skill.adapter.filesystem.FileSystemSkillLibrary;
 import com.java.system.sessionagent.skill.configuration.SkillProperties;
 import com.java.system.sessionagent.slack.application.MessageHandler;
@@ -152,7 +158,7 @@ class SlackDeliveryPostgresIT {
         MessageReceipt receipt = conversations.receive(message, TestConfiguredModels.withDefault("test").defaultSelection(),
                 TestConfiguredModels.withDefault("test"));
         MessageWorkClaim claim = conversations.claimNext("blank-title-tools", Duration.ofMinutes(1)).orElseThrow();
-        assertThat(conversations.reserveModelCall(claim, 2, NOW)).hasValue(1);
+        assertThat(conversations.reserveModelCall(claim, ModelCallPurpose.EXECUTION, 2, NOW)).isEqualTo(new ModelCallReservationResult.Reserved(1, 1));
         PostgresArtifactStore artifacts = new PostgresArtifactStore(dataSource(), new ObjectMapper());
         SlackProperties configured = new SlackProperties("xapp-test", "xoxb-test", "UBOT", Duration.ofSeconds(1), Duration.ofSeconds(1));
         ArtifactToolCatalog catalog = new ArtifactToolCatalog(emptyToolCatalog(), artifacts, new SlackAttachmentRoute(dataSource(), configured));
@@ -177,7 +183,7 @@ class SlackDeliveryPostgresIT {
                 new ConversationStore.ToolObservationData(markdownCall, "createMarkdownReport", markdownOutput.asStructuredValue(),
                         markdownOutput.artifactReceipt()),
                 new ConversationStore.ToolObservationData(csvCall, "createCsv", csvOutput.asStructuredValue(), csvOutput.artifactReceipt())),
-                ConversationStore.JobUpdate.KEEP_WORKING), NOW);
+                ConversationStore.JobUpdate.KEEP_WORKING, ConversationStore.CompletionDisposition.NONE), NOW);
         UUID sessionId = UUID.fromString(receipt.sessionId().value());
         UUID jobId = UUID.fromString(receipt.messageJobId().value());
         assertThat(artifacts.released(sessionId, jobId)).isEmpty();
@@ -185,7 +191,7 @@ class SlackDeliveryPostgresIT {
                 select count(*) from generated_artifact where message_job_id=? and observation_sequence is not null
                 """, Integer.class, jobId)).isEqualTo(2);
         conversations.append(claim, new ConversationStore.MessageBatch(List.of(new ConversationStore.AssistantData("Both reports are ready.")),
-                ConversationStore.JobUpdate.COMPLETE), NOW);
+                ConversationStore.JobUpdate.COMPLETE, ConversationStore.CompletionDisposition.ANSWER), NOW);
         List<ArtifactStore.Artifact> released = artifacts.released(sessionId, jobId);
         assertThat(released).hasSize(2).allSatisfy(file -> assertThat(file.title()).isEqualTo(title));
         assertThat(released.get(0).content()).isEqualTo(markdown.getBytes(StandardCharsets.UTF_8));
@@ -624,6 +630,9 @@ class SlackDeliveryPostgresIT {
         CountDownLatch modelStarted = new CountDownLatch(1);
         CountDownLatch releaseModel = new CountDownLatch(1);
         ConversationModel model = new ConversationModel() {
+            @Override public IntentResult classifyIntent(IntentRequest request, ModelCallReservation reservation) {
+                throw new AssertionError("Unexpected intent request in ordinary-job fixture");
+            }
             @Override
             public ModelRouteId routeId() {
                 return new ModelRouteId("stop-smoke");
@@ -809,7 +818,7 @@ class SlackDeliveryPostgresIT {
             Future<SlackEventOutcome> later = executor.submit(() -> ordinary.handle(stopEvent("later", "4", "1", "later work")));
             Future<JobStatus> appended = executor.submit(() -> store.append(claim,
                     new ConversationStore.MessageBatch(List.of(new ConversationStore.AssistantData("late answer")),
-                            ConversationStore.JobUpdate.COMPLETE), NOW));
+                            ConversationStore.JobUpdate.COMPLETE, ConversationStore.CompletionDisposition.ANSWER), NOW));
             Future<?> httpCancelled = executor.submit(() -> cancellations.cancel(queuedJob));
             Future<SlackEventOutcome> duplicate = executor.submit(() ->
                     ordinary.handle(stopEvent("stop-app-mention", "3", "1", "<@UBOT> stop")));
@@ -1114,10 +1123,38 @@ class SlackDeliveryPostgresIT {
     void migrates_v9_prepared_plain_items_and_resumes_only_the_unacknowledged_suffix() {
         flyway().clean();
         Flyway.configure().dataSource(dataSource()).cleanDisabled(false).target("9").load().migrate();
-        MessageReceipt receipt = completeSlackJobWithTerminalRuntime();
+        PostgresConversationStore conversationStore = new PostgresConversationStore(dataSource(), Clock.fixed(NOW, ZoneOffset.UTC),
+                new ObjectMapper(), intakeCapacity);
+        ConversationModels models = TestConfiguredModels.withDefault("test");
+        MessageIntakePort messageIntake = new MessageService(conversationStore, models, new NoOpConversationTelemetry());
+        PostgresMessageSubmission slackIntake = new PostgresMessageSubmission(dataSource(), messageIntake,
+                new JobCancellationService(conversationStore), Clock.fixed(NOW, ZoneOffset.UTC), intakeCapacity);
+        IncomingMessage message = new IncomingMessage(IncomingMessageSource.SLACK, "slack:T1:C1:1.000001", "U1",
+                "1.000001", "request");
+        assertThat(slackIntake.receive(new MessageSubmission("event-1.000001", "T1", "C1", "1.000001", "1.000001",
+                SlackIntakeClassification.ACCEPTED, Optional.of(message))).outcome()).isEqualTo(SlackEventOutcome.ACCEPTED);
+        MessageReceipt receipt = conversationStore.receive(message, models.defaultSelection(), models);
         markQueuedNoticeSent();
         UUID sessionId = UUID.fromString(receipt.sessionId().value());
         UUID jobId = UUID.fromString(receipt.messageJobId().value());
+        // Seed the V9 contract directly; current job processing requires the latest schema.
+        jdbcTemplate.update("""
+                with allocated as (
+                    update conversation_session set next_sequence = next_sequence + 1
+                    where session_id = ?
+                    returning session_id, next_sequence - 1 as sequence
+                ), event as (
+                    insert into session_message(session_id, sequence, message_job_id, role, created_at)
+                    select session_id, sequence, ?, 'RUNTIME', clock_timestamp() from allocated
+                    returning session_id, sequence
+                )
+                insert into runtime_message(session_id, sequence, code, message)
+                select session_id, sequence, 'MODEL_UNAVAILABLE', 'Runtime terminal response.' from event
+                """, sessionId, jobId);
+        jdbcTemplate.update("""
+                update message_job set status = 'DONE', completed_at = clock_timestamp()
+                where message_job_id = ?
+                """, jobId);
         UUID deliveryId = UUID.randomUUID();
         jdbcTemplate.update("""
                 insert into slack_delivery(delivery_id,kind,terminal_session_id,terminal_sequence,message_job_id,team_id,channel_id,
@@ -1397,6 +1434,9 @@ class SlackDeliveryPostgresIT {
     private static ConversationModel successfulModel() {
         ModelDescriptor descriptor = new ModelDescriptor(new ModelRouteId("observability-test"), "fake", 1_000_000);
         return new ConversationModel() {
+            @Override public IntentResult classifyIntent(IntentRequest request, ModelCallReservation reservation) {
+                throw new AssertionError("Unexpected intent request in ordinary-job fixture");
+            }
             @Override
             public ModelRouteId routeId() {
                 return descriptor.routeId();
@@ -1478,7 +1518,7 @@ class SlackDeliveryPostgresIT {
                 TestConfiguredModels.withDefault("test"));
         if (assistant) {
             MessageWorkClaim claim = conversationStore.claimNext("conversation-worker", Duration.ofSeconds(30)).orElseThrow();
-            conversationStore.reserveModelCall(claim, 2, NOW).orElseThrow();
+            conversationStore.reserveModelCall(claim, ModelCallPurpose.EXECUTION, 2, NOW);
             if (artifact) {
                 Map<String, Object> arguments = Map.of("title", "Tool report", "content", "# Tool report\nExact 中😀");
                 ArtifactEncoder.Encoded encoded = ArtifactEncoder.markdown(arguments);
@@ -1491,10 +1531,10 @@ class SlackDeliveryPostgresIT {
                         new ConversationStore.AssistantToolCallsData(Optional.empty(), List.of(
                                 new ConversationStore.ToolCallData(call, "createMarkdownReport", arguments))),
                         new ConversationStore.ToolObservationData(call, "createMarkdownReport", output.asStructuredValue(), output.artifactReceipt())),
-                        ConversationStore.JobUpdate.KEEP_WORKING), NOW);
+                        ConversationStore.JobUpdate.KEEP_WORKING, ConversationStore.CompletionDisposition.NONE), NOW);
             }
             conversationStore.append(claim, new ConversationStore.MessageBatch(List.of(new ConversationStore.AssistantData(terminalText)),
-                    ConversationStore.JobUpdate.COMPLETE), NOW);
+                    ConversationStore.JobUpdate.COMPLETE, ConversationStore.CompletionDisposition.ANSWER), NOW);
         } else {
             completeNextWithTerminalRuntime(conversationStore, terminalText);
         }
@@ -1514,13 +1554,13 @@ class SlackDeliveryPostgresIT {
 
     private static void completeNextWithTerminalRuntime(PostgresConversationStore conversationStore, String terminalText) {
         MessageWorkClaim claim = conversationStore.claimNext("conversation-worker", Duration.ofSeconds(30)).orElseThrow();
-        assertThat(conversationStore.reserveModelCall(claim, 2, NOW)).hasValue(1);
+        assertThat(conversationStore.reserveModelCall(claim, ModelCallPurpose.EXECUTION, 2, NOW)).isEqualTo(new ModelCallReservationResult.Reserved(1, 1));
         conversationStore.append(claim, new ConversationStore.MessageBatch(List.of(
                 new ConversationStore.AssistantToolCallsData(Optional.of("Intermediate tool-call text"), List.of(
                         new ConversationStore.ToolCallData(new ToolCallId("call-1"), "lookup", Map.of()))),
                 new ConversationStore.ToolObservationData(new ToolCallId("call-1"), "lookup", Map.of("result", "value")),
                 new ConversationStore.RuntimeData("MODEL_UNAVAILABLE", terminalText)),
-                ConversationStore.JobUpdate.COMPLETE), NOW);
+                ConversationStore.JobUpdate.COMPLETE, ConversationStore.CompletionDisposition.NONE), NOW);
     }
 
     private UUID answerDeliveryId() {

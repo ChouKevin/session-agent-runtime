@@ -1,5 +1,8 @@
 package com.java.system.sessionagent.storage.adapter.postgres;
 
+import com.java.system.sessionagent.conversation.domain.IntentRequest;
+import com.java.system.sessionagent.conversation.domain.IntentResult;
+
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.java.system.sessionagent.conversation.TestConfiguredModels;
 import com.java.system.sessionagent.conversation.application.JobProcessor;
@@ -103,7 +106,17 @@ class PostgresSkillCommandPostgresIT {
     void committed_load_round_trips_after_reconstruction_and_replays_without_appending_or_replacing_bytes() {
         MessageReceipt receipt = receive("source", "/skill:review explain");
         MessageWorkClaim claim = claim();
+        UUID attempt = store.startSkillCommand(claim);
+        assertThat(jdbc.queryForObject("select status from skill_load_attempt where attempt_id=?", String.class, attempt))
+                .isEqualTo("STARTED");
+        assertThat(jdbc.queryForObject("select history_sequence from skill_load_attempt where attempt_id=?", Long.class, attempt)).isNull();
         assertThat(store.resolveSkillCommand(claim, new SkillReadResult.Success(RESOURCE), Instant.now())).isEqualTo(JobStatus.WORKING);
+        assertThat(jdbc.queryForObject("""
+                select count(*) from skill_load_attempt load join skill_message skill
+                    on skill.session_id=load.session_id and skill.sequence=load.history_sequence
+                where load.attempt_id=? and load.status='COMMITTED_SUCCESS' and load.source='EXPLICIT'
+                    and load.skill_name='review' and load.sha256=skill.sha256
+                """, Integer.class, attempt)).isOne();
         ConversationStore restarted = reconstructedStore();
         ConversationHistory history = restarted.loadContextHistory(receipt.sessionId());
         assertThat(history.commands().get(receipt.messageJobId()).disposition()).isEqualTo(SkillCommandState.Disposition.ACCEPTED);
@@ -116,9 +129,10 @@ class PostgresSkillCommandPostgresIT {
         assertThat(receive("source", "/skill:review explain")).isEqualTo(receipt);
         assertThat(count("skill_message")).isEqualTo(1);
         assertThat(restarted.loadContextHistory(receipt.sessionId())).isEqualTo(history);
-        restarted.append(claim, new ConversationStore.MessageBatch(List.of(new ConversationStore.AssistantData("done")), ConversationStore.JobUpdate.COMPLETE), Instant.now());
+        restarted.append(claim, new ConversationStore.MessageBatch(List.of(new ConversationStore.AssistantData("done")), ConversationStore.JobUpdate.COMPLETE, ConversationStore.CompletionDisposition.ANSWER), Instant.now());
         assertThat(restarted.resolveSkillCommand(claim, new SkillReadResult.Success(RESOURCE), Instant.now())).isEqualTo(JobStatus.DONE);
         assertThat(count("skill_message")).isEqualTo(1);
+        assertThat(count("skill_load_attempt")).isOne();
     }
 
     @Test
@@ -133,6 +147,8 @@ class PostgresSkillCommandPostgresIT {
             assertThat(error.message()).isEqualTo(JobFailure.SKILL_UNAVAILABLE.message());
         });
         assertThat(store.readJob(receipt.messageJobId()).orElseThrow().failure()).contains(JobFailure.SKILL_UNAVAILABLE);
+        assertThat(jdbc.queryForObject("select status from skill_load_attempt", String.class)).isEqualTo("COMMITTED_FAILURE");
+        assertThat(jdbc.queryForObject("select error_code from skill_load_attempt", String.class)).isEqualTo("SKILL_UNAVAILABLE");
         assertThat(store.resolveSkillCommand(claim, new SkillReadResult.Success(RESOURCE), Instant.now())).isEqualTo(JobStatus.DONE);
         assertThat(count("skill_message")).isZero();
         assertThat(store.loadHistory(receipt.sessionId())).hasSize(2);
@@ -142,6 +158,7 @@ class PostgresSkillCommandPostgresIT {
     void a_failure_between_detail_and_disposition_rolls_back_event_detail_and_sequence() {
         MessageReceipt receipt = receive("source", "/skill:review question");
         MessageWorkClaim claim = claim();
+        store.startSkillCommand(claim);
         jdbc.execute("""
                 create function fail_skill_resolution() returns trigger language plpgsql as $$
                 begin raise exception 'injected resolution failure'; end; $$;
@@ -153,6 +170,8 @@ class PostgresSkillCommandPostgresIT {
         assertThat(store.loadHistory(receipt.sessionId())).hasSize(1);
         assertThat(store.loadContextHistory(receipt.sessionId()).commands().get(receipt.messageJobId()).disposition())
                 .isEqualTo(SkillCommandState.Disposition.PENDING);
+        assertThat(jdbc.queryForObject("select status from skill_load_attempt", String.class)).isEqualTo("STARTED");
+        assertThat(jdbc.queryForObject("select history_sequence from skill_load_attempt", Long.class)).isNull();
         jdbc.execute("drop trigger injected_failure on skill_command");
         store.resolveSkillCommand(claim, new SkillReadResult.Success(RESOURCE), Instant.now());
         assertThat(store.loadHistory(receipt.sessionId()).get(1).sequence().value()).isEqualTo(2);
@@ -162,6 +181,7 @@ class PostgresSkillCommandPostgresIT {
     void cancellation_and_stale_claims_cannot_publish_success() {
         MessageReceipt receipt = receive("source", "/skill:review question");
         MessageWorkClaim claim = claim();
+        UUID attempt = store.startSkillCommand(claim);
         store.requestCancellation(receipt.messageJobId());
         assertThatThrownBy(() -> store.resolveSkillCommand(claim, new SkillReadResult.Success(RESOURCE), Instant.now()))
                 .isInstanceOf(JobCancellationRequestedException.class);
@@ -171,6 +191,8 @@ class PostgresSkillCommandPostgresIT {
         jdbc.update("update message_job set locked_until = clock_timestamp() - interval '1 second' where message_job_id = ?", UUID.fromString(receipt.messageJobId().value()));
         MessageWorkClaim replacement = claim();
         assertThat(replacement.claimNumber()).isGreaterThan(claim.claimNumber());
+        assertThat(jdbc.queryForObject("select status from skill_load_attempt where attempt_id=?", String.class, attempt))
+                .isEqualTo("INTERRUPTED");
         assertThatThrownBy(() -> store.resolveSkillCommand(claim, new SkillReadResult.Success(RESOURCE), Instant.now()))
                 .isInstanceOf(StaleWorkClaimException.class);
         assertThat(count("skill_message")).isZero();
@@ -183,10 +205,13 @@ class PostgresSkillCommandPostgresIT {
         MessageReceipt invalid = receive("invalid", "/skill:../bad QUEUED_INVALID_PRIVATE");
         store.append(activeClaim, new ConversationStore.MessageBatch(
                 List.of(new ConversationStore.AssistantData("x".repeat(40_000))),
-                ConversationStore.JobUpdate.KEEP_WORKING), Instant.now());
+                ConversationStore.JobUpdate.KEEP_WORKING, ConversationStore.CompletionDisposition.NONE), Instant.now());
         List<List<SessionMessage>> summaries = new ArrayList<>();
         List<List<SessionMessage>> responses = new ArrayList<>();
         ConversationModel model = new ConversationModel() {
+            @Override public IntentResult classifyIntent(IntentRequest request, ModelCallReservation reservation) {
+                throw new AssertionError("Unexpected intent request in ordinary-job fixture");
+            }
             @Override public ModelRouteId routeId() { return new ModelRouteId("test"); }
             @Override public ModelDescriptor descriptor() { return new ModelDescriptor(routeId(), "bounded", 12_000); }
             @Override public String summarize(ContextCompactionRequest request, ModelCallReservation reservation) {
@@ -305,13 +330,13 @@ class PostgresSkillCommandPostgresIT {
         MessageReceipt receipt = receive("explicit", "/skill:review question");
         MessageWorkClaim first = claim();
         store.append(first, new ConversationStore.MessageBatch(List.of(new ConversationStore.AssistantData("audit")),
-                ConversationStore.JobUpdate.COMPLETE), Instant.now());
+                ConversationStore.JobUpdate.COMPLETE, ConversationStore.CompletionDisposition.ANSWER), Instant.now());
         MessageReceipt other = receive("ordinary", "ordinary");
         MessageWorkClaim second = claim();
         assertThat(second.messageJobId()).isEqualTo(other.messageJobId());
         store.append(second, new ConversationStore.MessageBatch(List.of(new ConversationStore.RuntimeData(
                 JobFailure.SKILL_UNAVAILABLE.name(), JobFailure.SKILL_UNAVAILABLE.message())),
-                ConversationStore.JobUpdate.COMPLETE), Instant.now());
+                ConversationStore.JobUpdate.COMPLETE, ConversationStore.CompletionDisposition.NONE), Instant.now());
         assertThatThrownBy(() -> jdbc.update("update skill_command set disposition = 'ACCEPTED', resolution_sequence = 1"))
                 .isInstanceOf(RuntimeException.class);
         assertThatThrownBy(() -> jdbc.update("update skill_command set disposition = 'REJECTED', resolution_sequence = 4"))
@@ -325,7 +350,7 @@ class PostgresSkillCommandPostgresIT {
         MessageReceipt receipt = receive("source", "/skill:review question");
         MessageWorkClaim claim = claim();
         assertThatThrownBy(() -> store.append(claim, new ConversationStore.MessageBatch(List.of(
-                new ConversationStore.SkillData(RESOURCE), new ConversationStore.AssistantData("mixed")), ConversationStore.JobUpdate.KEEP_WORKING), Instant.now()))
+                new ConversationStore.SkillData(RESOURCE), new ConversationStore.AssistantData("mixed")), ConversationStore.JobUpdate.KEEP_WORKING, ConversationStore.CompletionDisposition.NONE), Instant.now()))
                 .isInstanceOf(IllegalArgumentException.class);
         assertThat(store.loadHistory(receipt.sessionId())).hasSize(1);
     }

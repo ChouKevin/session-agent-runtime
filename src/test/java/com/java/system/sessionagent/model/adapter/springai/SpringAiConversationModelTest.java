@@ -1,6 +1,12 @@
 package com.java.system.sessionagent.model.adapter.springai;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.java.system.sessionagent.conversation.domain.IntentRequest;
+import com.java.system.sessionagent.conversation.domain.IntentResult;
+import com.java.system.sessionagent.conversation.domain.FollowUpIntent;
+import com.java.system.sessionagent.conversation.domain.WaitingChoice;
+import com.java.system.sessionagent.tool.port.ToolCapability;
+import java.util.Set;
 import com.google.genai.errors.ClientException;
 import com.java.system.sessionagent.bootstrap.adapter.metrics.MicrometerConversationTelemetry;
 import com.java.system.sessionagent.conversation.domain.AssistantToolCallsMessage;
@@ -77,7 +83,7 @@ class SpringAiConversationModelTest {
             OptionalLong expectedCachedInputTokens) {
         Usage usage = usage(5, 3, 8, providerValue);
         ModelCallResult result = model(new AssistantMessage("done"), usage, GOOGLE_ROUTE_ID)
-                .respond(new ModelRequest(List.of(), new ToolSnapshot(List.of())), () -> 1, ignored -> { });
+                .respond(new ModelRequest(List.of(), new ToolSnapshot(List.of()), ModelRequest.Purpose.ANSWER), () -> 1, ignored -> { });
 
         assertThat(result.usage()).as(scenario)
                 .isEqualTo(new ModelUsage(5, 3, 8, true, expectedCachedInputTokens));
@@ -95,7 +101,7 @@ class SpringAiConversationModelTest {
     void retains_known_cache_usage_when_other_provider_usage_is_unavailable() {
         Usage usage = usage(null, null, null, Optional.of(4L));
         ModelCallResult result = model(new AssistantMessage("done"), usage, GOOGLE_ROUTE_ID)
-                .respond(new ModelRequest(List.of(), new ToolSnapshot(List.of())), () -> 1, ignored -> { });
+                .respond(new ModelRequest(List.of(), new ToolSnapshot(List.of()), ModelRequest.Purpose.ANSWER), () -> 1, ignored -> { });
 
         assertThat(result.usage()).isEqualTo(new ModelUsage(0, 0, 0, false, OptionalLong.of(4)));
     }
@@ -136,7 +142,7 @@ class SpringAiConversationModelTest {
                 new AssistantMessage.ToolCall("call-2", "function", "second", "{\"limit\":2}"))).build();
         SpringAiConversationModel model = model(message, GOOGLE_ROUTE_ID);
 
-        ModelCallResult result = model.respond(new ModelRequest(List.of(), new ToolSnapshot(List.of())), () -> 1, usage -> { });
+        ModelCallResult result = model.respond(new ModelRequest(List.of(), new ToolSnapshot(List.of()), ModelRequest.Purpose.ANSWER), () -> 1, usage -> { });
         ModelReply reply = result.reply();
 
         assertThat(reply).isEqualTo(new ModelReply.UseTools(Optional.of("I will inspect both."), List.of(
@@ -148,7 +154,7 @@ class SpringAiConversationModelTest {
     void preserves_json_looking_final_text_without_decoding_it() {
         SpringAiConversationModel model = model(new AssistantMessage("{\"message\":\"still plain text\"}"), GOOGLE_ROUTE_ID);
 
-        ModelCallResult result = model.respond(new ModelRequest(List.of(), new ToolSnapshot(List.of())), () -> 1, usage -> { });
+        ModelCallResult result = model.respond(new ModelRequest(List.of(), new ToolSnapshot(List.of()), ModelRequest.Purpose.ANSWER), () -> 1, usage -> { });
         ModelReply reply = result.reply();
 
         assertThat(reply).isEqualTo(new ModelReply.Text("{\"message\":\"still plain text\"}"));
@@ -173,7 +179,7 @@ class SpringAiConversationModelTest {
         SpringAiConversationModel model = new SpringAiConversationModel(chatModel, new SystemPrompt(), new NoOpConversationTelemetry(), mapper,
                 new SpringAiMessagePartsHandler(GOOGLE_ROUTE_ID));
 
-        ModelCallResult result = model.respond(new ModelRequest(List.of(), new ToolSnapshot(List.of())), () -> 1, usage -> { });
+        ModelCallResult result = model.respond(new ModelRequest(List.of(), new ToolSnapshot(List.of()), ModelRequest.Purpose.ANSWER), () -> 1, usage -> { });
 
         assertThat(result.reply()).isEqualTo(new ModelReply.Text("done"));
         assertThat(result.usage()).isEqualTo(new ModelUsage(0, 0, 0, false));
@@ -196,7 +202,7 @@ class SpringAiConversationModelTest {
         SpringAiConversationModel model = new SpringAiConversationModel(chatModel, new SystemPrompt(), new NoOpConversationTelemetry(), mapper,
                 new SpringAiMessagePartsHandler(GOOGLE_ROUTE_ID));
 
-        assertThatThrownBy(() -> model.respond(new ModelRequest(List.of(), new ToolSnapshot(List.of())), () -> 1, usage -> { }))
+        assertThatThrownBy(() -> model.respond(new ModelRequest(List.of(), new ToolSnapshot(List.of()), ModelRequest.Purpose.ANSWER), () -> 1, usage -> { }))
                 .isInstanceOfSatisfying(ModelCallFailure.class,
                         failure -> assertThat(failure.kind()).isEqualTo(ModelCallFailure.Kind.CONTEXT_TOO_LARGE));
 
@@ -212,7 +218,7 @@ class SpringAiConversationModelTest {
         SpringAiConversationModel terminalModel = new SpringAiConversationModel(terminalChatModel, new SystemPrompt(),
                 new NoOpConversationTelemetry(), mapper, new SpringAiMessagePartsHandler(GOOGLE_ROUTE_ID));
 
-        assertThatThrownBy(() -> terminalModel.respond(new ModelRequest(List.of(), new ToolSnapshot(List.of())), () -> 1, usage -> { }))
+        assertThatThrownBy(() -> terminalModel.respond(new ModelRequest(List.of(), new ToolSnapshot(List.of()), ModelRequest.Purpose.ANSWER), () -> 1, usage -> { }))
                 .isInstanceOfSatisfying(ModelCallFailure.class,
                         failure -> assertThat(failure.kind()).isEqualTo(ModelCallFailure.Kind.TERMINAL));
     }
@@ -253,19 +259,54 @@ class SpringAiConversationModelTest {
     }
 
     @Test
+    void an_empty_snapshot_explicitly_clears_default_tool_callbacks_for_the_actual_provider_prompt() {
+        ToolCallback defaultToolCallback = mock(ToolCallback.class);
+        ToolCallingChatOptions defaultOptions = ToolCallingChatOptions.builder()
+                .toolCallbacks(List.of(defaultToolCallback))
+                .build();
+        List<Prompt> prompts = new ArrayList<>();
+        ChatModel chatModel = new ChatModel() {
+            @Override public ChatResponse call(Prompt prompt) {
+                prompts.add(prompt);
+                return new ChatResponse(List.of(new Generation(new AssistantMessage("No tools used"))),
+                        ChatResponseMetadata.builder().build());
+            }
+
+            @Override public ToolCallingChatOptions getOptions() {
+                return defaultOptions;
+            }
+        };
+        ObjectMapper mapper = new ObjectMapper();
+        SpringAiConversationModel model = new SpringAiConversationModel(chatModel, new SystemPrompt(),
+                new NoOpConversationTelemetry(), mapper, new SpringAiMessagePartsHandler(GOOGLE_ROUTE_ID));
+
+        ModelCallResult result = model.respond(new ModelRequest(List.of(), new ToolSnapshot(List.of()), ModelRequest.Purpose.ANSWER),
+                () -> 1, ignored -> { });
+
+        assertThat(result.reply()).isEqualTo(new ModelReply.Text("No tools used"));
+        assertThat(prompts).hasSize(1);
+        ChatOptions promptOptions = prompts.getFirst().getOptions();
+        assertThat(promptOptions).isInstanceOf(ToolCallingChatOptions.class);
+        ToolCallingChatOptions noToolOptions = (ToolCallingChatOptions) promptOptions;
+        assertThat(noToolOptions).isNotSameAs(defaultOptions);
+        assertThat(noToolOptions.getToolCallbacks()).isEmpty();
+        assertThat(defaultOptions.getToolCallbacks()).containsExactly(defaultToolCallback);
+    }
+
+    @Test
     void generates_unique_ids_for_missing_provider_ids_and_rejects_duplicate_provider_ids() {
         AssistantMessage withoutIds = AssistantMessage.builder().content("Checking.").toolCalls(List.of(
                 new AssistantMessage.ToolCall("", "function", "first", "{}"),
                 new AssistantMessage.ToolCall(" ", "function", "second", "{}"))).build();
 
         ModelReply.UseTools generated = (ModelReply.UseTools) model(withoutIds, GOOGLE_ROUTE_ID)
-                .respond(new ModelRequest(List.of(), new ToolSnapshot(List.of())), () -> 1, usage -> { }).reply();
+                .respond(new ModelRequest(List.of(), new ToolSnapshot(List.of()), ModelRequest.Purpose.ANSWER), () -> 1, usage -> { }).reply();
         assertThat(generated.requests()).extracting(request -> request.toolCallId()).doesNotHaveDuplicates();
 
         AssistantMessage duplicateIds = AssistantMessage.builder().toolCalls(List.of(
                 new AssistantMessage.ToolCall("call-1", "function", "first", "{}"),
                 new AssistantMessage.ToolCall("call-1", "function", "second", "{}"))).build();
-        assertThatThrownBy(() -> model(duplicateIds, GOOGLE_ROUTE_ID).respond(new ModelRequest(List.of(), new ToolSnapshot(List.of())),
+        assertThatThrownBy(() -> model(duplicateIds, GOOGLE_ROUTE_ID).respond(new ModelRequest(List.of(), new ToolSnapshot(List.of()), ModelRequest.Purpose.ANSWER),
                 () -> 1, usage -> { })).isInstanceOf(ModelCallFailure.class);
     }
 
@@ -280,7 +321,7 @@ class SpringAiConversationModelTest {
                 new ToolObservation(new SessionId("session-1"), new SessionSequence(2), Optional.of(new MessageJobId("job-2")),
                         Instant.EPOCH, MessageRole.TOOL, new ToolCallId("call-1"), "first", Map.of("isError", false, "result", Map.of())));
 
-        assertThatThrownBy(() -> model.respond(new ModelRequest(malformedHistory, new ToolSnapshot(List.of())), () -> 1, usage -> { }))
+        assertThatThrownBy(() -> model.respond(new ModelRequest(malformedHistory, new ToolSnapshot(List.of()), ModelRequest.Purpose.ANSWER), () -> 1, usage -> { }))
                 .isInstanceOf(ModelCallFailure.class);
         assertThat(providerCalled).isFalse();
     }
@@ -311,7 +352,7 @@ class SpringAiConversationModelTest {
         SpringAiConversationModel model = new SpringAiConversationModel(chatModel, new SystemPrompt(), new NoOpConversationTelemetry(),
                 mapper, new SpringAiMessagePartsHandler(routeId));
 
-        ModelCallResult firstResult = model.respond(new ModelRequest(List.of(), new ToolSnapshot(List.of())), () -> 1, usage -> { });
+        ModelCallResult firstResult = model.respond(new ModelRequest(List.of(), new ToolSnapshot(List.of()), ModelRequest.Purpose.ANSWER), () -> 1, usage -> { });
         ModelContinuation continuation = firstResult.continuation().orElseThrow();
         ToolRequest requested = ((ModelReply.UseTools) firstResult.reply()).requests().getFirst();
         List<SessionMessage> history = List.of(
@@ -322,7 +363,7 @@ class SpringAiConversationModelTest {
                         Instant.EPOCH, MessageRole.TOOL, requested.toolCallId(), "first", Map.of("isError", false, "result", Map.of())));
 
         ModelCallResult secondResult = model.respond(new ModelRequest(history, Map.of(new SessionSequence(2), continuation),
-                new ToolSnapshot(List.of())), () -> 2, usage -> { });
+                new ToolSnapshot(List.of()), ModelRequest.Purpose.ANSWER), () -> 2, usage -> { });
 
         assertThat(firstResult.reply()).isEqualTo(new ModelReply.UseTools(Optional.of("Inspecting."), List.of(requested)));
         assertThat(secondResult.reply()).isEqualTo(new ModelReply.Text("done"));
@@ -351,13 +392,132 @@ class SpringAiConversationModelTest {
         ModelContinuation malformed = new ModelContinuation(routeId,
                 "spring-ai-message-parts-v1", new byte[] {1, 2, 3});
 
-        assertThatThrownBy(() -> model.respond(new ModelRequest(history, Map.of(new SessionSequence(2), malformed), new ToolSnapshot(List.of())),
+        assertThatThrownBy(() -> model.respond(new ModelRequest(history, Map.of(new SessionSequence(2), malformed), new ToolSnapshot(List.of()), ModelRequest.Purpose.ANSWER),
                 () -> { reserved.set(true); return 1; }, usage -> { }))
                 .isInstanceOfSatisfying(ModelCallFailure.class,
                         failure -> assertThat(failure.kind()).isEqualTo(ModelCallFailure.Kind.TERMINAL));
 
         assertThat(reserved).isFalse();
         assertThat(providerCalled).isFalse();
+    }
+
+    @ParameterizedTest
+    @MethodSource("validIntentReplies")
+    void classifies_closed_internal_intent_results_without_parsing_ordinary_final_answers(
+            String json, FollowUpIntent intent, Optional<String> clarification) {
+        SpringAiConversationModel adapter = model(new AssistantMessage(json), GOOGLE_ROUTE_ID);
+        AtomicBoolean reserved = new AtomicBoolean();
+        IntentResult result = adapter.classifyIntent(intentRequest(), () -> { reserved.set(true); return 7; });
+        assertThat(result).isEqualTo(new IntentResult(intent, clarification));
+        assertThat(reserved).isTrue();
+    }
+
+    private static Stream<Arguments> validIntentReplies() {
+        return Stream.of(
+                Arguments.of("{\"intent\":\"CONTINUE\"}", FollowUpIntent.CONTINUE, Optional.empty()),
+                Arguments.of("{\"intent\":\"DELIVER\"}", FollowUpIntent.DELIVER, Optional.empty()),
+                Arguments.of("{\"intent\":\"NEW_QUESTION\"}", FollowUpIntent.NEW_QUESTION, Optional.empty()),
+                Arguments.of("{\"intent\":\"CLARIFY\",\"clarification\":\"Which option?\"}",
+                        FollowUpIntent.CLARIFY, Optional.of("Which option?")));
+    }
+
+    @ParameterizedTest
+    @MethodSource("invalidIntentReplies")
+    void malformed_internal_intent_cannot_grant_a_mode(String reply) {
+        SpringAiConversationModel adapter = model(new AssistantMessage(reply), GOOGLE_ROUTE_ID);
+        assertThatThrownBy(() -> adapter.classifyIntent(intentRequest(), () -> 1)).isInstanceOf(ModelCallFailure.class);
+    }
+
+    private static Stream<String> invalidIntentReplies() {
+        return Stream.of("[]", "null", "{\"intent\":\"continue\"}", "{\"intent\":\"OTHER\"}",
+                "{\"intent\":\"CONTINUE\",\"extra\":true}", "{\"intent\":\"CLARIFY\"}",
+                "{\"intent\":\"CLARIFY\",\"clarification\":\"  \"}",
+                "{\"intent\":\"DELIVER\",\"clarification\":\"not allowed\"}",
+                "{\"intent\":\"CONTINUE\",\"intent\":\"DELIVER\"}",
+                "{\"intent\":\"CONTINUE\"} {\"intent\":\"DELIVER\"}",
+                "```json\n{\"intent\":\"DELIVER\"}\n```");
+    }
+
+    @Test
+    void intent_prompt_repeats_the_exact_current_user_after_later_queued_users_and_clears_defaults() {
+        List<Prompt> prompts = new ArrayList<>();
+        ToolCallingChatOptions defaults = ToolCallingChatOptions.builder().toolCallbacks(List.of(mock(ToolCallback.class))).build();
+        ChatModel chat = new ChatModel() {
+            @Override public ToolCallingChatOptions getOptions() { return defaults; }
+            @Override public ChatResponse call(Prompt prompt) {
+                prompts.add(prompt);
+                return new ChatResponse(List.of(new Generation(new AssistantMessage("{\"intent\":\"CONTINUE\"}"))));
+            }
+        };
+        SpringAiConversationModel adapter = new SpringAiConversationModel(chat, new SystemPrompt(), new NoOpConversationTelemetry(),
+                new ObjectMapper(), new SpringAiMessagePartsHandler(GOOGLE_ROUTE_ID));
+        IntentRequest request = intentRequest();
+        adapter.classifyIntent(request, () -> 1);
+        Prompt prompt = prompts.getFirst();
+        assertThat(prompt.getInstructions().getLast().getText()).contains("current choice").doesNotContain("later queued question");
+        assertThat(prompt.getInstructions().getFirst().getText()).contains("Current user sequence: 2");
+        assertThat(((ToolCallingChatOptions) prompt.getOptions()).getToolCallbacks()).isEmpty();
+        assertThat(request.history().getLast()).isInstanceOfSatisfying(UserMessage.class,
+                user -> assertThat(user.message()).isEqualTo("later queued question"));
+    }
+
+    @Test
+    void internal_intent_rejects_a_provider_tool_call_instead_of_treating_it_as_permission() {
+        AssistantMessage tool = AssistantMessage.builder().content("{\"intent\":\"DELIVER\"}")
+                .toolCalls(List.of(new AssistantMessage.ToolCall("x", "function", "opaque", "{}"))).build();
+        assertThatThrownBy(() -> model(tool, GOOGLE_ROUTE_ID).classifyIntent(intentRequest(), () -> 1))
+                .isInstanceOf(ModelCallFailure.class);
+    }
+
+    @Test
+    void wrap_directive_is_transient_and_the_response_remains_plain_text() {
+        List<Prompt> prompts = new ArrayList<>();
+        ChatModel chat = new ChatModel() {
+            @Override public ToolCallingChatOptions getOptions() { return ToolCallingChatOptions.builder().build(); }
+            @Override public ChatResponse call(Prompt prompt) {
+                prompts.add(prompt);
+                return new ChatResponse(List.of(new Generation(new AssistantMessage("{\"question\":\"Continue?\"}"))));
+            }
+        };
+        SpringAiConversationModel adapter = new SpringAiConversationModel(chat, new SystemPrompt(), new NoOpConversationTelemetry(),
+                new ObjectMapper(), new SpringAiMessagePartsHandler(GOOGLE_ROUTE_ID));
+        List<SessionMessage> history = List.of(intentRequest().initiatingMessage());
+        ModelRequest request = new ModelRequest(history, Map.of(), new ToolSnapshot(List.of()), Optional.empty(), ModelRequest.Purpose.WRAP_UP);
+        assertThat(adapter.respond(request, () -> 3).reply()).isEqualTo(new ModelReply.Text("{\"question\":\"Continue?\"}"));
+        assertThat(request.history()).containsExactlyElementsOf(history);
+        assertThat(prompts.getFirst().getInstructions().getLast().getText()).contains("investigation stage has ended");
+        assertThat(((ToolCallingChatOptions) prompts.getFirst().getOptions()).getToolCallbacks()).isEmpty();
+    }
+
+    @Test
+    void report_only_directive_requires_disclosing_gaps_without_becoming_history() {
+        List<Prompt> prompts = new ArrayList<>();
+        ChatModel chat = new ChatModel() {
+            @Override public ToolCallingChatOptions getOptions() { return ToolCallingChatOptions.builder().build(); }
+            @Override public ChatResponse call(Prompt prompt) {
+                prompts.add(prompt);
+                return new ChatResponse(List.of(new Generation(new AssistantMessage("Unknown areas disclosed"))));
+            }
+        };
+        SpringAiConversationModel adapter = new SpringAiConversationModel(chat, new SystemPrompt(), new NoOpConversationTelemetry(),
+                new ObjectMapper(), new SpringAiMessagePartsHandler(GOOGLE_ROUTE_ID));
+        try (ToolSnapshot tools = new ToolSnapshot(List.of()).restrictedTo(Set.of(ToolCapability.REPORT_GENERATION))) {
+            ModelRequest request = new ModelRequest(List.of(), tools, ModelRequest.Purpose.ANSWER);
+            adapter.respond(request, () -> 2);
+            assertThat(request.history()).isEmpty();
+            assertThat(prompts.getFirst().getInstructions().getLast().getText()).contains("unknown", "uncovered", "retained evidence");
+            assertThat(((ToolCallingChatOptions) prompts.getFirst().getOptions()).getToolCallbacks()).isEmpty();
+        }
+    }
+
+    private static IntentRequest intentRequest() {
+        SessionId session = new SessionId("session-1");
+        UserMessage current = new UserMessage(session, new SessionSequence(2), Optional.of(new MessageJobId("job-2")),
+                Instant.EPOCH, MessageRole.USER, "alice", "current choice");
+        UserMessage later = new UserMessage(session, new SessionSequence(3), Optional.of(new MessageJobId("job-3")),
+                Instant.EPOCH, MessageRole.USER, "alice", "later queued question");
+        return new IntentRequest(current, List.of(current, later), Optional.empty(),
+                new WaitingChoice(new MessageJobId("job-1"), new SessionSequence(1), 1));
     }
 
     private static SpringAiConversationModel model(AssistantMessage message, ModelRouteId routeId) {

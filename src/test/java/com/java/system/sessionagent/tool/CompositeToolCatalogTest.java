@@ -4,8 +4,10 @@ import static com.java.system.sessionagent.tool.TestToolInvocation.invocation;
 import com.java.system.sessionagent.tool.domain.ToolName;
 import com.java.system.sessionagent.tool.port.CompositeToolCatalog;
 import com.java.system.sessionagent.tool.port.ToolBinding;
+import com.java.system.sessionagent.tool.port.ToolCapability;
 import com.java.system.sessionagent.tool.port.ToolCatalog;
 import com.java.system.sessionagent.tool.port.ToolDefinition;
+import java.util.Set;
 import com.java.system.sessionagent.tool.port.ToolOutput;
 import com.java.system.sessionagent.tool.port.ToolSnapshot;
 import org.junit.jupiter.api.Test;
@@ -38,7 +40,7 @@ class CompositeToolCatalogTest {
             } catch (java.io.IOException exception) {
                 throw new IllegalStateException(exception);
             }
-        })), () -> {
+        }, ToolCapability.ORDINARY)), () -> {
             try { channel.close(); } catch (java.io.IOException exception) { throw new IllegalStateException(exception); }
         });
         ToolSnapshot parent = new CompositeToolCatalog(List.of(child)).snapshot();
@@ -81,7 +83,24 @@ class CompositeToolCatalogTest {
         return ToolDefinition.fromExposedName(name, name, Map.of("type", "object"));
     }
 
+    @Test
+    void report_capability_survives_composition_and_filtering_without_reclassifying_names() {
+        AtomicInteger releases = new AtomicInteger();
+        ToolBinding report = new ToolBinding(definition("opaque"), (context, arguments) -> new ToolOutput(false, arguments),
+                ToolCapability.REPORT_GENERATION);
+        CompositeToolCatalog catalog = new CompositeToolCatalog(List.of(
+                () -> new ToolSnapshot(List.of(report), releases::incrementAndGet),
+                () -> snapshot("ordinary", releases::incrementAndGet)));
+        ToolSnapshot filtered = catalog.snapshot().restrictedTo(Set.of(ToolCapability.REPORT_GENERATION));
+        assertThat(filtered.definitions()).containsExactly(report.definition());
+        assertThat(filtered.invoke(invocation(), new ToolName("ordinary"), Map.of()).isError()).isTrue();
+        assertThat(filtered.invoke(invocation(), new ToolName("opaque"), Map.of()).isError()).isFalse();
+        filtered.close();
+        filtered.close();
+        assertThat(releases).hasValue(2);
+    }
+
     private ToolSnapshot snapshot(String name, Runnable close) {
-        return new ToolSnapshot(List.of(new ToolBinding(definition(name), (context, arguments) -> new ToolOutput(false, arguments))), close);
+        return new ToolSnapshot(List.of(new ToolBinding(definition(name), (context, arguments) -> new ToolOutput(false, arguments), ToolCapability.ORDINARY)), close);
     }
 }

@@ -3,6 +3,12 @@ package com.java.system.sessionagent.model.adapter.springai;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.core.JsonParser;
+import com.java.system.sessionagent.conversation.domain.IntentRequest;
+import com.java.system.sessionagent.conversation.domain.IntentResult;
+import com.java.system.sessionagent.conversation.domain.FollowUpIntent;
 import com.openai.errors.OpenAIIoException;
 import com.openai.errors.OpenAIRetryableException;
 import com.openai.errors.OpenAIServiceException;
@@ -255,6 +261,67 @@ public final class SpringAiConversationModel implements ConversationModel {
         return message.getText();
     }
 
+    @Override
+    public IntentResult classifyIntent(IntentRequest request, ModelCallReservation reservation) {
+        List<Message> messages = new ArrayList<>();
+        messages.add(new org.springframework.ai.chat.messages.SystemMessage(request.directive()));
+        try {
+            messages.addAll(historyProjector.project(request.history(), Map.of(), null, request.summary()));
+        } catch (InvalidConversationHistoryException exception) {
+            throw ModelCallFailure.invalidHistory();
+        }
+        messages.add(new org.springframework.ai.chat.messages.UserMessage(
+                "Current user message (sequence " + request.initiatingMessage().sequence().value() + "):\n"
+                        + request.initiatingMessage().message()));
+        Prompt prompt = new Prompt(List.copyOf(messages), options(List.of()));
+        reservation.reserve();
+        ChatResponse response;
+        try {
+            response = chatModel.call(prompt);
+        } catch (RuntimeException exception) {
+            throw classifyProviderFailure(exception);
+        }
+        AssistantMessage message = firstActionableMessage(response).orElseThrow(ModelCallFailure::correctable);
+        if (message.hasToolCalls() || !StringUtils.hasText(message.getText())) {
+            throw ModelCallFailure.correctable();
+        }
+        try {
+            JsonNode value = objectMapper.reader()
+                    .with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
+                    .with(JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
+                    .readTree(message.getText());
+            if (!value.isObject() || value.size() < 1 || value.size() > 2
+                    || !value.path("intent").isTextual()) {
+                throw ModelCallFailure.correctable();
+            }
+            java.util.Iterator<String> names = value.fieldNames();
+            while (names.hasNext()) {
+                String name = names.next();
+                if (!"intent".equals(name) && !"clarification".equals(name)) {
+                    throw ModelCallFailure.correctable();
+                }
+            }
+            FollowUpIntent intent = FollowUpIntent.valueOf(value.path("intent").textValue());
+            Optional<String> clarification = Optional.empty();
+            if (value.has("clarification")) {
+                if (!value.path("clarification").isTextual()) {
+                    throw ModelCallFailure.correctable();
+                }
+                clarification = Optional.of(value.path("clarification").textValue());
+            }
+            return new IntentResult(intent, clarification);
+        } catch (JsonProcessingException | IllegalArgumentException exception) {
+            throw ModelCallFailure.correctable();
+        }
+    }
+
+    private ToolCallingChatOptions options(List<ToolCallback> callbacks) {
+        ChatOptions chatOptions = chatModel.getOptions();
+        Assert.isInstanceOf(ToolCallingChatOptions.class, chatOptions,
+                "Chat model options must support tool calling");
+        return ((ToolCallingChatOptions) chatOptions).mutate().toolCallbacks(callbacks).build();
+    }
+
     private static ModelDescriptor testDescriptor(SpringAiContinuationHandler continuationHandler) {
         return new ModelDescriptor(continuationHandler.routeId(), "unspecified", 1);
     }
@@ -264,17 +331,13 @@ public final class SpringAiConversationModel implements ConversationModel {
         List<Message> messages = new ArrayList<>();
         messages.add(new org.springframework.ai.chat.messages.SystemMessage(promptResource.content()));
         messages.addAll(historyProjector.project(request.history(), request.continuations(), continuationHandler, request.contextSummary()));
-        if (callbacks.isEmpty()) {
-            return new Prompt(List.copyOf(messages));
+        if (request.purpose() == ModelRequest.Purpose.WRAP_UP) {
+            Assert.isTrue(callbacks.isEmpty(), "Wrap-up must not expose tools");
         }
-        ChatOptions chatOptions = chatModel.getOptions();
-        Assert.isInstanceOf(ToolCallingChatOptions.class, chatOptions,
-                "Chat model options must support tool calling");
-        ToolCallingChatOptions options = ((ToolCallingChatOptions) chatOptions)
-                .mutate()
-                .toolCallbacks(callbacks)
-                .build();
-        return new Prompt(List.copyOf(messages), options);
+        if (StringUtils.hasText(request.transientDirective())) {
+            messages.add(new org.springframework.ai.chat.messages.SystemMessage(request.transientDirective()));
+        }
+        return new Prompt(List.copyOf(messages), options(callbacks));
     }
 
     private static ModelCallResult normalize(

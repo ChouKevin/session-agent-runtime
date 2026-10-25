@@ -21,7 +21,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 class ConversationDomainTest {
     @Test void final_model_request_contains_only_history_and_tool_snapshot() {
         UserMessage message = new UserMessage(new SessionId("session"), new SessionSequence(1), Optional.empty(), Instant.now(), MessageRole.USER, "alice", "hello");
-        ModelRequest request = new ModelRequest(List.of(message), new ToolSnapshot(List.of()));
+        ModelRequest request = new ModelRequest(List.of(message), new ToolSnapshot(List.of()), ModelRequest.Purpose.ANSWER);
         assertThat(request.history()).containsExactly(message);
     }
 

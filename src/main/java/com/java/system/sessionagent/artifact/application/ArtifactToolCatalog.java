@@ -3,6 +3,7 @@ package com.java.system.sessionagent.artifact.application;
 import com.java.system.sessionagent.artifact.port.ArtifactStore;
 import com.java.system.sessionagent.artifact.port.AttachmentRoute;
 import com.java.system.sessionagent.tool.port.ToolBinding;
+import com.java.system.sessionagent.tool.port.ToolCapability;
 import com.java.system.sessionagent.tool.port.ToolCatalog;
 import com.java.system.sessionagent.tool.port.ToolDefinition;
 import com.java.system.sessionagent.tool.port.ToolInvocation;
@@ -39,15 +40,13 @@ public final class ArtifactToolCatalog implements ToolCatalog {
                 return child;
             }
             ArrayList<ToolBinding> bindings = new ArrayList<>();
-            for (ToolDefinition definition : child.definitions()) {
-                bindings.add(new ToolBinding(definition, (invocation, arguments) -> child.invoke(invocation, definition.name(), arguments)));
-            }
+            bindings.addAll(child.bindings());
             Map<String, Object> title = Map.of("type", "string", "maxLength", 120);
             bindings.add(new ToolBinding(ToolDefinition.fromExposedName("createMarkdownReport",
                     "Save a complete Markdown report for delivery as an attachment. Saved means pending delivery, not delivered. Ordinary Markdown replies need no tool.",
                     Map.of("type", "object", "properties", Map.of("title", title, "content", Map.of("type", "string")),
                             "required", List.of("title", "content"), "additionalProperties", false)),
-                    (invocation, arguments) -> create(invocation, arguments, false)));
+                    (invocation, arguments) -> create(invocation, arguments, false), ToolCapability.REPORT_GENERATION));
             Map<String, Object> stringArray = Map.of("type", "array", "items", Map.of("type", "string"));
             bindings.add(new ToolBinding(ToolDefinition.fromExposedName("createCsv",
                     "Save a rectangular string CSV for attachment delivery. UTF-8 BOM, CRLF, quoted fields; formula-leading cells are apostrophe-prefixed. No type inference. Saved means pending delivery.",
@@ -55,7 +54,7 @@ public final class ArtifactToolCatalog implements ToolCatalog {
                                     "columns", Map.of("type", "array", "minItems", 1, "maxItems", 100, "items", Map.of("type", "string")),
                                     "rows", Map.of("type", "array", "maxItems", 10000, "items", stringArray)),
                             "required", List.of("title", "columns", "rows"), "additionalProperties", false)),
-                    (invocation, arguments) -> create(invocation, arguments, true)));
+                    (invocation, arguments) -> create(invocation, arguments, true), ToolCapability.REPORT_GENERATION));
             return new ToolSnapshot(bindings, child::close);
         } catch (RuntimeException | Error exception) {
             child.close();

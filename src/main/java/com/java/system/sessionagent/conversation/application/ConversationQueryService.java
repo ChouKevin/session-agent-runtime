@@ -77,7 +77,8 @@ public final class ConversationQueryService implements ConversationQueryPort {
                 long generation = compaction.map(value -> value.generation()).orElse(0L);
                 List<SessionMessage> visibleHistory = history.between(compaction.map(value -> value.coveredThrough().value()).orElse(0L), Long.MAX_VALUE);
                 contextProjection = new ContextUsageProjection(conversationModel.descriptor(), conversationModel.systemPrompt(),
-                        snapshot.definitions(), visibleHistory, generation, compaction.map(value -> value.summary()), history.eligibilityFingerprint());
+                        snapshot.definitions(), visibleHistory, generation, compaction.map(value -> value.summary()),
+                        contextUsageEstimator.eligibilityFingerprint(history.eligibilityFingerprint(), snapshot));
             }
             ContextEstimate estimate = contextUsageEstimator.estimate(contextProjection,
                     conversationStore.loadUsageCheckpoint(requiredSessionId, selection, conversationModel.descriptor(),

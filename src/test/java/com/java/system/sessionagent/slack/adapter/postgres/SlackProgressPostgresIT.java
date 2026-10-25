@@ -7,6 +7,26 @@ import com.java.system.sessionagent.conversation.application.JobCancellationServ
 import com.java.system.sessionagent.conversation.domain.JobFailure;
 import com.java.system.sessionagent.conversation.domain.MessageWorkClaim;
 import com.java.system.sessionagent.storage.adapter.postgres.jdbc.PostgresIntakeCapacity;
+import com.java.system.sessionagent.conversation.domain.ModelCallPurpose;
+import com.java.system.sessionagent.conversation.domain.ModelCallReservationResult;
+import com.java.system.sessionagent.conversation.domain.ToolCallId;
+import com.java.system.sessionagent.conversation.domain.JobCancellation;
+import com.java.system.sessionagent.conversation.port.out.ConversationStore;
+import com.java.system.sessionagent.skill.adapter.tool.SkillToolCatalog;
+import com.java.system.sessionagent.skill.domain.SkillMetadata;
+import com.java.system.sessionagent.skill.domain.SkillReadResult;
+import com.java.system.sessionagent.skill.domain.SkillResource;
+import com.java.system.sessionagent.skill.port.SkillLibrary;
+import com.java.system.sessionagent.storage.adapter.postgres.PostgresSkillLoadObserver;
+import com.java.system.sessionagent.tool.domain.ToolName;
+import com.java.system.sessionagent.tool.port.ToolOutput;
+import com.java.system.sessionagent.tool.port.ToolSnapshot;
+import com.java.system.sessionagent.tool.port.ToolInvocation;
+import com.java.system.sessionagent.tool.port.ToolExecutionContext;
+import com.java.system.sessionagent.tool.port.ToolExecutionAuthority;
+import com.java.system.sessionagent.tool.port.SkillReadReceipt;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import com.java.system.sessionagent.conversation.port.out.NoOpConversationTelemetry;
 import com.java.system.sessionagent.slack.application.MessageHandler;
 import com.java.system.sessionagent.slack.application.SlackProgressWorker;
@@ -22,9 +42,12 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import org.testcontainers.postgresql.PostgreSQLContainer;
 
+import java.sql.SQLException;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.List;
+import java.time.Instant;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.Executors;
@@ -32,6 +55,8 @@ import java.util.concurrent.Future;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 class SlackProgressPostgresIT {
     private static final PostgreSQLContainer POSTGRES = new PostgreSQLContainer("postgres:17-alpine");
@@ -55,6 +80,21 @@ class SlackProgressPostgresIT {
         handler = new MessageHandler("UBOT", new PostgresMessageSubmission(dataSource,
                 new MessageService(conversations, TestConfiguredModels.withDefault("test"), new NoOpConversationTelemetry()),
                 new JobCancellationService(conversations), Clock.systemUTC(), new PostgresIntakeCapacity(dataSource)));
+    }
+
+    @Test
+    void migration_expands_observed_states_without_removing_the_distinct_notice_kind_check() {
+        accept("1.000001", "");
+        sendNotice("notice");
+        progress.refresh(claim()).orElseThrow();
+
+        assertThatThrownBy(() -> jdbc.update("update slack_question_progress set notice_kind='ANSWER'"))
+                .rootCause().isInstanceOfSatisfying(SQLException.class,
+                        failure -> assertThat(failure.getSQLState()).isEqualTo("23514"));
+        assertThat(jdbc.update("update slack_question_progress set observed_state='WAITING_USER'")).isOne();
+        assertThatThrownBy(() -> jdbc.update("update slack_question_progress set observed_state='UNSUPPORTED'"))
+                .rootCause().isInstanceOfSatisfying(SQLException.class,
+                        failure -> assertThat(failure.getSQLState()).isEqualTo("23514"));
     }
 
     @Test
@@ -502,6 +542,337 @@ class SlackProgressPostgresIT {
         SlackDeliveryPart part = delivery.nextPart(answerClaim, Duration.ofMinutes(1)).orElseThrow();
         assertThat(delivery.markPartSent(answerClaim, part, "final")).isTrue();
         assertThat(jdbc.queryForObject("select status from slack_delivery where delivery_id=?", String.class, answerId)).isEqualTo("SENT");
+    }
+
+    @Test
+    void explicit_load_only_becomes_loaded_after_skill_commit_and_its_ack_removes_the_badge() {
+        UUID job = acceptSkill("1.000001");
+        sendNotice("notice");
+        PostgresConversationStore conversations = conversations();
+        MessageWorkClaim work = conversations.claimNext("model", Duration.ofMinutes(1)).orElseThrow();
+        conversations.startSkillCommand(work);
+        SlackProgressClaim presentation = claim();
+        SlackProgressUpdate loading = progress.refresh(presentation).orElseThrow();
+        assertSkill(loading, "review", SlackProgressUpdate.SkillPresentation.Kind.STARTED);
+
+        conversations.resolveSkillCommand(work, new SkillReadResult.Success(resource("review")), Instant.now());
+        assertThat(progress.markSent(presentation, loading.revision())).isFalse();
+        SlackProgressUpdate loaded = progress.refresh(presentation).orElseThrow();
+        assertSkill(loaded, "review", SlackProgressUpdate.SkillPresentation.Kind.COMMITTED_SUCCESS);
+        assertThat(loaded.revision()).isGreaterThan(loading.revision());
+        assertThat(progress.markSent(presentation, loaded.revision())).isTrue();
+
+        openGate();
+        SlackProgressClaim ordinaryClaim = claim();
+        SlackProgressUpdate ordinary = progress.refresh(ordinaryClaim).orElseThrow();
+        assertThat(ordinary.skillPresentation()).isEmpty();
+        assertThat(ordinary.request().text()).doesNotContain("review", "PRIVATE_SKILL_BODY");
+        assertThat(jdbc.queryForObject("select retired from slack_question_progress where message_job_id=?", Boolean.class, job)).isFalse();
+        assertThat(jdbc.queryForObject("select model_calls from message_job where message_job_id=?", Integer.class, job)).isZero();
+    }
+
+    @Test
+    void fast_automatic_commit_survives_terminal_completion_notice_registration_and_restart_before_first_poll() {
+        UUID job = accept("1.000001", "");
+        PostgresConversationStore conversations = conversations();
+        MessageWorkClaim work = conversations.claimNext("model", Duration.ofMinutes(1)).orElseThrow();
+        ToolOutput output = automaticRead(work, "review", new SkillReadResult.Success(resource("review")));
+        commitRead(work, output);
+        conversations.append(work, new ConversationStore.MessageBatch(
+                List.of(new ConversationStore.AssistantData("answer")), ConversationStore.JobUpdate.COMPLETE,
+                ConversationStore.CompletionDisposition.ANSWER), Instant.now());
+        sendNotice("notice-after-completion");
+        delivery.discover();
+        sendNotice("answer");
+        jdbc.update("delete from slack_question_progress where message_job_id=?", job);
+        progress = store();
+        progress.discover();
+
+        SlackProgressClaim first = claim();
+        SlackProgressUpdate loaded = progress.refresh(first).orElseThrow();
+        assertSkill(loaded, "review", SlackProgressUpdate.SkillPresentation.Kind.COMMITTED_SUCCESS);
+        assertThat(loaded.request().messageTs()).isEqualTo("notice-after-completion");
+        assertThat(progress.markSent(first, loaded.revision())).isTrue();
+        assertThat(jdbc.queryForObject("select retired from slack_question_progress", Boolean.class)).isFalse();
+
+        openGate();
+        SlackProgressClaim terminal = claim();
+        SlackProgressUpdate completed = progress.refresh(terminal).orElseThrow();
+        assertThat(completed.skillPresentation()).isEmpty();
+        assertThat(completed.terminal()).isTrue();
+        assertThat(completed.request().text()).doesNotContain("review");
+        assertState(terminal, SlackProgressState.COMPLETED);
+    }
+
+    @Test
+    void second_committed_outcome_during_http_is_not_acknowledged_or_coalesced_with_the_first() {
+        accept("1.000001", "");
+        sendNotice("notice");
+        cacheQuestionLinks();
+        MessageWorkClaim work = conversations().claimNext("model", Duration.ofMinutes(1)).orElseThrow();
+        ToolOutput first = automaticRead(work, "review", new SkillReadResult.Success(resource("review")));
+        commitRead(work, first);
+        List<SlackUpdateRequest> requests = new java.util.ArrayList<>();
+        SlackProgressWorker worker = new SlackProgressWorker(progress, updating(request -> {
+            requests.add(request);
+            if (requests.size() == 1) {
+                commitRead(work, automaticRead(work, "audit", new SkillReadResult.Success(resource("audit"))));
+            }
+        }), new SlackDeliveryProperties(), "http-worker");
+
+        assertThat(worker.poll()).isTrue();
+        assertThat(requests).hasSize(1);
+        assertThat(requests.getFirst().text()).contains("review").doesNotContain("audit");
+        assertThat(jdbc.queryForObject("select count(*) from skill_load_attempt where result_sent_at is not null", Integer.class)).isOne();
+        assertThat(jdbc.queryForObject("select count(*) from skill_load_attempt where result_sent_at is null", Integer.class)).isOne();
+        openGate();
+        assertThat(worker.poll()).isTrue();
+        assertThat(requests).hasSize(2);
+        assertThat(requests.getLast().text()).contains("audit").doesNotContain("review");
+        openGate();
+        assertThat(worker.poll()).isTrue();
+        assertThat(requests.getLast().text()).doesNotContain("audit", "review");
+        assertThat(jdbc.queryForObject("select count(*) from skill_load_attempt where result_sent_at is not null", Integer.class)).isEqualTo(2);
+    }
+
+    @Test
+    void failed_delivery_and_restart_preserve_the_exact_pending_outcome_and_reject_expired_claim_ack() {
+        accept("1.000001", "");
+        sendNotice("notice");
+        MessageWorkClaim work = conversations().claimNext("model", Duration.ofMinutes(1)).orElseThrow();
+        ToolOutput output = automaticRead(work, "review", new SkillReadResult.Success(resource("review")));
+        commitRead(work, output);
+        SlackProgressClaim failed = claim();
+        SlackProgressUpdate initial = progress.refresh(failed).orElseThrow();
+        assertThat(progress.recordFailure(failed, initial.revision(), SlackDeliveryFailureCategory.TRANSIENT, Optional.empty())).isTrue();
+        progress = store();
+        jdbc.update("update slack_question_progress set next_due_at=clock_timestamp()-interval '1 second'");
+        openGate();
+        SlackProgressClaim expired = claim();
+        SlackProgressUpdate retried = progress.refresh(expired).orElseThrow();
+        assertSkill(retried, "review", SlackProgressUpdate.SkillPresentation.Kind.COMMITTED_SUCCESS);
+        assertThat(retried.skillPresentation()).isEqualTo(initial.skillPresentation());
+        jdbc.update("update slack_question_progress set locked_until=clock_timestamp()-interval '1 second'");
+        openGate();
+        SlackProgressClaim recovered = claim();
+        SlackProgressUpdate latest = progress.refresh(recovered).orElseThrow();
+        assertThat(progress.markSent(expired, retried.revision())).isFalse();
+        assertThat(progress.markSent(recovered, latest.revision() + 1)).isFalse();
+        assertThat(jdbc.queryForObject("select result_sent_at from skill_load_attempt", java.sql.Timestamp.class)).isNull();
+        assertThat(progress.markSent(recovered, latest.revision())).isTrue();
+        assertThat(jdbc.queryForObject("select result_sent_at from skill_load_attempt", java.sql.Timestamp.class)).isNotNull();
+    }
+
+    @Test
+    void failed_automatic_read_is_a_durable_failed_notice_not_a_loaded_result() {
+        accept("1.000001", "");
+        sendNotice("notice");
+        MessageWorkClaim work = conversations().claimNext("model", Duration.ofMinutes(1)).orElseThrow();
+        commitRead(work, automaticRead(work, "review", new SkillReadResult.Failure("SKILL_UNAVAILABLE")));
+        SlackProgressUpdate failure = progress.refresh(claim()).orElseThrow();
+        assertSkill(failure, "review", SlackProgressUpdate.SkillPresentation.Kind.COMMITTED_FAILURE);
+        assertThat(jdbc.queryForObject("select observed_state from slack_question_progress", String.class)).isEqualTo("SKILL_FAILED");
+        assertThat(jdbc.queryForObject("select count(*) from skill_load_attempt where status='COMMITTED_SUCCESS'", Integer.class)).isZero();
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void cancellation_shows_loaded_only_when_the_actual_automatic_observation_commits(boolean commitActualRead) {
+        UUID job = accept("1.000001", "");
+        sendNotice("notice");
+        PostgresConversationStore conversations = conversations();
+        MessageWorkClaim work = conversations.claimNext("model", Duration.ofMinutes(1)).orElseThrow();
+        ToolOutput output = automaticRead(work, "review", new SkillReadResult.Success(resource("review")));
+        conversations.requestCancellation(work.messageJobId());
+        if (commitActualRead) {
+            commitRead(work, output);
+        } else {
+            conversations.append(work, new ConversationStore.MessageBatch(List.of(
+                    new ConversationStore.RuntimeData(JobCancellation.CODE, JobCancellation.MESSAGE)),
+                    ConversationStore.JobUpdate.CANCEL, ConversationStore.CompletionDisposition.NONE), Instant.now());
+        }
+        SlackProgressClaim pending = claim();
+        SlackProgressUpdate result = progress.refresh(pending).orElseThrow();
+        assertSkill(result, "review", commitActualRead ? SlackProgressUpdate.SkillPresentation.Kind.COMMITTED_SUCCESS
+                : SlackProgressUpdate.SkillPresentation.Kind.INTERRUPTED);
+        assertThat(progress.markSent(pending, result.revision())).isTrue();
+        assertThat(jdbc.queryForObject("select retired from slack_question_progress where message_job_id=?", Boolean.class, job)).isFalse();
+        openGate();
+        SlackProgressClaim cancelled = claim();
+        SlackProgressUpdate terminal = progress.refresh(cancelled).orElseThrow();
+        assertThat(terminal.skillPresentation()).isEmpty();
+        assertThat(terminal.terminal()).isTrue();
+        assertState(cancelled, SlackProgressState.CANCELLED);
+    }
+
+    @Test
+    void expired_read_is_interrupted_after_restart_without_inventing_success() {
+        accept("1.000001", "");
+        sendNotice("notice");
+        MessageWorkClaim work = conversations().claimNext("model", Duration.ofMinutes(1)).orElseThrow();
+        automaticRead(work, "review", new SkillReadResult.Success(resource("review")));
+        jdbc.update("update message_job set locked_until=clock_timestamp()-interval '1 second'");
+        progress = store();
+        progress.discover();
+        SlackProgressClaim pending = claim();
+        SlackProgressUpdate interrupted = progress.refresh(pending).orElseThrow();
+        assertSkill(interrupted, "review", SlackProgressUpdate.SkillPresentation.Kind.INTERRUPTED);
+        assertThat(jdbc.queryForObject("select history_sequence from skill_load_attempt", Long.class)).isNull();
+        assertThat(progress.markSent(pending, interrupted.revision())).isTrue();
+        openGate();
+        SlackProgressClaim ordinary = claim();
+        assertState(ordinary, SlackProgressState.INTERRUPTED);
+    }
+
+    @Test
+    void waiting_job_presents_pending_skill_then_waiting_not_report_delivery_and_can_settle_independently() {
+        accept("1.000001", "");
+        sendNotice("notice");
+        PostgresConversationStore conversations = conversations();
+        MessageWorkClaim work = conversations.claimNext("model", Duration.ofMinutes(1)).orElseThrow();
+        commitRead(work, automaticRead(work, "review", new SkillReadResult.Success(resource("review"))));
+        conversations.enterWrapUp(work, Instant.now());
+        conversations.append(work, new ConversationStore.MessageBatch(List.of(new ConversationStore.AssistantData("choose next action")),
+                ConversationStore.JobUpdate.COMPLETE, ConversationStore.CompletionDisposition.WAITING), Instant.now());
+        SlackProgressClaim pending = claim();
+        SlackProgressUpdate loaded = progress.refresh(pending).orElseThrow();
+        assertSkill(loaded, "review", SlackProgressUpdate.SkillPresentation.Kind.COMMITTED_SUCCESS);
+        assertThat(progress.markSent(pending, loaded.revision())).isTrue();
+        openGate();
+        SlackProgressClaim waiting = claim();
+        SlackProgressUpdate update = progress.refresh(waiting).orElseThrow();
+        assertThat(update.skillPresentation()).isEmpty();
+        assertThat(update.terminal()).isTrue();
+        assertState(waiting, SlackProgressState.WAITING_USER);
+        assertThat(update.request().text()).contains(SlackProgressState.WAITING_USER.description())
+                .doesNotContain(SlackProgressState.COMPLETED.description(), "review");
+        assertThat(progress.markSent(waiting, update.revision())).isTrue();
+        jdbc.update("update slack_question_progress set terminal_settle_until=clock_timestamp()-interval '1 second',next_due_at=clock_timestamp()-interval '1 second'");
+        openGate();
+        SlackProgressClaim settled = claim();
+        SlackProgressUpdate finalUpdate = progress.refresh(settled).orElseThrow();
+        assertThat(progress.markSent(settled, finalUpdate.revision())).isTrue();
+        assertThat(jdbc.queryForObject("select retired from slack_question_progress", Boolean.class)).isTrue();
+        UUID next = accept("2.000002", "1.000001");
+        assertThat(conversations.claimNext("next-model", Duration.ofMinutes(1)).orElseThrow().messageJobId().value()).isEqualTo(next.toString());
+    }
+
+    @Test
+    void rolled_back_explicit_history_never_projects_a_loaded_notice() {
+        acceptSkill("1.000001");
+        sendNotice("notice");
+        PostgresConversationStore conversations = conversations();
+        MessageWorkClaim work = conversations.claimNext("model", Duration.ofMinutes(1)).orElseThrow();
+        conversations.startSkillCommand(work);
+        jdbc.execute("""
+                create function reject_skill_resolution() returns trigger language plpgsql as $$
+                begin raise exception 'resolution rollback'; end;
+                $$;
+                create trigger reject_skill_resolution before update on skill_command
+                    for each row execute function reject_skill_resolution();
+                """);
+        assertThatThrownBy(() -> conversations.resolveSkillCommand(work,
+                new SkillReadResult.Success(resource("review")), Instant.now())).isInstanceOf(RuntimeException.class);
+        SlackProgressClaim pending = claim();
+        SlackProgressUpdate loading = progress.refresh(pending).orElseThrow();
+        assertSkill(loading, "review", SlackProgressUpdate.SkillPresentation.Kind.STARTED);
+        assertThat(jdbc.queryForObject("select count(*) from skill_message", Integer.class)).isZero();
+        assertThat(jdbc.queryForObject("select count(*) from skill_load_attempt where status='COMMITTED_SUCCESS'", Integer.class)).isZero();
+        jdbc.update("update message_job set locked_until=clock_timestamp()-interval '1 second'");
+        progress.discover();
+        SlackProgressUpdate interrupted = progress.refresh(pending).orElseThrow();
+        assertSkill(interrupted, "review", SlackProgressUpdate.SkillPresentation.Kind.INTERRUPTED);
+    }
+
+    @Test
+    void reference_read_names_its_owning_skill_without_publishing_a_definition_reload() {
+        accept("1.000001", "");
+        sendNotice("notice");
+        MessageWorkClaim work = conversations().claimNext("model", Duration.ofMinutes(1)).orElseThrow();
+        String uri = "skill://review/references/guide.md";
+        ToolOutput reference = automaticRead(work, "review", uri,
+                new SkillReadResult.Success(new SkillResource(uri, "a".repeat(64), "PRIVATE_SKILL_BODY")));
+        commitRead(work, reference);
+
+        SlackProgressUpdate notice = progress.refresh(claim()).orElseThrow();
+        assertSkill(notice, "review", SlackProgressUpdate.SkillPresentation.Kind.COMMITTED_SUCCESS);
+        assertThat(notice.skillPresentation().orElseThrow().resourceKind())
+                .isEqualTo(SlackProgressUpdate.SkillPresentation.ResourceKind.REFERENCE);
+        assertThat(notice.request().text()).doesNotContain(SlackProgressState.SKILL_LOADED.description(), "guide.md", "references/");
+    }
+
+    @Test
+    void acknowledging_loading_does_not_acknowledge_the_later_committed_result() {
+        acceptSkill("1.000001");
+        sendNotice("notice");
+        PostgresConversationStore conversations = conversations();
+        MessageWorkClaim work = conversations.claimNext("model", Duration.ofMinutes(1)).orElseThrow();
+        conversations.startSkillCommand(work);
+        SlackProgressClaim loadingClaim = claim();
+        SlackProgressUpdate loading = progress.refresh(loadingClaim).orElseThrow();
+        assertSkill(loading, "review", SlackProgressUpdate.SkillPresentation.Kind.STARTED);
+        assertThat(progress.markSent(loadingClaim, loading.revision())).isTrue();
+        assertThat(jdbc.queryForObject("select started_sent_at from skill_load_attempt", java.sql.Timestamp.class)).isNotNull();
+        assertThat(jdbc.queryForObject("select result_sent_at from skill_load_attempt", java.sql.Timestamp.class)).isNull();
+
+        conversations.resolveSkillCommand(work, new SkillReadResult.Success(resource("review")), Instant.now());
+        openGate();
+        SlackProgressClaim resultClaim = claim();
+        SlackProgressUpdate result = progress.refresh(resultClaim).orElseThrow();
+        assertSkill(result, "review", SlackProgressUpdate.SkillPresentation.Kind.COMMITTED_SUCCESS);
+        assertThat(progress.markSent(resultClaim, result.revision())).isTrue();
+    }
+
+    private PostgresConversationStore conversations() {
+        return new PostgresConversationStore(dataSource, Clock.systemUTC(), new ObjectMapper());
+    }
+
+    private static SkillResource resource(String name) {
+        return new SkillResource("skill://" + name, "a".repeat(64), "PRIVATE_SKILL_BODY");
+    }
+
+    private ToolOutput automaticRead(MessageWorkClaim work, String name, SkillReadResult result) {
+        return automaticRead(work, name, "skill://" + name, result);
+    }
+
+    private ToolOutput automaticRead(MessageWorkClaim work, String name, String uri, SkillReadResult result) {
+        ModelCallReservationResult.Reserved reserved = (ModelCallReservationResult.Reserved)
+                conversations().reserveModelCall(work, ModelCallPurpose.EXECUTION, 12, Instant.now());
+        SkillLibrary library = mock(SkillLibrary.class);
+        when(library.metadata()).thenReturn(List.of(new SkillMetadata(name, "Example", "skill://" + name)));
+        when(library.read(uri)).thenReturn(result);
+        ToolInvocation invocation = new ToolInvocation(new ToolExecutionContext(UUID.fromString(work.sessionId().value()),
+                UUID.fromString(work.messageJobId().value()), reserved.totalOrdinal(), 0),
+                new ToolExecutionAuthority(work.workerId(), work.claimNumber()));
+        try (ToolSnapshot snapshot = new SkillToolCatalog(library, new PostgresSkillLoadObserver(dataSource)).snapshot()) {
+            return snapshot.invoke(invocation, new ToolName("readSkill"), Map.of("uri", uri));
+        }
+    }
+
+    private void commitRead(MessageWorkClaim work, ToolOutput output) {
+        SkillReadReceipt receipt = output.skillReadReceipt().orElseThrow();
+        ToolCallId call = new ToolCallId(receipt.attemptId().toString());
+        conversations().append(work, new ConversationStore.MessageBatch(List.of(
+                new ConversationStore.AssistantToolCallsData(Optional.empty(), List.of(
+                        new ConversationStore.ToolCallData(call, "readSkill", Map.of("uri", receipt.resourceUri())))),
+                new ConversationStore.ToolObservationData(call, "readSkill", output.asStructuredValue(),
+                        output.artifactReceipt(), output.skillReadReceipt())),
+                ConversationStore.JobUpdate.KEEP_WORKING, ConversationStore.CompletionDisposition.NONE), Instant.now());
+    }
+
+    private static void assertSkill(SlackProgressUpdate update, String name, SlackProgressUpdate.SkillPresentation.Kind kind) {
+        assertThat(update.skillPresentation()).hasValueSatisfying(presentation -> {
+            assertThat(presentation.skillName()).isEqualTo(name);
+            assertThat(presentation.kind()).isEqualTo(kind);
+        });
+        assertThat(update.request().text()).contains(name).doesNotContain("PRIVATE_SKILL_BODY", "skill://", "SKILL.md");
+        assertThat(update.terminal()).isFalse();
+    }
+
+    private UUID acceptSkill(String timestamp) {
+        handler.handle(new IncomingEvent("event-" + timestamp, "T1", "C1", timestamp, "", "U1", "", "channel",
+                "<@UBOT> /skill:review question", "", false, false));
+        return jdbc.queryForObject("select message_job_id from slack_message_receipt where message_ts=?", UUID.class, timestamp);
     }
 
     private static SlackWebApi updating(java.util.function.Consumer<SlackUpdateRequest> update) {

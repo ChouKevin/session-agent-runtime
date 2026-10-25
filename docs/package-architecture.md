@@ -14,7 +14,7 @@ empty layer merely to complete a pattern.
 | `tool` — `domain`, `port` | Defines generic tool names, definitions, snapshots, calls, executors, and outputs. Tool names, schemas, arguments, and results remain provider data; this module does not know an MCP or model SDK. |
 | `skill` — `domain`, `port`, `configuration`, `adapter/filesystem`, `adapter/tool` | Owns startup-only skill metadata, bounded current-file reads, and the provider-neutral `readSkill` tool. Bootstrap owns the library lifecycle and composes skill and MCP leaves into the sole catalog. |
 | `artifact` — `application`, `port` | Owns bounded first-party Markdown/CSV encoding, route-gated creation tools, and durable artifact storage contracts; no provider SDK or conversation dependency. |
-| `model` — `adapter/springai` | Maps the provider-neutral conversation model contract to Spring AI and Google GenAI, including prompts, history projection, tool callbacks, usage, and continuation data. Provider types stay inside this adapter. |
+| `model` — `adapter/springai` | Maps the provider-neutral conversation model contract to configured Spring AI OpenAI and Google GenAI adapters, including prompts, history projection, tool callbacks, usage, and continuation data. Provider types stay inside this adapter. |
 | `mcp` — `domain`, `configuration`, `adapter/sdk`, `adapter/actuator` | Owns named MCP connection state and properties, SDK connection lifecycle, discovery, tool routing/adaptation, refresh/reconnect, and safe actuator diagnostics. Raw MCP metadata, schemas, and results do not become Runtime DTOs. |
 | `storage` — `adapter/postgres`, `adapter/postgres/jdbc` | Implements conversation persistence with PostgreSQL, Flyway-backed tables, MyBatis mappers, ordered history, job claims, and atomic history writes. The narrow JDBC export owns shared intake admission and UUID mapping for PostgreSQL adapters. |
 | `web` — `adapter/http` | Adapts HTTP requests and responses for message intake, job polling, session history, validation, and error handling. MCP diagnostics are owned by `mcp/adapter/actuator`. |
@@ -77,16 +77,52 @@ Tool executors receive a trusted `ToolInvocation`: the four-field stable
 `ToolExecutionContext` plus separate worker/claim-number lease authority. Only Runtime
 constructs production invocations, after counting the actual model request. Catalog
 snapshots may receive job/session identifiers for route eligibility without depending
-on conversation types; MCP and skill executors ignore invocation metadata.
-Artifact receipts are internal tool-port metadata, not model-visible JSON. PostgreSQL
-compares the exact successful output, original arguments, invocation ordinal, tool
-identity and job ownership while associating the actual TOOL event in its transaction.
-Successful final text releases only associated artifacts; orphans remain hidden.
+on conversation types. MCP ignores invocation metadata; first-party skill reads use
+its fenced claim and counted request identity to start durable operational attempts.
+Artifact and skill receipts are internal tool-port metadata, not model-visible JSON.
+PostgreSQL compares the successful artifact output, original arguments, invocation
+ordinal, tool identity and job ownership while associating the actual TOOL event.
+Release requires an ANSWER disposition and belongs only to that completed job;
+WAITING/clarification never release artifacts or transfer prior-job ownership.
 Encoding preserves Markdown UTF-8 without a parser. CSV remains string data in the
 tool audit while the export adds BOM/CRLF, quotes/escapes fields, and prefixes
 formula-leading cells with an apostrophe; the tool observation discloses the
 spreadsheet-safe transformation rather than promising universal spreadsheet safety.
+Storage/upload byte identity does not guarantee external download identity. Slack
+may serve a CSV without its stored UTF-8 BOM; raw hash/length differences and parsed
+content equivalence must be recorded separately, not reported as byte-exact success.
 Creation has no Slack side effect and no model-supplied channel/path/capability.
+
+`JobHandoffCoordinator` owns the bounded control protocol, not a second tool loop.
+`JobControl` separates persisted execution mode/stage, exact initiating user and
+waiting generation from committed conversation history. Ordinary execution and
+compaction debit the configured allowance; total request ordinals additionally
+include one-shot INTENT and WRAP_UP reservations. No-tools control requests
+explicitly clear adapter callbacks. A final allowed text answer completes; a final
+tool response is discarded before execution/history, followed by one wrap request.
+Lost/invalid control results fail closed rather than granting permissions or retrying.
+
+Semantic decisions are persisted under the fenced claim before changing tools.
+CONTINUE/NEW_QUESTION use normal mode; DELIVER restricts advertisement and invocation
+to trusted REPORT_GENERATION bindings; CLARIFY preserves the observed wait without
+tools. `ToolSnapshot.restrictedTo` transfers single-owner cleanup. Capability
+metadata is local composition authority, never inferred from MCP names or schemas.
+`CompletionDisposition.WAITING` commits its assistant response and wait generation
+atomically. V11 backfills ordinary counts conservatively; mixed old/new workers
+are unsupported and rollout must drain before migration.
+
+`SkillLoadObserver` and `SkillReadReceipt` belong to the neutral tool port.
+Filesystem results remain in the skill adapter; storage finalizes attempts in the
+same transaction as their SKILL/TOOL history. Slack maps resource kinds into its own
+presentation type, avoiding a skill/tool module cycle or Slack receipt dependency.
+Pending outcomes are ordered ahead of generic progress and acknowledged by exact
+presentation/revision, not merely by job. A reference success is not a definition
+reload, failed/interrupted reads never become loaded, and an acknowledged outcome
+disappears on subsequent ordinary progress. WAITING_USER is terminal for that job's
+status, not a delivered report. None of these operational records become history.
+Loaded notices certify committed content only. Runtime neither validates compliance
+with prompt skills nor guarantees business-report provenance, completeness or field
+accuracy; model-output quality requires separate evidence review.
 
 
 Slack presents final assistant text as a whole native Markdown block (fixed
@@ -236,7 +272,7 @@ cross-layer behavior.
 | Boundary | Current test organization |
 | --- | --- |
 | Domain invariants and provider-neutral records | `ConversationDomainTest`, `ContextUsageEstimatorTest`, `GenericToolSnapshotTest`, and `slack/domain/SlackPermalinkParserTest`; these run without Spring, PostgreSQL, an MCP server, or a model key. |
-| Conversation application behavior with local fakes | `MessageServiceTest`, `SessionQueryServiceTest`, `MessageJobContextCompactionTest`, `MessageJobToolExecutionTest`, `MessageJobRecoveryTest`, and shared `MessageJobTestFixtures`; these cover history loading, model-call reservation, compaction, ordered tool execution and ordinary tool failures, continuation, claim fencing, retry, and recovery. |
+| Conversation application behavior with local fakes | `MessageServiceTest`, `SessionQueryServiceTest`, `MessageJobContextCompactionTest`, `MessageJobToolExecutionTest`, `MessageJobRecoveryTest`, `MessageJobHandoffTest`, `MessageJobSkillsTest`, and shared `MessageJobTestFixtures`; these cover history admission, purpose-aware reservations, bounded handoff, semantic modes, ordered tools, skill receipt propagation, continuation, claim fencing and recovery. |
 | Model adapter behavior | `model/adapter/springai/HistoryProjectorTest`, `SpringAiConversationModelTest`, `SpringAiToolCallbackFactoryTest`, `SpringAiMessagePartsHandlerTest`, `GoogleGenAiContinuationTest`, and the explicitly gated `GoogleModelLiveTest`. Ordered continuation tests retain reasoning, per-part signatures, unknown provider parts and media; local fake-HTTP provider tests exercise replay without model quota. |
 | MCP adapter behavior | `mcp/adapter/sdk/McpConnectionClientFactoryTest`, `McpConnectionManagerTest`, `McpToolCatalogTest`, `McpToolResultMapperTest`, and `McpConnectionsEndpointTest`. The endpoint test stays in this package because it exercises the SDK adapter's private seam. |
 | PostgreSQL and HTTP adapters | `storage/adapter/postgres/PostgresConversationCommitPostgresIT`, `PostgresMessageIntakePostgresIT`, and `PostgresMessageJobPostgresIT`; `web/adapter/http/MessageControllerTest`; and Slack persistence tests described below. |
@@ -274,6 +310,17 @@ synthetic intake through the existing Slack adapter. Capture blocked-model refre
 multipart delivery, independent progress errors, cancellation and restart/history
 counts; keep private evidence outside Git and remove temporary launchers. This
 proves local transport integration, not genuine Slack inbound or native client UI.
+
+Continuation/skill acceptance additionally exercises cap-discard/one no-tools wrap,
+persisted waiting across restart, all four follow-up decisions, restricted tools,
+artifact ownership/release, committed definition/reference/failure notices and exact
+acknowledgement without progress noise in history. Local deterministic boundary
+responses prove integration, not model semantic quality. Authorized real-model
+samples must separately capture actual Luna response identity, real read-only MCP,
+stored skill bytes/hash, Slack API updates and downloaded artifact hashes. Keep
+production Sol and its allowance unchanged; isolated Luna runs must be selected
+before even valid skill-only confirmation. Synthetic ingress and authenticated
+browser/human Socket evidence are distinct acceptance boundaries.
 
 
 Neither command should require a live model or MCP server. Keep live model,

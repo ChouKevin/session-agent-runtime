@@ -37,8 +37,7 @@ public final class SlackPermalinkParser {
             throw invalidPermalink();
         }
         String rootThreadTimestamp = values.get("thread_ts");
-        if (!TIMESTAMP.matcher(rootThreadTimestamp).matches() || !channelId.equals(values.get("cid"))
-                || rootThreadTimestamp.equals(messageTimestamp)) {
+        if (!TIMESTAMP.matcher(rootThreadTimestamp).matches() || !channelId.equals(values.get("cid"))) {
             throw invalidPermalink();
         }
         return new SlackPermalink(channelId, rootThreadTimestamp);

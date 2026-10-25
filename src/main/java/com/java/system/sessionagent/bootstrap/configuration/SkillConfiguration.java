@@ -7,6 +7,8 @@ import com.java.system.sessionagent.skill.adapter.filesystem.FileSystemSkillLibr
 import com.java.system.sessionagent.skill.adapter.tool.SkillToolCatalog;
 import com.java.system.sessionagent.skill.configuration.SkillProperties;
 import com.java.system.sessionagent.skill.port.SkillLibrary;
+import com.java.system.sessionagent.tool.port.SkillLoadObserver;
+import com.java.system.sessionagent.storage.adapter.postgres.PostgresSkillLoadObserver;
 import com.java.system.sessionagent.tool.port.CompositeToolCatalog;
 import com.java.system.sessionagent.tool.port.ToolCatalog;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
@@ -28,9 +30,16 @@ public class SkillConfiguration {
     }
 
     @Bean
+    SkillLoadObserver skillLoadObserver(DataSource dataSource) {
+        return new PostgresSkillLoadObserver(dataSource);
+    }
+
+    @Bean
     ToolCatalog toolCatalog(SkillLibrary library, McpConnectionManager manager, ObjectMapper objectMapper,
-                            ArtifactStore artifactStore, DataSource dataSource, SlackProperties properties) {
-        ToolCatalog ordinary = new CompositeToolCatalog(List.of(new McpToolCatalog(manager, objectMapper), new SkillToolCatalog(library)));
+                            ArtifactStore artifactStore, DataSource dataSource, SlackProperties properties,
+                            SkillLoadObserver skillLoadObserver) {
+        ToolCatalog ordinary = new CompositeToolCatalog(List.of(new McpToolCatalog(manager, objectMapper),
+                new SkillToolCatalog(library, skillLoadObserver)));
         return new ArtifactToolCatalog(ordinary, artifactStore, new SlackAttachmentRoute(dataSource, properties));
     }
 }

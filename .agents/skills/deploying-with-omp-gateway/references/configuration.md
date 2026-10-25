@@ -66,6 +66,23 @@ curl --fail -X PUT "http://127.0.0.1:8090/internal/sessions/$SESSION_ID/model" \
 
 `model` 是設定名稱，作用於該 session 之後受理的新訊息，不改寫已排隊／執行中的工作。移除既有 session 仍選用的名稱之前，先完成選擇遷移。Slack 沒有切換模型指令。
 
+### 隔離 Luna 驗收 profile
+
+真實模型驗收另用私有 `acceptance-luna` entry：`provider: openai`、
+`model-id: openai-codex/gpt-6-luna`、`reasoning-effort: medium`、
+`context-window-tokens: 272000`、`max-output-tokens: 8192`；沿用有效的
+Gateway route／credential 來源，不複製 Sol 的 500000 容量。實際可用性仍須
+核對 catalog 與成功 response 的 model ID，不能只看 YAML。
+
+保留 production default Sol。若新 Slack thread 尚未建立 session binding，
+用預設已選 Luna 的隔離 Runtime，且在第一則訊息前完成設定。有效
+`/skill:inventory-java-mq` 無問題版本仍會發模型確認，不是零模型 bootstrap。
+隔離驗收可將 ordinary allowance 設為3或4以觀察 handoff；production12不變。
+外部 config 必須完整替換 bundled config，不能只清空 import 或改 default，
+否則原 Google model entry 仍可能合併。隔離 DB／private config 不連 production DB。
+同一 Slack app 不啟動第二個 Socket consumer；harness 僅替換 Socket runtime
+factory，保留實際 intake／worker／Web API，並明確標示 synthetic ingress。
+
 ## Slack
 
 私有 `runtime.env`：
@@ -164,3 +181,26 @@ summary 或 token 估算；該工作零模型請求。自動工具讀取失敗�
 容器以唯讀 bind mount（`:ro`）掛載；路徑與祖先不可用 symlink。不要掛載 home、
 OMP credential 或 `.agents/skills` 維護／部署指南。Runtime 不執行 shell/scripts，
 也不自動發現 OMP／repository skills。部署權限見 [install.md](install.md)。
+
+### 安裝 Java MQ 業務 skill
+
+本 repo 的業務來源是 `runtime-skills/inventory-java-mq/SKILL.md`，不是
+`.agents/skills`。核准後由操作者把 `inventory-java-mq` 目錄複製到上述 root，
+例如 `/opt/session-agent/skills/inventory-java-mq/SKILL.md`；不以 checkout
+symlink 代替複製，不額外掛載整個 repo。保留 operator ownership，Runtime 僅
+read/traverse；容器掛載 root 時維持 `:ro`。不要把主機私有設定或 credentials
+放進 skill。設定仍預設停用；repo 內有檔案不代表已部署。
+
+重啟後確認 startup metadata 有 `inventory-java-mq`、正確 description 與
+`skill://inventory-java-mq`；body 依 current-file 規則讀取。完整檔案（含
+frontmatter）必須落在實際 `max-file-bytes` 內，技能總數落在 `max-skills` 內。
+不需修改 Runtime core prompt、MCP tool names 或 Gateway 設定。
+
+HTTP 使用 `/skill:inventory-java-mq 問題`；Slack 使用
+`@bot /skill:inventory-java-mq 問題`。只送 `/skill:inventory-java-mq` 仍會載入並
+請模型確認；自動選擇則要另在新 context 驗證真實 `readSkill` call。
+技能預設盤點共用／靜態 consumer 設定，明確要求環境時才展開該環境；
+每個 repo 使用獨立 source pin，不能把靜態證據當成已部署設定。
+「技能已載入」只證明該次 bytes 已提交，不證明模型遵守指引或報表正確。
+Prompt skill 不是 validator；來源歸屬、coverage 與欄位對應仍須獨立驗收。
+驗收見 [verification.md](verification.md#java-mq-業務-skill-驗收)。

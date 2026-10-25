@@ -15,6 +15,7 @@ import com.java.system.sessionagent.worker.configuration.WorkerProperties;
 import org.junit.jupiter.api.Test;
 import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.chat.prompt.Prompt;
+import org.springframework.ai.model.tool.ToolCallingChatOptions;
 import org.springframework.core.io.ClassPathResource;
 
 import java.nio.charset.StandardCharsets;
@@ -228,6 +229,7 @@ class RuntimeConfigurationTest {
     private static void assertConfiguredGoogleFailure(ApiException providerFailure, ModelCallFailure.Kind expectedKind) throws Exception {
         AtomicInteger reservations = new AtomicInteger();
         ChatModel chatModel = mock(ChatModel.class);
+        when(chatModel.getOptions()).thenReturn(ToolCallingChatOptions.builder().build());
         when(chatModel.call(any(Prompt.class))).thenThrow(new RuntimeException("Spring AI wrapper", providerFailure));
         RuntimeProperties.ModelProfile profile = new RuntimeProperties.ModelProfile("google-genai", "gemini-3.1-flash-lite",
                 "test-key", 1_048_576, 8_192, null, null, null, null, null);
@@ -238,7 +240,7 @@ class RuntimeConfigurationTest {
                 new NoOpConversationTelemetry(), new ObjectMapper(), properties,
                 configuredProfile -> new RuntimeConfiguration.CreatedChatModel(chatModel, Optional.empty()))) {
             assertThatThrownBy(() -> models.defaultConversationModel().respond(
-                    new ModelRequest(List.of(), new ToolSnapshot(List.of())), reservations::incrementAndGet))
+                    new ModelRequest(List.of(), new ToolSnapshot(List.of()), ModelRequest.Purpose.ANSWER), reservations::incrementAndGet))
                     .isInstanceOfSatisfying(ModelCallFailure.class,
                             failure -> assertThat(failure.kind()).isEqualTo(expectedKind));
         }

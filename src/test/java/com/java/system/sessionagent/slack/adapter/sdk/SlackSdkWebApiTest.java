@@ -35,6 +35,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.catchThrowable;
 
 class SlackSdkWebApiTest {
@@ -42,8 +43,10 @@ class SlackSdkWebApiTest {
     @Test
     void resolves_the_specific_threaded_message_with_real_sdk_and_rejects_wrong_identity_or_unsafe_links() throws Exception {
         String link = "https://example.slack.com/archives/C1/p2000002?thread_ts=1.000001&cid=C1";
-        for (String returned : List.of(link, "https://example.slack.com/archives/C1/p1000001",
-                "https://example.slack.com/archives/C2/p2000002", "https://evil.example/archives/C1/p2000002", "")) {
+        String rootLink = "https://example.slack.com/archives/C1/p2000002?thread_ts=2.000002&cid=C1";
+        for (String returned : List.of(link, rootLink, "https://example.slack.com/archives/C1/p1000001",
+                "https://example.slack.com/archives/C2/p2000002", "https://evil.example/archives/C1/p2000002",
+                "https://example.slack.com/archives/C1/p2000002?thread_ts=2.000002&cid=C2", "")) {
             List<String> requests = new CopyOnWriteArrayList<>();
             HttpServer server = HttpServer.create(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 0);
             server.createContext("/", exchange -> {
@@ -59,8 +62,9 @@ class SlackSdkWebApiTest {
             config.setStatsEnabled(false);
             config.setMethodsEndpointUrlPrefix(methodsEndpoint(server));
             try (SlackSdkWebApi api = new SlackSdkWebApi(properties(), Slack.getInstance(config))) {
-                if (returned.equals(link)) {
-                    assertThat(api.getPermalink("C1", "2.000002")).isEqualTo(link);
+                if (returned.equals(link) || returned.equals(rootLink)) {
+                    assertThatCode(() -> assertThat(api.getPermalink("C1", "2.000002")).isEqualTo(returned))
+                            .doesNotThrowAnyException();
                 } else {
                     assertThat(catchThrowable(() -> api.getPermalink("C1", "2.000002")))
                             .isInstanceOfSatisfying(SlackPostFailure.class,

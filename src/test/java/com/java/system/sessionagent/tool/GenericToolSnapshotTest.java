@@ -3,6 +3,7 @@ package com.java.system.sessionagent.tool;
 import static com.java.system.sessionagent.tool.TestToolInvocation.invocation;
 import com.java.system.sessionagent.tool.domain.ToolName;
 import com.java.system.sessionagent.tool.port.ToolBinding;
+import com.java.system.sessionagent.tool.port.ToolCapability;
 import com.java.system.sessionagent.tool.port.ToolDefinition;
 import com.java.system.sessionagent.tool.port.ToolOutput;
 import com.java.system.sessionagent.tool.port.ToolSnapshot;
@@ -14,6 +15,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Stream;
@@ -38,7 +40,7 @@ class GenericToolSnapshotTest {
                 (context, supplied) -> {
                     received.set(supplied);
                     return new ToolOutput(false, Map.of("items", List.of()));
-                });
+                }, ToolCapability.ORDINARY);
         try (ToolSnapshot snapshot = new ToolSnapshot(List.of(binding))) {
             ToolOutput output = snapshot.invoke(invocation(), new ToolName("semantic_search_code"), arguments);
 
@@ -158,10 +160,39 @@ class GenericToolSnapshotTest {
         assertThrows(IllegalArgumentException.class, () -> new ToolName(name));
     }
 
+    @Test
+    void restricted_snapshot_hides_and_rejects_excluded_tools_and_owns_the_lifetime_once() {
+        AtomicInteger ordinaryCalls = new AtomicInteger();
+        AtomicInteger reportCalls = new AtomicInteger();
+        AtomicInteger releases = new AtomicInteger();
+        ToolBinding ordinary = new ToolBinding(new ToolDefinition(new ToolName("opaqueLookup"), "Lookup", SCHEMA),
+                (context, arguments) -> {
+                    ordinaryCalls.incrementAndGet();
+                    return new ToolOutput(false, arguments);
+                }, ToolCapability.ORDINARY);
+        ToolBinding report = new ToolBinding(new ToolDefinition(new ToolName("opaqueReport"), "Report", SCHEMA),
+                (context, arguments) -> {
+                    reportCalls.incrementAndGet();
+                    return new ToolOutput(false, arguments);
+                }, ToolCapability.REPORT_GENERATION);
+        ToolSnapshot owner = new ToolSnapshot(List.of(ordinary, report), releases::incrementAndGet)
+                .restrictedTo(Set.of(ToolCapability.REPORT_GENERATION));
+
+        assertEquals(List.of(report.definition()), owner.definitions());
+        assertTrue(owner.invoke(invocation(), new ToolName("opaqueLookup"), Map.of()).isError());
+        assertFalse(owner.invoke(invocation(), new ToolName("opaqueReport"), Map.of()).isError());
+        assertEquals(0, ordinaryCalls.get());
+        assertEquals(1, reportCalls.get());
+        assertEquals(0, releases.get());
+        owner.close();
+        owner.close();
+        assertEquals(1, releases.get());
+    }
+
     private static ToolBinding binding(String name) {
         return new ToolBinding(
                 new ToolDefinition(new ToolName(name), name, SCHEMA),
-                (context, arguments) -> new ToolOutput(false, arguments));
+                (context, arguments) -> new ToolOutput(false, arguments), ToolCapability.ORDINARY);
     }
 
     private static Stream<String> runtimeFailureCodes() {

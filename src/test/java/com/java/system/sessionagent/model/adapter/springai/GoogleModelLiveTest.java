@@ -55,7 +55,7 @@ class GoogleModelLiveTest {
                 countingModel, new SystemPrompt(), new NoOpConversationTelemetry(), objectMapper,
                 new SpringAiMessagePartsHandler(new ModelRouteId("google-genai")));
 
-        ModelReply reply = model.respond(new ModelRequest(List.of(question), new ToolSnapshot(List.of())),
+        ModelReply reply = model.respond(new ModelRequest(List.of(question), new ToolSnapshot(List.of()), ModelRequest.Purpose.ANSWER),
                 reservations::incrementAndGet, usage -> { }).reply();
 
         assertThat(retryProperties.getMaxAttempts()).isEqualTo(1);

@@ -1,5 +1,13 @@
 package com.java.system.sessionagent.conversation;
 
+import com.java.system.sessionagent.conversation.domain.IntentRequest;
+import com.java.system.sessionagent.conversation.domain.IntentResult;
+
+import com.java.system.sessionagent.conversation.domain.ModelCallPurpose;
+import com.java.system.sessionagent.conversation.domain.ModelCallReservationResult;
+import com.java.system.sessionagent.conversation.domain.JobControl;
+import com.java.system.sessionagent.conversation.domain.WaitingChoice;
+
 import com.java.system.sessionagent.conversation.domain.AssistantMessage;
 import com.java.system.sessionagent.conversation.domain.AssistantToolCallsMessage;
 import com.java.system.sessionagent.conversation.domain.ContextCompaction;
@@ -39,8 +47,8 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.OptionalInt;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -54,6 +62,85 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class MessageJobContextCompactionTest {
+    @Test
+    void last_ordinary_context_failure_enters_wrap_without_an_extra_compaction_request() {
+        ConversationStore store = mockStore();
+        MessageWorkClaim claim = claim();
+        when(store.loadContextHistory(claim.sessionId())).thenReturn(contextHistory(List.of(user())));
+        when(store.reserveModelCall(eq(claim), eq(ModelCallPurpose.EXECUTION), eq(1), any()))
+                .thenReturn(new ModelCallReservationResult.Reserved(1, 1));
+        when(store.reserveModelCall(eq(claim), eq(ModelCallPurpose.WRAP_UP), eq(1), any()))
+                .thenReturn(new ModelCallReservationResult.Reserved(2, 1));
+        AtomicInteger requests = new AtomicInteger();
+        ConversationModel model = Mockito.spy(model(TEST_ROUTE_ID, (request, reservation, usage) -> {
+            reservation.reserve();
+            if (requests.incrementAndGet() == 1) {
+                throw ModelCallFailure.contextTooLarge();
+            }
+            assertThat(request.purpose()).isEqualTo(ModelRequest.Purpose.WRAP_UP);
+            assertThat(request.toolSnapshot().definitions()).isEmpty();
+            return result(new ModelReply.Text("Continue or organize the evidence?"));
+        }));
+
+        assertThat(service(store, model, catalog(), 1).process(claim, () -> true)).isEqualTo(MessageJobProcessingResult.COMPLETED);
+        assertThat(requests).hasValue(2);
+        verify(model, Mockito.never()).summarize(any(), any());
+        verify(store, Mockito.never()).compact(any(), any(), any());
+        ArgumentCaptor<ConversationStore.MessageBatch> batch = ArgumentCaptor.forClass(ConversationStore.MessageBatch.class);
+        verify(store).append(eq(claim), batch.capture(), any());
+        assertThat(batch.getValue().completionDisposition()).isEqualTo(ConversationStore.CompletionDisposition.WAITING);
+    }
+
+    @Test
+    void oversized_intent_context_fails_closed_without_preclassification_compaction() {
+        ConversationStore store = mockStore();
+        MessageWorkClaim claim = claim();
+        UserMessage current = new UserMessage(claim.sessionId(), new SessionSequence(2), Optional.of(claim.messageJobId()),
+                Instant.EPOCH, MessageRole.USER, "alice", "x".repeat(20_000));
+        JobControl control = new JobControl(JobControl.Mode.NORMAL, JobControl.Stage.INTENT, current,
+                Optional.of(new WaitingChoice(claim.messageJobId(), new SessionSequence(1), 1)), 0, false, false);
+        when(store.loadJobControl(claim)).thenReturn(control);
+        when(store.loadContextHistory(claim.sessionId())).thenReturn(contextHistory(List.of(current)));
+        ConversationModel model = Mockito.spy(model(TEST_ROUTE_ID, (request, reservation, usage) -> {
+            throw new AssertionError("No provider request is allowed for unfit control context");
+        }));
+        Mockito.doReturn(new ModelDescriptor(TEST_ROUTE_ID, "bounded", 1_000)).when(model).descriptor();
+
+        assertThat(service(store, model, () -> { throw new AssertionError("No tools before intent resolution"); })
+                .process(claim, () -> true)).isEqualTo(MessageJobProcessingResult.COMPLETED);
+        verify(model, Mockito.never()).classifyIntent(any(), any());
+        verify(model, Mockito.never()).summarize(any(), any());
+        verify(store, Mockito.never()).reserveModelCall(any(), any(), any(Integer.class), any());
+        ArgumentCaptor<ConversationStore.MessageBatch> batch = ArgumentCaptor.forClass(ConversationStore.MessageBatch.class);
+        verify(store).append(eq(claim), batch.capture(), any());
+        assertThat(batch.getValue().completionDisposition()).isEqualTo(ConversationStore.CompletionDisposition.WAITING);
+    }
+
+    @Test
+    void oversized_wrap_context_uses_the_safe_waiting_notice_without_compaction_or_a_provider_request() {
+        ConversationStore store = mockStore();
+        MessageWorkClaim claim = claim();
+        UserMessage current = new UserMessage(claim.sessionId(), new SessionSequence(1), Optional.of(claim.messageJobId()),
+                Instant.EPOCH, MessageRole.USER, "alice", "x".repeat(20_000));
+        JobControl control = new JobControl(JobControl.Mode.NORMAL, JobControl.Stage.WRAP_UP, current, Optional.empty(), 1, false, false);
+        when(store.loadJobControl(claim)).thenReturn(control);
+        when(store.enterWrapUp(eq(claim), any())).thenReturn(control);
+        when(store.loadContextHistory(claim.sessionId())).thenReturn(contextHistory(List.of(current)));
+        ConversationModel model = Mockito.spy(model(TEST_ROUTE_ID, (request, reservation, usage) -> {
+            throw new AssertionError("No provider request is allowed for unfit wrap context");
+        }));
+        Mockito.doReturn(new ModelDescriptor(TEST_ROUTE_ID, "bounded", 1_000)).when(model).descriptor();
+
+        assertThat(service(store, model, () -> { throw new AssertionError("No tools during wrap"); }, 1)
+                .process(claim, () -> true)).isEqualTo(MessageJobProcessingResult.COMPLETED);
+        verify(model, Mockito.never()).respond(any(), any(), any());
+        verify(model, Mockito.never()).summarize(any(), any());
+        verify(store, Mockito.never()).reserveModelCall(any(), any(), any(Integer.class), any());
+        ArgumentCaptor<ConversationStore.MessageBatch> batch = ArgumentCaptor.forClass(ConversationStore.MessageBatch.class);
+        verify(store).append(eq(claim), batch.capture(), any());
+        assertThat(batch.getValue().completionDisposition()).isEqualTo(ConversationStore.CompletionDisposition.WAITING);
+    }
+
 
     @Test
     void skill_load_alone_is_not_a_complete_response_boundary() {
@@ -67,6 +154,9 @@ class MessageJobContextCompactionTest {
                 new SkillCommandState(claim.messageJobId(), SkillCommand.parse("/skill:review").orElseThrow(),
                         SkillCommandState.Disposition.ACCEPTED, Optional.of(skill.sequence())))));
         ConversationModel model = new ConversationModel() {
+            @Override public IntentResult classifyIntent(IntentRequest request, ModelCallReservation reservation) {
+                throw new AssertionError("Unexpected intent request in ordinary-job fixture");
+            }
             @Override public ModelRouteId routeId() { return TEST_ROUTE_ID; }
             @Override public ModelDescriptor descriptor() { return new ModelDescriptor(TEST_ROUTE_ID, "test-capacity", 12_000); }
             @Override public String systemPrompt() { return "system"; }
@@ -136,7 +226,7 @@ class MessageJobContextCompactionTest {
         when(store.loadContextHistory(claim.sessionId())).thenReturn(history);
         when(store.loadHistory(claim.sessionId())).thenThrow(new AssertionError("Model context must never read raw audit history"));
         when(store.loadCompaction(claim.sessionId())).thenAnswer(invocation -> compacted.get());
-        when(store.reserveModelCall(eq(claim), eq(2), any(Instant.class))).thenReturn(OptionalInt.of(1), OptionalInt.of(2));
+        when(store.reserveModelCall(eq(claim), any(ModelCallPurpose.class), eq(2), any(Instant.class))).thenReturn(new ModelCallReservationResult.Reserved(1, 1), new ModelCallReservationResult.Reserved(2, 2));
         Mockito.doAnswer(invocation -> {
             ConversationStore.CompactionData data = invocation.getArgument(1);
             assertThat(data.coveredThrough().value()).isEqualTo(boundary);
@@ -146,6 +236,9 @@ class MessageJobContextCompactionTest {
         }).when(store).compact(eq(claim), any(), any());
         List<String> requests = new ArrayList<>();
         ConversationModel model = new ConversationModel() {
+            @Override public IntentResult classifyIntent(IntentRequest request, ModelCallReservation reservation) {
+                throw new AssertionError("Unexpected intent request in ordinary-job fixture");
+            }
             @Override public ModelRouteId routeId() { return TEST_ROUTE_ID; }
             @Override public ModelDescriptor descriptor() { return new ModelDescriptor(TEST_ROUTE_ID, "test-capacity", 12_000); }
             @Override public String systemPrompt() { return "system"; }
@@ -186,7 +279,7 @@ class MessageJobContextCompactionTest {
         AtomicReference<ContextCompaction> compacted = new AtomicReference<>();
         when(store.loadContextHistory(claim.sessionId())).thenReturn(contextHistory(rawHistory));
         when(store.loadCompaction(claim.sessionId())).thenAnswer(invocation -> Optional.ofNullable(compacted.get()));
-        when(store.reserveModelCall(eq(claim), eq(2), any(Instant.class))).thenReturn(OptionalInt.of(1), OptionalInt.of(2));
+        when(store.reserveModelCall(eq(claim), any(ModelCallPurpose.class), eq(2), any(Instant.class))).thenReturn(new ModelCallReservationResult.Reserved(1, 1), new ModelCallReservationResult.Reserved(2, 2));
         Mockito.doAnswer(invocation -> {
             ConversationStore.CompactionData data = invocation.getArgument(1);
             compacted.set(new ContextCompaction(data.generation(), claim.messageJobId(), data.reason(), new ContextSummary(data.summary()),
@@ -197,6 +290,9 @@ class MessageJobContextCompactionTest {
         List<String> callOrder = new ArrayList<>();
         ModelDescriptor descriptor = new ModelDescriptor(TEST_ROUTE_ID, "test-capacity", 12_000);
         ConversationModel model = new ConversationModel() {
+            @Override public IntentResult classifyIntent(IntentRequest request, ModelCallReservation reservation) {
+                throw new AssertionError("Unexpected intent request in ordinary-job fixture");
+            }
             @Override public ModelRouteId routeId() { return TEST_ROUTE_ID; }
             @Override public ModelDescriptor descriptor() { return descriptor; }
             @Override public String systemPrompt() { return "system"; }
@@ -237,7 +333,7 @@ class MessageJobContextCompactionTest {
         AtomicReference<ContextCompaction> compacted = new AtomicReference<>();
         when(store.loadContextHistory(claim.sessionId())).thenReturn(contextHistory(history));
         when(store.loadCompaction(claim.sessionId())).thenAnswer(invocation -> Optional.ofNullable(compacted.get()));
-        when(store.reserveModelCall(eq(claim), eq(2), any(Instant.class))).thenReturn(OptionalInt.of(1));
+        when(store.reserveModelCall(eq(claim), any(ModelCallPurpose.class), eq(2), any(Instant.class))).thenReturn(new ModelCallReservationResult.Reserved(1, 1));
         Mockito.doAnswer(invocation -> {
             ConversationStore.CompactionData data = invocation.getArgument(1);
             compacted.set(new ContextCompaction(data.generation(), claim.messageJobId(), data.reason(), new ContextSummary(data.summary()),
@@ -247,6 +343,9 @@ class MessageJobContextCompactionTest {
         }).when(store).compact(eq(claim), any(ConversationStore.CompactionData.class), any(Instant.class));
         ModelDescriptor descriptor = new ModelDescriptor(TEST_ROUTE_ID, "test-capacity", 12_000);
         ConversationModel model = new ConversationModel() {
+            @Override public IntentResult classifyIntent(IntentRequest request, ModelCallReservation reservation) {
+                throw new AssertionError("Unexpected intent request in ordinary-job fixture");
+            }
             @Override public ModelRouteId routeId() { return TEST_ROUTE_ID; }
             @Override public ModelDescriptor descriptor() { return descriptor; }
             @Override public String systemPrompt() { return "system"; }
@@ -291,7 +390,7 @@ class MessageJobContextCompactionTest {
         when(store.loadContextHistory(claim.sessionId())).thenReturn(contextHistory(List.of(currentUser))).thenReturn(contextHistory(committedHistory));
         when(store.loadContinuations(claim)).thenAnswer(invocation -> continuations.get());
         when(store.loadCompaction(claim.sessionId())).thenAnswer(invocation -> Optional.ofNullable(compacted.get()));
-        when(store.reserveModelCall(eq(claim), eq(3), any(Instant.class))).thenReturn(OptionalInt.of(1), OptionalInt.of(2), OptionalInt.of(3));
+        when(store.reserveModelCall(eq(claim), any(ModelCallPurpose.class), eq(3), any(Instant.class))).thenReturn(new ModelCallReservationResult.Reserved(1, 1), new ModelCallReservationResult.Reserved(2, 2), new ModelCallReservationResult.Reserved(3, 3));
         Mockito.doAnswer(invocation -> {
             ConversationStore.MessageBatch batch = invocation.getArgument(1);
             continuations.set(batch.continuation().map(value -> Map.of(new SessionSequence(2), value)).orElseGet(Map::of));
@@ -308,6 +407,9 @@ class MessageJobContextCompactionTest {
         List<String> callOrder = new ArrayList<>();
         ModelDescriptor descriptor = new ModelDescriptor(TEST_ROUTE_ID, "test-capacity", 12_000);
         ConversationModel model = new ConversationModel() {
+            @Override public IntentResult classifyIntent(IntentRequest request, ModelCallReservation reservation) {
+                throw new AssertionError("Unexpected intent request in ordinary-job fixture");
+            }
             @Override public ModelRouteId routeId() { return TEST_ROUTE_ID; }
             @Override public ModelDescriptor descriptor() { return descriptor; }
             @Override public String systemPrompt() { return "system"; }
@@ -344,7 +446,7 @@ class MessageJobContextCompactionTest {
         assertThat(committedHistory).extracting(message -> message.sequence().value()).containsExactly(1L, 2L, 3L, 4L);
         assertThat(compacted.get()).isNotNull();
         assertThat(compacted.get().coveredThrough().value()).isEqualTo(4L);
-        verify(store, Mockito.times(3)).reserveModelCall(eq(claim), eq(3), any(Instant.class));
+        verify(store, Mockito.times(3)).reserveModelCall(eq(claim), any(ModelCallPurpose.class), eq(3), any(Instant.class));
     }
 
     @Test
@@ -362,6 +464,9 @@ class MessageJobContextCompactionTest {
         when(store.loadContextHistory(claim.sessionId())).thenReturn(contextHistory(incompleteHistory));
         ModelDescriptor descriptor = new ModelDescriptor(TEST_ROUTE_ID, "test-capacity", 12_000);
         ConversationModel model = new ConversationModel() {
+            @Override public IntentResult classifyIntent(IntentRequest request, ModelCallReservation reservation) {
+                throw new AssertionError("Unexpected intent request in ordinary-job fixture");
+            }
             @Override public ModelRouteId routeId() { return TEST_ROUTE_ID; }
             @Override public ModelDescriptor descriptor() { return descriptor; }
             @Override public String systemPrompt() { return "system"; }
@@ -397,7 +502,7 @@ class MessageJobContextCompactionTest {
         when(store.loadContextHistory(claim.sessionId())).thenReturn(contextHistory(history));
         when(store.loadCompaction(claim.sessionId())).thenAnswer(invocation -> Optional.ofNullable(compacted.get()));
         when(store.hasOverflowCompaction(claim.messageJobId())).thenReturn(false);
-        when(store.reserveModelCall(eq(claim), eq(3), any(Instant.class))).thenReturn(OptionalInt.of(1), OptionalInt.of(2), OptionalInt.of(3));
+        when(store.reserveModelCall(eq(claim), any(ModelCallPurpose.class), eq(3), any(Instant.class))).thenReturn(new ModelCallReservationResult.Reserved(1, 1), new ModelCallReservationResult.Reserved(2, 2), new ModelCallReservationResult.Reserved(3, 3));
         Mockito.doAnswer(invocation -> {
             ConversationStore.CompactionData data = invocation.getArgument(1);
             compacted.set(new ContextCompaction(data.generation(), claim.messageJobId(), data.reason(), new ContextSummary(data.summary()),
@@ -408,6 +513,9 @@ class MessageJobContextCompactionTest {
         List<String> calls = new ArrayList<>();
         ModelDescriptor descriptor = new ModelDescriptor(TEST_ROUTE_ID, "test-capacity", 20_000);
         ConversationModel model = new ConversationModel() {
+            @Override public IntentResult classifyIntent(IntentRequest request, ModelCallReservation reservation) {
+                throw new AssertionError("Unexpected intent request in ordinary-job fixture");
+            }
             @Override public ModelRouteId routeId() { return TEST_ROUTE_ID; }
             @Override public ModelDescriptor descriptor() { return descriptor; }
             @Override public String systemPrompt() { return "system"; }

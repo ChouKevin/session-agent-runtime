@@ -159,6 +159,31 @@ class SlackProgressWorkerTest {
         Mockito.verify(api, Mockito.times(1)).getPermalink(Mockito.anyString(), Mockito.anyString());
     }
 
+    @Test
+    void fast_committed_skill_result_uses_one_call_and_exact_ack_before_terminal_progress_resumes() {
+        Mockito.when(store.claimNext("progress-worker", Duration.ofSeconds(30)))
+                .thenReturn(Optional.of(first)).thenReturn(Optional.of(recovered));
+        Mockito.when(store.refresh(first)).thenReturn(Optional.of(update(7, "skill result: review", false)));
+        Mockito.when(store.refresh(recovered)).thenReturn(Optional.of(update(8, "ordinary terminal", true)));
+        SlackProgressWorker worker = worker(api(request -> {
+            sent.add(request);
+            if (sent.size() == 1) {
+                Mockito.verify(store, Mockito.never()).markSent(Mockito.any(), Mockito.anyLong());
+            } else {
+                Mockito.verify(store).markSent(first, 7);
+            }
+        }));
+
+        assertThat(worker.poll()).isTrue();
+        assertThat(sent).extracting(SlackUpdateRequest::text).containsExactly("skill result: review");
+        Mockito.verify(store).markSent(first, 7);
+        Mockito.verify(store, Mockito.times(1)).refresh(first);
+        assertThat(worker.poll()).isTrue();
+        assertThat(sent).extracting(SlackUpdateRequest::text).containsExactly("skill result: review", "ordinary terminal");
+        Mockito.verify(store).markSent(recovered, 8);
+        Mockito.verify(store, Mockito.never()).recordFailure(Mockito.any(), Mockito.anyLong(), Mockito.any(), Mockito.any());
+    }
+
     private SlackProgressWorker worker(SlackWebApi api) {
         return new SlackProgressWorker(store, api, new SlackDeliveryProperties(), "progress-worker");
     }

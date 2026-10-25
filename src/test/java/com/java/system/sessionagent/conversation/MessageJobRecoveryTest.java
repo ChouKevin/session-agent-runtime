@@ -1,5 +1,9 @@
 package com.java.system.sessionagent.conversation;
 
+import com.java.system.sessionagent.conversation.domain.ModelCallPurpose;
+import com.java.system.sessionagent.conversation.domain.ModelCallReservationResult;
+import com.java.system.sessionagent.conversation.domain.JobControl;
+
 import com.java.system.sessionagent.skill.adapter.filesystem.FileSystemSkillLibrary;
 import com.java.system.sessionagent.skill.configuration.SkillProperties;
 import ch.qos.logback.classic.Logger;
@@ -34,7 +38,6 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.OptionalInt;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -56,13 +59,30 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class MessageJobRecoveryTest {
+    @Test
+    void storage_recovery_uses_ordinary_allowance_not_total_control_request_count() {
+        ConversationStore store = mockStore();
+        MessageWorkClaim claim = claim();
+        when(store.loadContextHistory(claim.sessionId())).thenThrow(
+                ConversationStoreFailure.transientFailure(new IllegalStateException("storage interrupted")));
+        when(store.readJob(claim.messageJobId())).thenReturn(Optional.of(new ConversationStore.MessageJobProjection(
+                claim.messageJobId(), claim.sessionId(), JobStatus.WORKING, 0, 20, Optional.empty(), Optional.empty(), Optional.empty())));
+        when(store.loadJobControl(claim)).thenReturn(new JobControl(JobControl.Mode.NORMAL, JobControl.Stage.EXECUTION,
+                user(), Optional.empty(), 1, true, false));
+        when(store.scheduleRetry(eq(claim), any(), eq(JobFailure.STORAGE_UNAVAILABLE))).thenReturn(true);
+        ConversationModel model = model(TEST_ROUTE_ID, (request, reservation, usage) -> { throw new AssertionError("No model before history"); });
+
+        assertThat(service(store, model, catalog(), 2).process(claim, () -> true)).isEqualTo(MessageJobProcessingResult.RETRY_SCHEDULED);
+        verify(store, Mockito.never()).append(any(), any(), any());
+    }
+
 
     @Test
     void does_not_invoke_a_tool_when_ownership_is_revoked_during_progress_publication() {
         ConversationStore store = mockStore();
         MessageWorkClaim claim = claim();
         when(store.loadContextHistory(claim.sessionId())).thenReturn(contextHistory(List.of(user())));
-        when(store.reserveModelCall(eq(claim), eq(2), any(Instant.class))).thenReturn(OptionalInt.of(1));
+        when(store.reserveModelCall(eq(claim), any(ModelCallPurpose.class), eq(2), any(Instant.class))).thenReturn(new ModelCallReservationResult.Reserved(1, 1));
         AtomicBoolean owned = new AtomicBoolean(true);
         Mockito.doAnswer(invocation -> {
             JobProgress progress = invocation.getArgument(1);
@@ -95,7 +115,7 @@ class MessageJobRecoveryTest {
         when(store.loadContextHistory(claim.sessionId())).thenReturn(contextHistory(List.of(user())));
         CountDownLatch reservationStarted = new CountDownLatch(1);
         CountDownLatch releaseReservation = new CountDownLatch(1);
-        when(store.reserveModelCall(eq(claim), eq(2), any(Instant.class))).thenAnswer(invocation -> {
+        when(store.reserveModelCall(eq(claim), any(ModelCallPurpose.class), eq(2), any(Instant.class))).thenAnswer(invocation -> {
             reservationStarted.countDown();
             try {
                 releaseReservation.await();
@@ -103,7 +123,7 @@ class MessageJobRecoveryTest {
                 Thread.currentThread().interrupt();
                 throw new IllegalStateException(exception);
             }
-            return OptionalInt.of(1);
+            return new ModelCallReservationResult.Reserved(1, 1);
         });
         AtomicInteger providerRequests = new AtomicInteger();
         ConversationModel model = model(TEST_ROUTE_ID, (request, reservation, usage) -> {
@@ -156,7 +176,7 @@ class MessageJobRecoveryTest {
 
         ArgumentCaptor<ConversationStore.MessageBatch> batch = ArgumentCaptor.forClass(ConversationStore.MessageBatch.class);
         verify(store).append(eq(claim), batch.capture(), any(Instant.class));
-        verify(store, Mockito.never()).reserveModelCall(any(), any(Integer.class), any(Instant.class));
+        verify(store, Mockito.never()).reserveModelCall(any(), any(ModelCallPurpose.class), any(Integer.class), any(Instant.class));
         verify(model, Mockito.never()).respond(any(), any(), any());
         assertTerminalFailure(batch.getValue(), "INVALID_CONVERSATION_HISTORY");
     }
@@ -292,7 +312,7 @@ class MessageJobRecoveryTest {
         ArgumentCaptor<ConversationStore.MessageBatch> batch = ArgumentCaptor.forClass(ConversationStore.MessageBatch.class);
         verify(store).append(eq(claim), batch.capture(), any(Instant.class));
         verify(model, Mockito.never()).respond(any(), any(), any());
-        verify(store, Mockito.never()).reserveModelCall(any(), any(Integer.class), any(Instant.class));
+        verify(store, Mockito.never()).reserveModelCall(any(), any(ModelCallPurpose.class), any(Integer.class), any(Instant.class));
         assertTerminalFailure(batch.getValue(), "MODEL_UNAVAILABLE");
     }
 
@@ -304,7 +324,7 @@ class MessageJobRecoveryTest {
         ModelRouteId routeId = new ModelRouteId("codex-primary");
         when(model.routeId()).thenReturn(routeId);
         when(store.loadContextHistory(claim.sessionId())).thenReturn(contextHistory(List.of(user())));
-        when(store.reserveModelCall(eq(claim), eq(2), any(Instant.class))).thenReturn(OptionalInt.of(1), OptionalInt.empty());
+        when(store.reserveModelCall(eq(claim), any(ModelCallPurpose.class), eq(2), any(Instant.class))).thenReturn(new ModelCallReservationResult.Reserved(1, 1), new ModelCallReservationResult.BudgetExhausted());
         ModelContinuation continuation = new ModelContinuation(new ModelRouteId("gemini-primary"), "opaque-v1", new byte[] {1});
         when(model.respond(any(), any(), any())).thenAnswer(invocation -> {
             ModelCallReservation reservation = invocation.getArgument(1);
@@ -344,7 +364,7 @@ class MessageJobRecoveryTest {
 
         ArgumentCaptor<ConversationStore.MessageBatch> batch = ArgumentCaptor.forClass(ConversationStore.MessageBatch.class);
         verify(store).append(eq(claim), batch.capture(), any(Instant.class));
-        verify(store, Mockito.never()).reserveModelCall(any(), any(Integer.class), any(Instant.class));
+        verify(store, Mockito.never()).reserveModelCall(any(), any(ModelCallPurpose.class), any(Integer.class), any(Instant.class));
         assertThat(toolInvoked).isFalse();
         assertTerminalFailure(batch.getValue(), "MODEL_UNAVAILABLE");
     }

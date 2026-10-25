@@ -1,6 +1,11 @@
 package com.java.system.sessionagent.conversation.port.out;
 
 import com.java.system.sessionagent.conversation.domain.ConversationHistory;
+import com.java.system.sessionagent.conversation.domain.JobControl;
+import com.java.system.sessionagent.conversation.domain.WaitingChoice;
+import com.java.system.sessionagent.conversation.domain.FollowUpIntent;
+import com.java.system.sessionagent.conversation.domain.ModelCallPurpose;
+import com.java.system.sessionagent.conversation.domain.ModelCallReservationResult;
 import com.java.system.sessionagent.skill.domain.SkillResource;
 import com.java.system.sessionagent.skill.domain.SkillReadResult;
 import com.java.system.sessionagent.conversation.domain.IncomingMessage;
@@ -22,6 +27,7 @@ import com.java.system.sessionagent.conversation.domain.SessionSequence;
 import com.java.system.sessionagent.conversation.domain.ToolCallId;
 import com.java.system.sessionagent.conversation.domain.ToolRequest;
 import com.java.system.sessionagent.tool.port.ArtifactReceipt;
+import com.java.system.sessionagent.tool.port.SkillReadReceipt;
 import org.springframework.util.Assert;
 
 import java.time.Duration;
@@ -31,8 +37,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
-import java.util.OptionalInt;
 import java.util.Set;
+import java.util.UUID;
 
 public interface ConversationStore {
 
@@ -57,6 +63,8 @@ public interface ConversationStore {
     List<SessionMessage> loadHistory(SessionId sessionId);
 
     ConversationHistory loadContextHistory(SessionId sessionId);
+
+    UUID startSkillCommand(MessageWorkClaim claim);
 
     JobStatus resolveSkillCommand(MessageWorkClaim claim, SkillReadResult result, Instant createdAt);
 
@@ -105,7 +113,14 @@ public interface ConversationStore {
         throw new UnsupportedOperationException("Context compaction is not supported");
     }
 
-    OptionalInt reserveModelCall(MessageWorkClaim claim, int maxModelCalls, Instant now);
+    JobControl loadJobControl(MessageWorkClaim claim);
+
+    ModelCallReservationResult reserveModelCall(
+            MessageWorkClaim claim, ModelCallPurpose purpose, int maxExecutionCalls, Instant now);
+
+    JobControl resolveFollowUp(MessageWorkClaim claim, WaitingChoice expected, FollowUpIntent intent, Instant now);
+
+    JobControl enterWrapUp(MessageWorkClaim claim, Instant now);
 
     void updateProgress(MessageWorkClaim claim, JobProgress progress);
 
@@ -151,6 +166,10 @@ public interface ConversationStore {
         COMPLETE,
         CANCEL
     }
+    enum CompletionDisposition {
+        NONE, ANSWER, WAITING
+    }
+
 
     sealed interface MessageData permits AssistantData, AssistantToolCallsData, ToolObservationData, RuntimeData, SkillData {
     }
@@ -192,10 +211,16 @@ public interface ConversationStore {
             ToolCallId toolCallId,
             String toolName,
             Object output,
-            Optional<ArtifactReceipt> artifactReceipt) implements MessageData {
+            Optional<ArtifactReceipt> artifactReceipt,
+            Optional<SkillReadReceipt> skillReadReceipt) implements MessageData {
 
         public ToolObservationData(ToolCallId toolCallId, String toolName, Object output) {
-            this(toolCallId, toolName, output, Optional.empty());
+            this(toolCallId, toolName, output, Optional.empty(), Optional.empty());
+        }
+
+        public ToolObservationData(ToolCallId toolCallId, String toolName, Object output,
+                Optional<ArtifactReceipt> artifactReceipt) {
+            this(toolCallId, toolName, output, artifactReceipt, Optional.empty());
         }
 
         public ToolObservationData {
@@ -203,6 +228,7 @@ public interface ConversationStore {
             Assert.hasText(toolName, "Tool name must not be blank");
             Assert.notNull(output, "Tool output must not be null");
             Assert.notNull(artifactReceipt, "Artifact receipt must not be null");
+            Assert.notNull(skillReadReceipt, "Skill read receipt must not be null");
         }
     }
 
@@ -249,7 +275,8 @@ public interface ConversationStore {
     }
 
     record MessageBatch(List<MessageData> messages, JobUpdate jobUpdate, Optional<ModelContinuation> continuation,
-                        Optional<UsageCheckpointData> usageCheckpoint, Optional<JobFailure> failure) {
+                        Optional<UsageCheckpointData> usageCheckpoint, Optional<JobFailure> failure,
+                        CompletionDisposition completionDisposition) {
 
         public MessageBatch {
             Assert.notEmpty(messages, "Message batch must not be empty");
@@ -258,24 +285,27 @@ public interface ConversationStore {
             Assert.notNull(continuation, "Model continuation must not be null");
             Assert.notNull(usageCheckpoint, "Usage checkpoint must not be null");
             Assert.notNull(failure, "Job failure must not be null");
+            Assert.notNull(completionDisposition, "Completion disposition must not be null");
+            Assert.isTrue(completionDisposition == CompletionDisposition.NONE || jobUpdate == JobUpdate.COMPLETE,
+                    "Answer and waiting dispositions require completion");
             long toolCallEvents = messages.stream().filter(AssistantToolCallsData.class::isInstance).count();
             Assert.isTrue(continuation.isEmpty() || (jobUpdate == JobUpdate.KEEP_WORKING && toolCallEvents == 1),
                     "Model continuation requires one working assistant tool call event");
             Assert.isTrue(jobUpdate != JobUpdate.CANCEL || failure.isEmpty(),
                     "Cancellation is not a job failure");
         }
-
-        public MessageBatch(List<MessageData> messages, JobUpdate jobUpdate) {
-            this(messages, jobUpdate, Optional.empty(), Optional.empty(), Optional.empty());
-        }
-
-        public MessageBatch(List<MessageData> messages, JobUpdate jobUpdate, Optional<ModelContinuation> continuation) {
-            this(messages, jobUpdate, continuation, Optional.empty(), Optional.empty());
+        public MessageBatch(List<MessageData> messages, JobUpdate jobUpdate, CompletionDisposition completionDisposition) {
+            this(messages, jobUpdate, Optional.empty(), Optional.empty(), Optional.empty(), completionDisposition);
         }
 
         public MessageBatch(List<MessageData> messages, JobUpdate jobUpdate, Optional<ModelContinuation> continuation,
-                Optional<UsageCheckpointData> usageCheckpoint) {
-            this(messages, jobUpdate, continuation, usageCheckpoint, Optional.empty());
+                            CompletionDisposition completionDisposition) {
+            this(messages, jobUpdate, continuation, Optional.empty(), Optional.empty(), completionDisposition);
+        }
+
+        public MessageBatch(List<MessageData> messages, JobUpdate jobUpdate, Optional<ModelContinuation> continuation,
+                            Optional<UsageCheckpointData> usageCheckpoint, CompletionDisposition completionDisposition) {
+            this(messages, jobUpdate, continuation, usageCheckpoint, Optional.empty(), completionDisposition);
         }
     }
 }

@@ -9,6 +9,7 @@ import com.java.system.sessionagent.slack.domain.SlackProgressState;
 import com.java.system.sessionagent.slack.domain.SlackProgressUpdate;
 import com.java.system.sessionagent.slack.domain.SlackUpdateRequest;
 import com.java.system.sessionagent.slack.port.out.SlackProgressStore;
+import com.java.system.sessionagent.slack.domain.SlackProgressUpdate.SkillPresentation.ResourceKind;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.util.Assert;
@@ -36,6 +37,7 @@ public final class SlackPostgresProgressStore implements SlackProgressStore {
     @Override
     public void discover() {
         transactions.executeWithoutResult(status -> {
+            mapper.interruptAbandonedLoads();
             mapper.discover();
             mapper.discoverWorkspaces();
         });
@@ -141,11 +143,28 @@ public final class SlackPostgresProgressStore implements SlackProgressStore {
         SlackProgressState state = SlackProgressState.valueOf(row.observedState());
         Instant observedAt = row.observedAt().toInstant();
         Optional<String> permalink = Optional.ofNullable(row.questionPermalink());
-        String text = state.description() + permalink.map(link -> "\n<" + link + "|原始問題>").orElse("")
+        Optional<SlackProgressUpdate.SkillPresentation> presentation = Optional.ofNullable(row.presentationId())
+                .map(id -> new SlackProgressUpdate.SkillPresentation(id,
+                        SlackProgressUpdate.SkillPresentation.Kind.valueOf(row.presentationKind()), row.skillName(),
+                        ResourceKind.valueOf(row.resourceKind())));
+        String description = presentation.map(skill -> skillDescription(state, skill)).orElseGet(state::description);
+        String text = description + permalink.map(link -> "\n<" + link + "|原始問題>").orElse("")
                 + "\n最後確認（UTC）：" + observedAt
                 + "\n此為最後確認的狀態；時間較舊不代表仍在執行。";
         return new SlackProgressUpdate(row.revision(), new SlackUpdateRequest(row.channelId(), row.targetMessageTs(), text),
-                state.terminal(), observedAt, row.sourceMessageTs(), permalink);
+                state.terminal(), observedAt, row.sourceMessageTs(), permalink, presentation);
+    }
+
+    private static String skillDescription(SlackProgressState state, SlackProgressUpdate.SkillPresentation skill) {
+        boolean reference = skill.resourceKind() == ResourceKind.REFERENCE;
+        String action = reference ? switch (state) {
+            case SKILL_LOADING -> "正在讀取技能參考資料";
+            case SKILL_LOADED -> "技能參考資料已讀取";
+            case SKILL_FAILED -> "技能參考資料讀取失敗";
+            case SKILL_INTERRUPTED -> "技能參考資料讀取已中斷";
+            default -> throw new IllegalArgumentException("Invalid skill presentation state");
+        } : state.description();
+        return action + "：" + skill.skillName();
     }
 
     private static long milliseconds(Duration duration) { return Math.max(1, duration.toMillis()); }

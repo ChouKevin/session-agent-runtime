@@ -25,6 +25,7 @@ import com.java.system.sessionagent.model.adapter.springai.SystemPrompt;
 import com.java.system.sessionagent.model.adapter.springai.ConfiguredModels;
 import com.java.system.sessionagent.tool.domain.ToolName;
 import com.java.system.sessionagent.tool.port.ToolBinding;
+import com.java.system.sessionagent.tool.port.ToolCapability;
 import com.java.system.sessionagent.tool.port.ToolDefinition;
 import com.java.system.sessionagent.tool.port.ToolSnapshot;
 import com.sun.net.httpserver.HttpExchange;
@@ -68,7 +69,7 @@ class OpenAiConfiguredModelTest {
         server.start();
         try (ConfiguredModels models = configuredModels(server, new MicrometerConversationTelemetry(registry))) {
             ModelCallResult result = models.defaultConversationModel().respond(
-                    new ModelRequest(List.of(), new ToolSnapshot(List.of())), reservations::incrementAndGet);
+                    new ModelRequest(List.of(), new ToolSnapshot(List.of()), ModelRequest.Purpose.ANSWER), reservations::incrementAndGet);
 
             assertThat(result.usage()).as(scenario)
                     .isEqualTo(new ModelUsage(8, 2, 10, true, expectedCachedInputTokens));
@@ -116,7 +117,7 @@ class OpenAiConfiguredModelTest {
         server.start();
         try (ConfiguredModels models = configuredModels(server, Duration.ofSeconds(2), 0.25, 0.8)) {
             ModelCallResult result = models.defaultConversationModel().respond(
-                    new ModelRequest(List.of(), new ToolSnapshot(List.of())), reservations::incrementAndGet);
+                    new ModelRequest(List.of(), new ToolSnapshot(List.of()), ModelRequest.Purpose.ANSWER), reservations::incrementAndGet);
 
             assertThat(result.reply()).isEqualTo(new ModelReply.Text("Hello."));
             assertThat(reservations).hasValue(1);
@@ -172,7 +173,7 @@ class OpenAiConfiguredModelTest {
         server.start();
         try (ConfiguredModels models = configuredModels(server)) {
             assertThatThrownBy(() -> models.defaultConversationModel().respond(
-                    new ModelRequest(List.of(), new ToolSnapshot(List.of())), () -> 1))
+                    new ModelRequest(List.of(), new ToolSnapshot(List.of()), ModelRequest.Purpose.ANSWER), () -> 1))
                     .isInstanceOfSatisfying(ModelCallFailure.class,
                             failure -> assertThat(failure.kind()).isEqualTo(ModelCallFailure.Kind.TRANSIENT));
             assertThat(calls).hasValue(1);
@@ -188,7 +189,7 @@ class OpenAiConfiguredModelTest {
         server.start();
         try (ConfiguredModels models = configuredModels(server)) {
             assertThatThrownBy(() -> models.defaultConversationModel().respond(
-                    new ModelRequest(List.of(), new ToolSnapshot(List.of())), () -> 1))
+                    new ModelRequest(List.of(), new ToolSnapshot(List.of()), ModelRequest.Purpose.ANSWER), () -> 1))
                     .isInstanceOfSatisfying(ModelCallFailure.class,
                             failure -> assertThat(failure.kind()).isEqualTo(ModelCallFailure.Kind.TRANSIENT));
             assertThat(providerRequests).hasValue(1);
@@ -204,7 +205,7 @@ class OpenAiConfiguredModelTest {
         server.start();
         try (ConfiguredModels models = configuredModels(server)) {
             assertThatThrownBy(() -> models.defaultConversationModel().respond(
-                    new ModelRequest(List.of(), new ToolSnapshot(List.of())), () -> 1))
+                    new ModelRequest(List.of(), new ToolSnapshot(List.of()), ModelRequest.Purpose.ANSWER), () -> 1))
                     .isInstanceOfSatisfying(ModelCallFailure.class,
                             failure -> assertThat(failure.kind()).isEqualTo(ModelCallFailure.Kind.TERMINAL));
             assertThat(providerRequests).hasValue(1);
@@ -220,7 +221,7 @@ class OpenAiConfiguredModelTest {
         terminalServer.start();
         try (ConfiguredModels models = configuredModels(terminalServer)) {
             assertThatThrownBy(() -> models.defaultConversationModel().respond(
-                    new ModelRequest(List.of(), new ToolSnapshot(List.of())), () -> 1))
+                    new ModelRequest(List.of(), new ToolSnapshot(List.of()), ModelRequest.Purpose.ANSWER), () -> 1))
                     .isInstanceOfSatisfying(ModelCallFailure.class,
                             failure -> assertThat(failure.kind()).isEqualTo(ModelCallFailure.Kind.TERMINAL));
             assertThat(terminalRequests).hasValue(1);
@@ -234,7 +235,7 @@ class OpenAiConfiguredModelTest {
         contextServer.start();
         try (ConfiguredModels models = configuredModels(contextServer)) {
             assertThatThrownBy(() -> models.defaultConversationModel().respond(
-                    new ModelRequest(List.of(), new ToolSnapshot(List.of())), () -> 1))
+                    new ModelRequest(List.of(), new ToolSnapshot(List.of()), ModelRequest.Purpose.ANSWER), () -> 1))
                     .isInstanceOfSatisfying(ModelCallFailure.class,
                             failure -> assertThat(failure.kind()).isEqualTo(ModelCallFailure.Kind.CONTEXT_TOO_LARGE));
             assertThat(contextRequests).hasValue(1);
@@ -264,7 +265,7 @@ class OpenAiConfiguredModelTest {
         server.start();
         try (ConfiguredModels models = configuredModels(server, Duration.ofMillis(50))) {
             assertThatThrownBy(() -> models.defaultConversationModel().respond(
-                    new ModelRequest(List.of(), new ToolSnapshot(List.of())), () -> 1))
+                    new ModelRequest(List.of(), new ToolSnapshot(List.of()), ModelRequest.Purpose.ANSWER), () -> 1))
                     .isInstanceOfSatisfying(ModelCallFailure.class,
                             failure -> assertThat(failure.kind()).isEqualTo(ModelCallFailure.Kind.TRANSIENT));
             assertThat(providerRequests).hasValue(1);
@@ -288,10 +289,10 @@ class OpenAiConfiguredModelTest {
         Map<String, Object> schema = Map.of("type", "object", "properties", Map.of("query", Map.of("type", "string")),
                 "required", List.of("query"), "additionalProperties", false);
         ToolBinding tool = new ToolBinding(ToolDefinition.fromExposedName("lookup", "Look up a fee", schema),
-                (context, arguments) -> new com.java.system.sessionagent.tool.port.ToolOutput(false, Map.of()));
+                (context, arguments) -> new com.java.system.sessionagent.tool.port.ToolOutput(false, Map.of()), ToolCapability.ORDINARY);
         try (ConfiguredModels models = configuredModels(server)) {
             ModelCallResult result = models.defaultConversationModel().respond(
-                    new ModelRequest(List.of(), new ToolSnapshot(List.of(tool))), () -> 1);
+                    new ModelRequest(List.of(), new ToolSnapshot(List.of(tool)), ModelRequest.Purpose.ANSWER), () -> 1);
 
             assertThat(result.reply()).isEqualTo(new ModelReply.UseTools(Optional.of("Checking."), List.of(
                     new ToolRequest(new ToolCallId("call-lookup"), new ToolName("lookup"), Map.of("query", "fee")))));
@@ -311,7 +312,7 @@ class OpenAiConfiguredModelTest {
 
             ModelCallResult finalResult = models.defaultConversationModel().respond(
                     new ModelRequest(List.of(calls, observation), Map.of(calls.sequence(), continuation),
-                            new ToolSnapshot(List.of(tool))), () -> 2);
+                            new ToolSnapshot(List.of(tool)), ModelRequest.Purpose.ANSWER), () -> 2);
 
             assertThat(finalResult.reply()).isEqualTo(new ModelReply.Text("The fee is 9."));
             assertThat(providerRequests).hasValue(2);
@@ -343,7 +344,7 @@ class OpenAiConfiguredModelTest {
                 MessageRole.TOOL, request.toolCallId(), "lookup", Map.of("isError", false, "result", Map.of("fee", 9)));
         try (ConfiguredModels models = configuredModels(server)) {
             ModelCallResult result = models.defaultConversationModel().respond(new ModelRequest(List.of(calls, observation),
-                    Map.of(), new ToolSnapshot(List.of())), () -> 1);
+                    Map.of(), new ToolSnapshot(List.of()), ModelRequest.Purpose.ANSWER), () -> 1);
 
             assertThat(result.reply()).isEqualTo(new ModelReply.Text("After the tool."));
             assertThat(providerRequests).hasValue(1);

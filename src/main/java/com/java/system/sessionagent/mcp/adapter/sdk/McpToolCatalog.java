@@ -1,6 +1,7 @@
 package com.java.system.sessionagent.mcp.adapter.sdk;
 
 import com.java.system.sessionagent.tool.port.ToolBinding;
+import com.java.system.sessionagent.tool.port.ToolCapability;
 import com.java.system.sessionagent.tool.port.ToolCatalog;
 import com.java.system.sessionagent.tool.port.ToolDefinition;
 import com.java.system.sessionagent.tool.port.ToolOutput;
@@ -68,7 +69,7 @@ public final class McpToolCatalog implements ToolCatalog {
     private ToolBinding binding(Route route) {
         ToolDefinition definition = ToolDefinition.fromExposedName(
                 route.exposedName(), route.description(), route.inputSchema());
-        return new ToolBinding(definition, (invocation, arguments) -> invoke(route, arguments));
+        return new ToolBinding(definition, (invocation, arguments) -> invoke(route, arguments), ToolCapability.ORDINARY);
     }
 
     private ToolOutput invoke(Route route, Map<String, Object> arguments) {

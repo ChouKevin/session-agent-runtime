@@ -2,10 +2,11 @@ package com.java.system.sessionagent.slack.domain;
 
 public enum SlackProgressState {
     QUEUED, PREPARING, MODEL_CALL, TOOL_EXECUTION, HISTORY_COMMIT, RETRY, STOPPING,
-    INTERRUPTED, DELIVERING, COMPLETED, CANCELLED, FAILED, DELIVERY_FAILED;
+    INTERRUPTED, DELIVERING, COMPLETED, CANCELLED, FAILED, DELIVERY_FAILED, WAITING_USER,
+    SKILL_LOADING, SKILL_LOADED, SKILL_FAILED, SKILL_INTERRUPTED;
 
     public boolean terminal() {
-        return this == COMPLETED || this == CANCELLED || this == FAILED || this == DELIVERY_FAILED;
+        return this == COMPLETED || this == CANCELLED || this == FAILED || this == DELIVERY_FAILED || this == WAITING_USER;
     }
 
     public String description() {
@@ -22,6 +23,11 @@ public enum SlackProgressState {
             case CANCELLED -> "已取消";
             case FAILED -> "處理失敗";
             case DELIVERY_FAILED -> "回覆傳送失敗";
+            case WAITING_USER -> "調查已暫停，等待您選擇繼續調查或整理既有證據；尚未交付報告";
+            case SKILL_LOADING -> "正在載入技能";
+            case SKILL_LOADED -> "技能已載入";
+            case SKILL_FAILED -> "技能載入失敗";
+            case SKILL_INTERRUPTED -> "技能載入已中斷";
         };
     }
 }

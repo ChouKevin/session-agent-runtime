@@ -1,6 +1,7 @@
 package com.java.system.sessionagent.conversation.domain;
 
 import com.java.system.sessionagent.tool.port.ToolDefinition;
+import com.java.system.sessionagent.tool.port.ToolSnapshot;
 import org.springframework.util.Assert;
 
 import java.nio.charset.StandardCharsets;
@@ -14,6 +15,12 @@ import java.util.Objects;
 import java.util.Optional;
 
 public final class ContextUsageEstimator {
+    public String eligibilityFingerprint(String admittedHistory, ToolSnapshot tools) {
+        return admittedHistory + "|purpose:ANSWER|allowed:" + tools.allowedCapabilities().stream().sorted().toList() + "|capabilities:"
+                + tools.bindings().stream()
+                .map(binding -> binding.definition().name().value() + ":" + binding.capability()).sorted().toList();
+    }
+
 
     public String requestShapeFingerprint(ContextUsageProjection projection) {
         Assert.notNull(projection, "Context usage projection must not be null");

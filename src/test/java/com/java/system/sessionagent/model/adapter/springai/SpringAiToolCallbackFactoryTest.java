@@ -3,6 +3,7 @@ package com.java.system.sessionagent.model.adapter.springai;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.java.system.sessionagent.tool.domain.ToolName;
 import com.java.system.sessionagent.tool.port.ToolBinding;
+import com.java.system.sessionagent.tool.port.ToolCapability;
 import com.java.system.sessionagent.tool.port.ToolSnapshot;
 import org.junit.jupiter.api.Test;
 import org.springframework.ai.tool.ToolCallback;
@@ -23,7 +24,7 @@ class SpringAiToolCallbackFactoryTest {
                 new com.java.system.sessionagent.tool.port.ToolDefinition(new ToolName("portable_lookup"), "Lookup", schema),
                 (context, arguments) -> {
                     throw new AssertionError("Spring AI must not execute the runtime tool");
-                })))) {
+                }, ToolCapability.ORDINARY)))) {
             List<ToolCallback> callbacks = new SpringAiToolCallbackFactory(objectMapper).create(snapshot);
             assertThat(callbacks).hasSize(1);
             ToolCallback callback = callbacks.getFirst();

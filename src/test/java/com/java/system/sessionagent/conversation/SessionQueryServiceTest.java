@@ -1,5 +1,11 @@
 package com.java.system.sessionagent.conversation;
 
+import com.java.system.sessionagent.conversation.domain.IntentRequest;
+import com.java.system.sessionagent.conversation.domain.IntentResult;
+
+import com.java.system.sessionagent.conversation.domain.ModelCallPurpose;
+import com.java.system.sessionagent.conversation.domain.ModelCallReservationResult;
+
 import com.java.system.sessionagent.conversation.application.ConversationQueryService;
 import com.java.system.sessionagent.conversation.domain.ContextUsageEstimator;
 import com.java.system.sessionagent.conversation.domain.ConversationHistory;
@@ -44,7 +50,6 @@ import org.junit.jupiter.api.Test;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
-import java.util.OptionalInt;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.Optional;
 import java.util.function.Consumer;
@@ -95,11 +100,14 @@ class SessionQueryServiceTest {
         when(store.loadHistory(session)).thenReturn(audit);
         when(store.readSession(session)).thenReturn(Optional.of(new ConversationStore.SessionProjection(session, CREATED_AT, Optional.empty(), "test")));
         when(store.loadCompaction(session)).thenReturn(Optional.of(compaction));
-        when(store.reserveModelCall(any(), anyInt(), any())).thenReturn(OptionalInt.of(1));
+        when(store.reserveModelCall(any(), any(ModelCallPurpose.class), anyInt(), any())).thenReturn(new ModelCallReservationResult.Reserved(1, 1));
         when(store.loadUsageCheckpoint(any(), any(), any(), any(), anyLong())).thenReturn(Optional.of(
                 new ContextUsageCheckpoint(descriptor, 1, new SessionSequence(3), 900_000, 99_999, 999_999, "stale-eligibility", 1, CREATED_AT)));
         AtomicReference<ModelRequest> actual = new AtomicReference<>();
         ConversationModel model = new ConversationModel() {
+            @Override public IntentResult classifyIntent(IntentRequest request, ModelCallReservation reservation) {
+                throw new AssertionError("Unexpected intent request in ordinary-job fixture");
+            }
             @Override public ModelRouteId routeId() { return TEST_ROUTE_ID; }
             @Override public ModelDescriptor descriptor() { return descriptor; }
             @Override public String systemPrompt() { return "system"; }
@@ -119,7 +127,7 @@ class SessionQueryServiceTest {
         assertThat(actual.get().history()).containsExactly(audit.get(1), audit.get(3));
         ContextUsageEstimator estimator = new ContextUsageEstimator();
         ContextUsageProjection expected = new ContextUsageProjection(descriptor, "system", List.of(), actual.get().history(), 1,
-                Optional.of(summary), new ContextHistoryView(history).eligibilityFingerprint());
+                Optional.of(summary), estimator.eligibilityFingerprint(new ContextHistoryView(history).eligibilityFingerprint(), actual.get().toolSnapshot()));
         assertThat(detail.context().estimatedUsedTokens()).isEqualTo(estimator.estimate(expected, Optional.empty()).tokens());
         assertThat(detail.context().basis()).isEqualTo(ContextEstimate.Basis.FULL_ESTIMATE);
         assertThat(query.messages(session.value())).contains(audit);
@@ -225,6 +233,9 @@ class SessionQueryServiceTest {
 
     private static ConversationModel model(ModelDescriptor descriptor) {
         return new ConversationModel() {
+            @Override public IntentResult classifyIntent(IntentRequest request, ModelCallReservation reservation) {
+                throw new AssertionError("Unexpected intent request in ordinary-job fixture");
+            }
             @Override
             public ModelRouteId routeId() {
                 return descriptor.routeId();

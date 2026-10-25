@@ -1,5 +1,8 @@
 package com.java.system.sessionagent.slack.adapter.sdk;
 
+import com.java.system.sessionagent.conversation.domain.IntentRequest;
+import com.java.system.sessionagent.conversation.domain.IntentResult;
+
 import com.java.system.sessionagent.skill.adapter.filesystem.FileSystemSkillLibrary;
 import com.java.system.sessionagent.skill.configuration.SkillProperties;
 import com.java.system.sessionagent.slack.adapter.postgres.PostgresMessageSubmission;
@@ -198,7 +201,7 @@ class PostgresMessageSubmissionPostgresIT {
         assertThat(intake.receive(busySource).outcome()).isEqualTo(SlackEventOutcome.BUSY);
         MessageWorkClaim claim = conversationStore.claimNext("worker", Duration.ofSeconds(30)).orElseThrow();
         conversationStore.append(claim, new ConversationStore.MessageBatch(List.of(new ConversationStore.AssistantData("done")),
-                ConversationStore.JobUpdate.COMPLETE), Instant.parse("2026-09-06T00:00:01Z"));
+                ConversationStore.JobUpdate.COMPLETE, ConversationStore.CompletionDisposition.ANSWER), Instant.parse("2026-09-06T00:00:01Z"));
 
         assertThat(intake.receive(busySource).disposition()).isEqualTo(SlackIntakeDisposition.DUPLICATE_BUSY);
         SlackIntakeResult resent = intake.receive(replyIntake("event-busy-after-release", "T1", "C1", "2.000001", "2.000001",
@@ -294,7 +297,7 @@ class PostgresMessageSubmissionPostgresIT {
         assertThatThrownBy(() -> receive(conversationStore, incoming("retry"))).isInstanceOf(QueueFullException.class);
         MessageWorkClaim retryClaim = conversationStore.claimNext("worker", Duration.ofSeconds(30)).orElseThrow();
         conversationStore.append(retryClaim, new ConversationStore.MessageBatch(List.of(new ConversationStore.AssistantData("done")),
-                ConversationStore.JobUpdate.COMPLETE), Instant.parse("2026-09-06T00:00:01Z"));
+                ConversationStore.JobUpdate.COMPLETE, ConversationStore.CompletionDisposition.ANSWER), Instant.parse("2026-09-06T00:00:01Z"));
 
         assertThat(receive(conversationStore, incoming("after-terminal")).messageJobId().value()).isNotBlank();
     }
@@ -632,7 +635,7 @@ class PostgresMessageSubmissionPostgresIT {
         intake.receive(rootIntake("T1", "C1", "1.000001"));
         MessageWorkClaim rootClaim = store.claimNext("worker", Duration.ofSeconds(30)).orElseThrow();
         store.append(rootClaim, new ConversationStore.MessageBatch(List.of(new ConversationStore.AssistantData("done")),
-                ConversationStore.JobUpdate.COMPLETE), Instant.parse("2026-09-06T00:00:01Z"));
+                ConversationStore.JobUpdate.COMPLETE, ConversationStore.CompletionDisposition.ANSWER), Instant.parse("2026-09-06T00:00:01Z"));
 
         List<SlackEventOutcome> outcomes = concurrently(() -> {
             String suffix = Long.toString(Thread.currentThread().threadId());
@@ -644,7 +647,7 @@ class PostgresMessageSubmissionPostgresIT {
         MessageWorkClaim firstReply = store.claimNext("worker", Duration.ofSeconds(30)).orElseThrow();
         assertThat(store.claimNext("other-worker", Duration.ofSeconds(30))).isEmpty();
         store.append(firstReply, new ConversationStore.MessageBatch(List.of(new ConversationStore.AssistantData("done")),
-                ConversationStore.JobUpdate.COMPLETE), Instant.parse("2026-09-06T00:00:02Z"));
+                ConversationStore.JobUpdate.COMPLETE, ConversationStore.CompletionDisposition.ANSWER), Instant.parse("2026-09-06T00:00:02Z"));
         ConversationStore reconstructedWorkerStore = store();
         assertThat(reconstructedWorkerStore.claimNext("other-worker", Duration.ofSeconds(30))).isPresent();
         JdbcTemplate jdbcTemplate = new JdbcTemplate(dataSource());
@@ -702,7 +705,7 @@ class PostgresMessageSubmissionPostgresIT {
         intake.receive(rootIntake("T1", "C1", "1.000001"));
         MessageWorkClaim rootClaim = store.claimNext("worker", Duration.ofSeconds(30)).orElseThrow();
         store.append(rootClaim, new ConversationStore.MessageBatch(List.of(new ConversationStore.AssistantData("done")),
-                ConversationStore.JobUpdate.COMPLETE), Instant.parse("2026-09-06T00:00:01Z"));
+                ConversationStore.JobUpdate.COMPLETE, ConversationStore.CompletionDisposition.ANSWER), Instant.parse("2026-09-06T00:00:01Z"));
 
         MessageSubmission reply = replyIntake("event-reply", "T1", "C1", "1.000001", "1.000002", "U2", "one");
         intake.receive(reply);
@@ -712,6 +715,9 @@ class PostgresMessageSubmissionPostgresIT {
         AtomicInteger modelCalls = new AtomicInteger();
         ModelDescriptor descriptor = new ModelDescriptor(new ModelRouteId("slack-fake"), "fake", 1_000_000);
         ConversationModel model = new ConversationModel() {
+            @Override public IntentResult classifyIntent(IntentRequest request, ModelCallReservation reservation) {
+                throw new AssertionError("Unexpected intent request in ordinary-job fixture");
+            }
             @Override
             public ModelRouteId routeId() {
                 return descriptor.routeId();

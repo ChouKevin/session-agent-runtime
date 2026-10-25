@@ -3,6 +3,9 @@ package com.java.system.sessionagent.conversation;
 import com.java.system.sessionagent.conversation.application.MessageJobRetryPolicy;
 import com.java.system.sessionagent.conversation.application.JobProcessor;
 import com.java.system.sessionagent.conversation.domain.MessageJobId;
+import com.java.system.sessionagent.conversation.domain.JobControl;
+import com.java.system.sessionagent.conversation.domain.IntentRequest;
+import com.java.system.sessionagent.conversation.domain.IntentResult;
 import com.java.system.sessionagent.conversation.domain.JobStatus;
 import com.java.system.sessionagent.conversation.domain.MessageRole;
 import com.java.system.sessionagent.conversation.domain.MessageWorkClaim;
@@ -24,6 +27,7 @@ import com.java.system.sessionagent.conversation.port.out.ModelCallReservation;
 import com.java.system.sessionagent.conversation.port.out.NoOpConversationTelemetry;
 import com.java.system.sessionagent.tool.domain.ToolName;
 import com.java.system.sessionagent.tool.port.ToolBinding;
+import com.java.system.sessionagent.tool.port.ToolCapability;
 import com.java.system.sessionagent.tool.port.ToolCatalog;
 import com.java.system.sessionagent.tool.port.ToolDefinition;
 import com.java.system.sessionagent.tool.port.ToolOutput;
@@ -51,6 +55,10 @@ final class MessageJobTestFixtures {
 
     static ConversationStore mockStore() {
         ConversationStore store = mock(ConversationStore.class);
+        when(store.loadJobControl(any())).thenReturn(new JobControl(JobControl.Mode.NORMAL, JobControl.Stage.EXECUTION,
+                user(), Optional.empty(), 0, false, false));
+        when(store.enterWrapUp(any(), any())).thenReturn(new JobControl(JobControl.Mode.NORMAL, JobControl.Stage.WRAP_UP,
+                user(), Optional.empty(), 0, false, false));
         when(store.append(any(), any(), any())).thenAnswer(invocation -> {
             ConversationStore.MessageBatch batch = invocation.getArgument(1);
             return appendedStatus(batch);
@@ -75,11 +83,20 @@ final class MessageJobTestFixtures {
     }
 
     static ConversationModel model(ModelRouteId routeId, ModelResponder responder) {
+        return model(routeId, (request, reservation) -> { throw new AssertionError("Unexpected intent request"); }, responder);
+    }
+
+    static ConversationModel model(ModelRouteId routeId, IntentResponder intentResponder, ModelResponder responder) {
         return new ConversationModel() {
             @Override
             public ModelRouteId routeId() {
                 return routeId;
             }
+            @Override
+            public IntentResult classifyIntent(IntentRequest request, ModelCallReservation reservation) {
+                return intentResponder.classify(request, reservation);
+            }
+
 
             @Override
             public ModelCallResult respond(
@@ -98,8 +115,8 @@ final class MessageJobTestFixtures {
 
     static ToolCatalog catalog() {
         return () -> new ToolSnapshot(List.of(
-                new ToolBinding(new ToolDefinition(new ToolName("first"), "first", Map.of()), (context, arguments) -> new ToolOutput(false, Map.of("value", 1))),
-                new ToolBinding(new ToolDefinition(new ToolName("second"), "second", Map.of()), (context, arguments) -> new ToolOutput(true, Map.of("code", "TOOL_TIMEOUT")))));
+                new ToolBinding(new ToolDefinition(new ToolName("first"), "first", Map.of()), (context, arguments) -> new ToolOutput(false, Map.of("value", 1)), ToolCapability.ORDINARY),
+                new ToolBinding(new ToolDefinition(new ToolName("second"), "second", Map.of()), (context, arguments) -> new ToolOutput(true, Map.of("code", "TOOL_TIMEOUT")), ToolCapability.ORDINARY)));
     }
 
     static ModelCallResult result(ModelReply reply) {
@@ -107,7 +124,7 @@ final class MessageJobTestFixtures {
     }
 
     static ToolBinding binding(String name, Function<Map<String, Object>, ToolOutput> invocation) {
-        return new ToolBinding(new ToolDefinition(new ToolName(name), name, Map.of()), (context, arguments) -> invocation.apply(arguments));
+        return new ToolBinding(new ToolDefinition(new ToolName(name), name, Map.of()), (context, arguments) -> invocation.apply(arguments), ToolCapability.ORDINARY);
     }
 
     static ToolRequest request(String id, String name) {
@@ -131,6 +148,10 @@ final class MessageJobTestFixtures {
         assertThat(batch.failure().map(Enum::name)).contains(code);
         assertThat(batch.messages()).singleElement().isInstanceOfSatisfying(ConversationStore.RuntimeData.class,
                 event -> assertThat(event.code()).isEqualTo(code));
+    }
+
+    interface IntentResponder {
+        IntentResult classify(IntentRequest request, ModelCallReservation reservation);
     }
 
     interface ModelResponder {

@@ -1,5 +1,16 @@
 package com.java.system.sessionagent.storage.adapter.postgres;
 
+import com.java.system.sessionagent.conversation.domain.IntentRequest;
+import com.java.system.sessionagent.conversation.domain.IntentResult;
+
+import com.java.system.sessionagent.conversation.domain.ModelCallPurpose;
+import com.java.system.sessionagent.conversation.domain.ModelCallReservationResult;
+import com.java.system.sessionagent.conversation.domain.JobControl;
+import com.java.system.sessionagent.conversation.domain.WaitingChoice;
+import com.java.system.sessionagent.conversation.domain.FollowUpIntent;
+import com.java.system.sessionagent.skill.domain.SkillReadResult;
+import com.java.system.sessionagent.skill.domain.SkillResource;
+
 import com.java.system.sessionagent.skill.adapter.filesystem.FileSystemSkillLibrary;
 import com.java.system.sessionagent.skill.configuration.SkillProperties;
 import com.java.system.sessionagent.conversation.domain.IncomingMessage;
@@ -45,6 +56,7 @@ import com.java.system.sessionagent.conversation.port.out.NoOpConversationTeleme
 import com.java.system.sessionagent.conversation.port.out.StaleWorkClaimException;
 import com.java.system.sessionagent.tool.domain.ToolName;
 import com.java.system.sessionagent.tool.port.ToolBinding;
+import com.java.system.sessionagent.tool.port.ToolCapability;
 import com.java.system.sessionagent.tool.port.ToolCatalog;
 import com.java.system.sessionagent.tool.port.ToolDefinition;
 import com.java.system.sessionagent.tool.port.ToolOutput;
@@ -73,7 +85,6 @@ import java.sql.Timestamp;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.OptionalInt;
 import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.Callable;
@@ -113,6 +124,144 @@ class PostgresMessageJobPostgresIT {
     }
 
     @Test
+    void waiting_is_selected_at_execution_and_control_requests_preserve_total_ordinals_but_not_ordinary_debits() {
+        ConversationStore store = store();
+        receive(store, new IncomingMessage("handoff", "alice", "origin", "investigate"));
+        MessageWorkClaim origin = store.claimNext("worker", Duration.ofMinutes(1)).orElseThrow();
+        MessageReceipt reply = receive(store, new IncomingMessage("handoff", "alice", "reply", "Organize the existing evidence"));
+        receive(store, new IncomingMessage("handoff", "alice", "later", "An unrelated later question"));
+        store.enterWrapUp(origin, NOW);
+        store.append(origin, waitingBatch("Continue or organize?"), NOW);
+        MessageWorkClaim followup = store.claimNext("worker", Duration.ofMinutes(1)).orElseThrow();
+        JobControl control = store.loadJobControl(followup);
+        WaitingChoice expected = control.waiting().orElseThrow();
+        assertThat(followup.messageJobId()).isEqualTo(reply.messageJobId());
+        assertThat(control.initiatingMessage().message()).isEqualTo("Organize the existing evidence");
+        assertThat(control.stage()).isEqualTo(JobControl.Stage.INTENT);
+        assertThat(control.ordinaryCallCount()).isZero();
+        assertThat(store.reserveModelCall(followup, ModelCallPurpose.INTENT, 2, NOW))
+                .isEqualTo(new ModelCallReservationResult.Reserved(1, 0));
+        assertThat(store.reserveModelCall(followup, ModelCallPurpose.INTENT, 2, NOW))
+                .isEqualTo(new ModelCallReservationResult.AlreadyAttempted());
+        JobControl report = store.resolveFollowUp(followup, expected, FollowUpIntent.DELIVER, NOW);
+        assertThat(report.mode()).isEqualTo(JobControl.Mode.REPORT_ONLY);
+        assertThat(report.waiting()).isEmpty();
+        assertThat(store.resolveFollowUp(followup, expected, FollowUpIntent.CONTINUE, NOW).mode()).isEqualTo(JobControl.Mode.REPORT_ONLY);
+        assertThat(store.reserveModelCall(followup, ModelCallPurpose.EXECUTION, 2, NOW))
+                .isEqualTo(new ModelCallReservationResult.Reserved(2, 1));
+        assertThat(store.reserveModelCall(followup, ModelCallPurpose.COMPACTION, 2, NOW))
+                .isEqualTo(new ModelCallReservationResult.Reserved(3, 2));
+        assertThat(store.reserveModelCall(followup, ModelCallPurpose.EXECUTION, 2, NOW))
+                .isEqualTo(new ModelCallReservationResult.BudgetExhausted());
+        assertThat(store.enterWrapUp(followup, NOW).stage()).isEqualTo(JobControl.Stage.WRAP_UP);
+        assertThat(store.enterWrapUp(followup, NOW).stage()).isEqualTo(JobControl.Stage.WRAP_UP);
+        assertThat(store.reserveModelCall(followup, ModelCallPurpose.WRAP_UP, 2, NOW))
+                .isEqualTo(new ModelCallReservationResult.Reserved(4, 2));
+        assertThat(store.reserveModelCall(followup, ModelCallPurpose.WRAP_UP, 2, NOW))
+                .isEqualTo(new ModelCallReservationResult.AlreadyAttempted());
+        store.append(followup, waitingBatch("More investigation or organize?"), NOW);
+        MessageWorkClaim later = store.claimNext("worker", Duration.ofMinutes(1)).orElseThrow();
+        assertThat(store.loadJobControl(later).waiting().orElseThrow().generation()).isEqualTo(expected.generation() + 1);
+        assertThat(store.readJob(followup.messageJobId()).orElseThrow().modelCallCount()).isEqualTo(4);
+    }
+
+    @Test
+    void expired_claim_and_mismatched_generation_cannot_consume_a_newer_wait() {
+        ConversationStore store = store();
+        seedWaiting(store, "fenced");
+        receive(store, new IncomingMessage("fenced", "alice", "fenced-reply", "continue"));
+        MessageWorkClaim original = store.claimNext("worker", Duration.ofMinutes(1)).orElseThrow();
+        WaitingChoice expected = store.loadJobControl(original).waiting().orElseThrow();
+        jdbcTemplate.update("update message_job set locked_until = clock_timestamp() - interval '1 millisecond' where message_job_id = ?",
+                UUID.fromString(original.messageJobId().value()));
+        jdbcTemplate.update("update session_waiting_choice set generation = generation + 1 where session_id = ?",
+                UUID.fromString(original.sessionId().value()));
+        assertThatThrownBy(() -> store.resolveFollowUp(original, expected, FollowUpIntent.CONTINUE, NOW))
+                .isExactlyInstanceOf(StaleWorkClaimException.class);
+        MessageWorkClaim recovered = store.claimNext("replacement", Duration.ofMinutes(1)).orElseThrow();
+        assertThatThrownBy(() -> store.resolveFollowUp(recovered, expected, FollowUpIntent.DELIVER, NOW))
+                .isExactlyInstanceOf(StaleWorkClaimException.class);
+        JobControl unchanged = store.loadJobControl(recovered);
+        assertThat(unchanged.mode()).isEqualTo(JobControl.Mode.NORMAL);
+        assertThat(unchanged.waiting().orElseThrow().generation()).isEqualTo(expected.generation() + 1);
+    }
+
+    @Test
+    void intent_and_wrap_reservations_survive_reclaim_without_granting_another_control_request() {
+        ConversationStore store = store();
+        seedWaiting(store, "one-shot");
+        receive(store, new IncomingMessage("one-shot", "alice", "one-shot-reply", "continue"));
+        MessageWorkClaim original = store.claimNext("worker", Duration.ofMinutes(1)).orElseThrow();
+        store.reserveModelCall(original, ModelCallPurpose.INTENT, 1, NOW);
+        jdbcTemplate.update("update message_job set locked_until = clock_timestamp() - interval '1 millisecond' where message_job_id = ?",
+                UUID.fromString(original.messageJobId().value()));
+        MessageWorkClaim recovered = store.claimNext("replacement", Duration.ofMinutes(1)).orElseThrow();
+        assertThat(store.loadJobControl(recovered).intentAttempted()).isTrue();
+        assertThat(store.reserveModelCall(recovered, ModelCallPurpose.INTENT, 1, NOW))
+                .isEqualTo(new ModelCallReservationResult.AlreadyAttempted());
+        store.enterWrapUp(recovered, NOW);
+        store.reserveModelCall(recovered, ModelCallPurpose.WRAP_UP, 1, NOW);
+        jdbcTemplate.update("update message_job set locked_until = clock_timestamp() - interval '1 millisecond' where message_job_id = ?",
+                UUID.fromString(recovered.messageJobId().value()));
+        MessageWorkClaim wrapRecovery = store.claimNext("third", Duration.ofMinutes(1)).orElseThrow();
+        assertThat(store.loadJobControl(wrapRecovery).stage()).isEqualTo(JobControl.Stage.WRAP_UP);
+        assertThat(store.loadJobControl(wrapRecovery).wrapAttempted()).isTrue();
+        assertThat(store.reserveModelCall(wrapRecovery, ModelCallPurpose.WRAP_UP, 1, NOW))
+                .isEqualTo(new ModelCallReservationResult.AlreadyAttempted());
+        assertThat(store.reserveModelCall(wrapRecovery, ModelCallPurpose.EXECUTION, 1, NOW))
+                .isEqualTo(new ModelCallReservationResult.BudgetExhausted());
+    }
+
+    @Test
+    void explicit_accepted_skill_clears_wait_in_its_history_transaction_but_rejection_preserves_it() {
+        ConversationStore store = store();
+        seedWaiting(store, "skill-wait");
+        receive(store, new IncomingMessage("skill-wait", "alice", "bad-skill", "/skill:missing new task"));
+        MessageWorkClaim rejected = store.claimNext("worker", Duration.ofMinutes(1)).orElseThrow();
+        WaitingChoice wait = store.loadJobControl(rejected).waiting().orElseThrow();
+        store.resolveSkillCommand(rejected, new SkillReadResult.Failure("SKILL_UNAVAILABLE"), NOW);
+        receive(store, new IncomingMessage("skill-wait", "alice", "good-skill", "/skill:review new task"));
+        MessageWorkClaim accepted = store.claimNext("worker", Duration.ofMinutes(1)).orElseThrow();
+        assertThat(store.loadJobControl(accepted).waiting()).contains(wait);
+        SkillResource resource = new SkillResource("skill://review", "a".repeat(64), "Review instructions");
+        store.resolveSkillCommand(accepted, new SkillReadResult.Success(resource), NOW);
+        JobControl selected = store.loadJobControl(accepted);
+        assertThat(selected.waiting()).isEmpty();
+        assertThat(selected.mode()).isEqualTo(JobControl.Mode.NORMAL);
+        assertThat(selected.stage()).isEqualTo(JobControl.Stage.EXECUTION);
+    }
+
+    @Test
+    void migration_backfills_existing_ordinary_usage_without_inventing_historical_waits() {
+        flyway().clean();
+        Flyway.configure().dataSource(dataSource()).cleanDisabled(false).target("10").load().migrate();
+        ConversationStore store = store();
+        MessageReceipt receipt = receive(store, new IncomingMessage("migration", "alice", "existing", "investigate"));
+        MessageWorkClaim claim = store.claimNext("worker", Duration.ofMinutes(1)).orElseThrow();
+        jdbcTemplate.update("update message_job set model_calls = 7 where message_job_id = ?", UUID.fromString(receipt.messageJobId().value()));
+        flyway().migrate();
+        JobControl control = store.loadJobControl(claim);
+        assertThat(control.ordinaryCallCount()).isEqualTo(7);
+        assertThat(control.stage()).isEqualTo(JobControl.Stage.EXECUTION);
+        assertThat(control.waiting()).isEmpty();
+        assertThat(store.reserveModelCall(claim, ModelCallPurpose.EXECUTION, 7, NOW))
+                .isEqualTo(new ModelCallReservationResult.BudgetExhausted());
+        assertThat(jdbcTemplate.queryForObject("select count(*) from session_waiting_choice", Integer.class)).isZero();
+    }
+
+    private void seedWaiting(ConversationStore store, String session) {
+        receive(store, new IncomingMessage(session, "alice", session + "-origin", "investigate"));
+        MessageWorkClaim origin = store.claimNext("worker", Duration.ofMinutes(1)).orElseThrow();
+        store.enterWrapUp(origin, NOW);
+        store.append(origin, waitingBatch("Continue or organize?"), NOW);
+    }
+
+    private static ConversationStore.MessageBatch waitingBatch(String text) {
+        return new ConversationStore.MessageBatch(List.of(new ConversationStore.AssistantData(text)), ConversationStore.JobUpdate.COMPLETE,
+                Optional.empty(), Optional.empty(), Optional.empty(), ConversationStore.CompletionDisposition.WAITING);
+    }
+
+    @Test
     void cancels_waiting_and_retrying_jobs_once_and_unblocks_the_next_fifo_job() {
         ConversationStore store = store();
         MessageReceipt first = receive(store, new IncomingMessage("cancel-thread", "alice", "cancel-first", "one"));
@@ -148,7 +297,7 @@ class PostgresMessageJobPostgresIT {
         assertThat(requested.progress()).contains(progress);
         assertThat(store.requestCancellation(receipt.messageJobId())).contains(requested);
         assertThat(store.isCancellationRequested(claim)).isTrue();
-        assertThatThrownBy(() -> store.reserveModelCall(claim, 12, NOW))
+        assertThatThrownBy(() -> store.reserveModelCall(claim, ModelCallPurpose.EXECUTION, 12, NOW))
                 .isInstanceOf(JobCancellationRequestedException.class);
         assertThatThrownBy(() -> store.updateProgress(claim, progress))
                 .isInstanceOf(JobCancellationRequestedException.class);
@@ -163,7 +312,7 @@ class PostgresMessageJobPostgresIT {
         assertThat(store.append(claim, new ConversationStore.MessageBatch(
                 List.of(new ConversationStore.AssistantData("must not be committed")), ConversationStore.JobUpdate.COMPLETE,
                 Optional.empty(), Optional.of(new ConversationStore.UsageCheckpointData(
-                        TEST_SELECTION, descriptor, 1, 20, 10, 30, shape, 0))), NOW))
+                        TEST_SELECTION, descriptor, 1, 20, 10, 30, shape, 0)), ConversationStore.CompletionDisposition.ANSWER), NOW))
                 .isEqualTo(JobStatus.CANCELLED);
         assertThat(store().loadHistory(receipt.sessionId())).extracting(SessionMessage::role)
                 .containsExactly(MessageRole.USER, MessageRole.RUNTIME);
@@ -176,7 +325,7 @@ class PostgresMessageJobPostgresIT {
         });
         assertThatThrownBy(() -> store.append(claim, new ConversationStore.MessageBatch(
                 List.of(new ConversationStore.RuntimeData(JobCancellation.CODE, JobCancellation.MESSAGE)),
-                ConversationStore.JobUpdate.CANCEL), NOW)).isInstanceOf(StaleWorkClaimException.class);
+                ConversationStore.JobUpdate.CANCEL, ConversationStore.CompletionDisposition.NONE), NOW)).isInstanceOf(StaleWorkClaimException.class);
         assertThat(store.requestCancellation(receipt.messageJobId())).contains(store.readJob(receipt.messageJobId()).orElseThrow());
     }
 
@@ -193,6 +342,9 @@ class PostgresMessageJobPostgresIT {
         MessageWorkClaim recovered = restarted.claimNext("new", Duration.ofSeconds(30)).orElseThrow();
         AtomicInteger modelCalls = new AtomicInteger();
         ConversationModel model = new ConversationModel() {
+            @Override public IntentResult classifyIntent(IntentRequest request, ModelCallReservation reservation) {
+                throw new AssertionError("Unexpected intent request in ordinary-job fixture");
+            }
             @Override
             public ModelRouteId routeId() {
                 return new ModelRouteId("test");
@@ -213,7 +365,7 @@ class PostgresMessageJobPostgresIT {
         assertThat(restarted.readJob(receipt.messageJobId()).orElseThrow().cancellationRequestedAt()).contains(requestedAt);
         assertThatThrownBy(() -> store.isCancellationRequested(expired)).isInstanceOf(StaleWorkClaimException.class);
         assertThatThrownBy(() -> store.append(expired, new ConversationStore.MessageBatch(
-                List.of(new ConversationStore.AssistantData("stale")), ConversationStore.JobUpdate.COMPLETE), NOW))
+                List.of(new ConversationStore.AssistantData("stale")), ConversationStore.JobUpdate.COMPLETE, ConversationStore.CompletionDisposition.ANSWER), NOW))
                 .isInstanceOf(StaleWorkClaimException.class);
     }
 
@@ -227,6 +379,9 @@ class PostgresMessageJobPostgresIT {
         AtomicInteger modelCalls = new AtomicInteger();
         AtomicInteger secondCalls = new AtomicInteger();
         ConversationModel model = new ConversationModel() {
+            @Override public IntentResult classifyIntent(IntentRequest request, ModelCallReservation reservation) {
+                throw new AssertionError("Unexpected intent request in ordinary-job fixture");
+            }
             @Override
             public ModelRouteId routeId() {
                 return new ModelRouteId("test");
@@ -246,11 +401,11 @@ class PostgresMessageJobPostgresIT {
                     firstStarted.countDown();
                     awaitGate(releaseFirst);
                     return new ToolOutput(false, Map.of("result", "actual first result"));
-                }),
+                }, ToolCapability.ORDINARY),
                 new ToolBinding(new ToolDefinition(new ToolName("second"), "second", Map.of()), (context, arguments) -> {
                     secondCalls.incrementAndGet();
                     return new ToolOutput(false, Map.of("unexpected", true));
-                })));
+                }, ToolCapability.ORDINARY)));
         JobProcessor processor = new JobProcessor(store, TestConfiguredModels.withModel(model), tools, new FileSystemSkillLibrary(new SkillProperties()), Clock.systemUTC(), 3,
                 new MessageJobRetryPolicy(3, Duration.ofSeconds(60)), new NoOpConversationTelemetry());
         ExecutorService executor = Executors.newSingleThreadExecutor();
@@ -301,7 +456,7 @@ class PostgresMessageJobPostgresIT {
         MessageReceipt receipt = receive(store, new IncomingMessage("cancel-thread", "alice", "completed", "hello"));
         MessageWorkClaim claim = store.claimNext("worker", Duration.ofSeconds(30)).orElseThrow();
         assertThat(store.append(claim, new ConversationStore.MessageBatch(List.of(new ConversationStore.AssistantData("done")),
-                ConversationStore.JobUpdate.COMPLETE), NOW)).isEqualTo(JobStatus.DONE);
+                ConversationStore.JobUpdate.COMPLETE, ConversationStore.CompletionDisposition.ANSWER), NOW)).isEqualTo(JobStatus.DONE);
         assertThat(store.requestCancellation(receipt.messageJobId()).orElseThrow()).satisfies(job -> {
             assertThat(job.status()).isEqualTo(JobStatus.DONE);
             assertThat(job.cancellationRequestedAt()).isEmpty();
@@ -324,7 +479,7 @@ class PostgresMessageJobPostgresIT {
                 store.requestCancellation(receipt.messageJobId());
                 result.set(executor.submit(() -> store.append(claim, new ConversationStore.MessageBatch(
                         List.of(new ConversationStore.AssistantData("late final response")),
-                        ConversationStore.JobUpdate.COMPLETE), NOW)));
+                        ConversationStore.JobUpdate.COMPLETE, ConversationStore.CompletionDisposition.ANSWER), NOW)));
                 awaitDatabaseLockWaiter("locked_until = locked_until");
                 assertThat(store().loadHistory(receipt.sessionId())).hasSize(1);
             });
@@ -349,7 +504,8 @@ class PostgresMessageJobPostgresIT {
             lock.setObject(1, UUID.fromString(receipt.sessionId().value()));
             lock.executeQuery();
             Future<JobStatus> completion = executor.submit(() -> store.append(claim, new ConversationStore.MessageBatch(
-                    List.of(new ConversationStore.AssistantData("done")), ConversationStore.JobUpdate.COMPLETE), NOW));
+                    List.of(new ConversationStore.AssistantData("done")), ConversationStore.JobUpdate.COMPLETE,
+                    ConversationStore.CompletionDisposition.ANSWER), NOW));
             awaitDatabaseLockWaiter("next_sequence = next_sequence + 1");
             Future<Optional<ConversationStore.MessageJobProjection>> cancellation = executor.submit(
                     () -> store.requestCancellation(receipt.messageJobId()));
@@ -438,7 +594,7 @@ class PostgresMessageJobPostgresIT {
             assertThat(value.phase()).isEqualTo(JobPhase.PREPARING);
             assertThat(value.toolName()).isEmpty();
         });
-        assertThat(store.reserveModelCall(claim, 12, NOW)).hasValue(1);
+        assertThat(store.reserveModelCall(claim, ModelCallPurpose.EXECUTION, 12, NOW)).isEqualTo(new ModelCallReservationResult.Reserved(1, 1));
 
         Map<String, Object> progress = jdbcTemplate.queryForMap("""
                 select to_jsonb(job)->>'phase' as phase,
@@ -472,6 +628,9 @@ class PostgresMessageJobPostgresIT {
         CountDownLatch releaseFinalModel = new CountDownLatch(1);
         AtomicInteger turns = new AtomicInteger();
         ConversationModel model = new ConversationModel() {
+            @Override public IntentResult classifyIntent(IntentRequest request, ModelCallReservation reservation) {
+                throw new AssertionError("Unexpected intent request in ordinary-job fixture");
+            }
             @Override
             public ModelRouteId routeId() {
                 return new ModelRouteId("test");
@@ -498,12 +657,12 @@ class PostgresMessageJobPostgresIT {
                     firstToolStarted.countDown();
                     awaitGate(releaseFirstTool);
                     return new ToolOutput(false, Map.of("result", "first"));
-                }),
+                }, ToolCapability.ORDINARY),
                 new ToolBinding(new ToolDefinition(new ToolName("second"), "second", Map.of()), (context, arguments) -> {
                     secondToolStarted.countDown();
                     awaitGate(releaseSecondTool);
                     return new ToolOutput(true, Map.of("error", "ordinary tool failure"));
-                })));
+                }, ToolCapability.ORDINARY)));
         JobProcessor processor = new JobProcessor(store, TestConfiguredModels.withModel(model), tools, new FileSystemSkillLibrary(new SkillProperties()), Clock.systemUTC(), 3,
                 new MessageJobRetryPolicy(3, Duration.ofSeconds(60)), new NoOpConversationTelemetry());
         ExecutorService executor = Executors.newSingleThreadExecutor();
@@ -574,21 +733,21 @@ class PostgresMessageJobPostgresIT {
         assertLivePhase(receipt, JobPhase.PREPARING, Optional.empty());
         store.updateProgress(retry, new JobProgress(JobPhase.HISTORY_COMMIT, NOW, Optional.empty()));
         store.append(retry, new ConversationStore.MessageBatch(List.of(new ConversationStore.AssistantData("intermediate")),
-                ConversationStore.JobUpdate.KEEP_WORKING), NOW);
+                ConversationStore.JobUpdate.KEEP_WORKING, ConversationStore.CompletionDisposition.NONE), NOW);
         assertLivePhase(receipt, JobPhase.PREPARING, Optional.empty());
         store.append(retry, new ConversationStore.MessageBatch(
                 List.of(new ConversationStore.RuntimeData(JobFailure.MODEL_OUTPUT_INVALID.name(),
                         JobFailure.MODEL_OUTPUT_INVALID.message())),
                 ConversationStore.JobUpdate.KEEP_WORKING, Optional.empty(), Optional.empty(),
-                Optional.of(JobFailure.MODEL_OUTPUT_INVALID)), NOW);
+                Optional.of(JobFailure.MODEL_OUTPUT_INVALID), ConversationStore.CompletionDisposition.NONE), NOW);
         assertThat(store().readJob(receipt.messageJobId()).orElseThrow()).satisfies(job -> {
             assertThat(job.progress()).contains(new JobProgress(JobPhase.PREPARING, NOW, Optional.empty()));
             assertThat(job.failure()).contains(JobFailure.MODEL_OUTPUT_INVALID);
         });
-        assertThat(store.reserveModelCall(retry, 3, NOW)).hasValue(1);
+        assertThat(store.reserveModelCall(retry, ModelCallPurpose.EXECUTION, 3, NOW)).isEqualTo(new ModelCallReservationResult.Reserved(1, 1));
         assertLivePhase(receipt, JobPhase.MODEL_CALL, Optional.empty());
         store.append(retry, new ConversationStore.MessageBatch(List.of(new ConversationStore.AssistantData("done")),
-                ConversationStore.JobUpdate.COMPLETE), NOW);
+                ConversationStore.JobUpdate.COMPLETE, ConversationStore.CompletionDisposition.ANSWER), NOW);
         assertThat(store().readJob(receipt.messageJobId()).orElseThrow()).satisfies(job -> {
             assertThat(job.progress()).isEmpty();
             assertThat(job.failure()).isEmpty();
@@ -600,7 +759,8 @@ class PostgresMessageJobPostgresIT {
         store.updateProgress(failedClaim, new JobProgress(JobPhase.HISTORY_COMMIT, NOW, Optional.empty()));
         store.append(failedClaim, new ConversationStore.MessageBatch(
                 List.of(new ConversationStore.RuntimeData(failure.name(), failure.message())),
-                ConversationStore.JobUpdate.COMPLETE, Optional.empty(), Optional.empty(), Optional.of(failure)), NOW);
+                ConversationStore.JobUpdate.COMPLETE, Optional.empty(), Optional.empty(), Optional.of(failure),
+                ConversationStore.CompletionDisposition.NONE), NOW);
         ConversationStore.MessageJobProjection persisted = store().readJob(failed.messageJobId()).orElseThrow();
         assertThat(persisted.status()).isEqualTo(JobStatus.DONE);
         assertThat(persisted.progress()).isEmpty();
@@ -630,9 +790,10 @@ class PostgresMessageJobPostgresIT {
         assertThat(store().readSession(receipt.sessionId()).orElseThrow().currentJob()).contains(expired);
         assertThatThrownBy(() -> store.updateProgress(original, tool)).isExactlyInstanceOf(StaleWorkClaimException.class);
         assertThat(store.scheduleRetry(original, Duration.ZERO, JobFailure.MODEL_UNAVAILABLE)).isFalse();
-        assertThat(store.reserveModelCall(original, 3, NOW)).isEmpty();
+        assertThatThrownBy(() -> store.reserveModelCall(original, ModelCallPurpose.EXECUTION, 3, NOW)).isExactlyInstanceOf(StaleWorkClaimException.class);
         assertThatThrownBy(() -> store.append(original, new ConversationStore.MessageBatch(
-                List.of(new ConversationStore.AssistantData("stale")), ConversationStore.JobUpdate.COMPLETE), NOW))
+                List.of(new ConversationStore.AssistantData("stale")), ConversationStore.JobUpdate.COMPLETE,
+                ConversationStore.CompletionDisposition.ANSWER), NOW))
                 .isExactlyInstanceOf(StaleWorkClaimException.class);
 
         MessageWorkClaim recovered = store.claimNext("same-worker", Duration.ofSeconds(30)).orElseThrow();
@@ -640,7 +801,7 @@ class PostgresMessageJobPostgresIT {
         assertLivePhase(receipt, JobPhase.PREPARING, Optional.empty());
         assertThatThrownBy(() -> store.updateProgress(original, tool)).isExactlyInstanceOf(StaleWorkClaimException.class);
         assertThat(store.scheduleRetry(original, Duration.ZERO, JobFailure.MODEL_UNAVAILABLE)).isFalse();
-        assertThat(store.reserveModelCall(original, 3, NOW)).isEmpty();
+        assertThatThrownBy(() -> store.reserveModelCall(original, ModelCallPurpose.EXECUTION, 3, NOW)).isExactlyInstanceOf(StaleWorkClaimException.class);
         assertThat(store().loadHistory(receipt.sessionId())).hasSize(1);
     }
 
@@ -792,20 +953,20 @@ class PostgresMessageJobPostgresIT {
         MessageReceipt first = receive(store, new IncomingMessage("thread", "alice", "first", "one"));
         MessageWorkClaim firstClaim = store.claimNext("worker", Duration.ofSeconds(30)).orElseThrow();
         store.append(firstClaim, new ConversationStore.MessageBatch(List.of(new ConversationStore.AssistantData("working")),
-                ConversationStore.JobUpdate.KEEP_WORKING), NOW);
+                ConversationStore.JobUpdate.KEEP_WORKING, ConversationStore.CompletionDisposition.NONE), NOW);
         assertThat(store.scheduleRetry(firstClaim, Duration.ZERO, JobFailure.MODEL_UNAVAILABLE)).isTrue();
         assertThat(store.loadHistory(first.sessionId())).extracting(message -> message.sequence().value()).containsExactly(1L, 2L);
         MessageWorkClaim reclaimed = store.claimNext("worker", Duration.ofSeconds(30)).orElseThrow();
         assertThat(store.loadHistory(first.sessionId())).extracting(message -> message.sequence().value())
                 .containsExactly(1L, 2L);
         store.append(reclaimed, new ConversationStore.MessageBatch(List.of(new ConversationStore.AssistantData("done")),
-                ConversationStore.JobUpdate.COMPLETE), NOW.plusSeconds(1));
+                ConversationStore.JobUpdate.COMPLETE, ConversationStore.CompletionDisposition.ANSWER), NOW.plusSeconds(1));
         MessageReceipt second = receive(store, new IncomingMessage("thread", "alice", "second", "two"));
         MessageWorkClaim secondClaim = store.claimNext("worker", Duration.ofSeconds(30)).orElseThrow();
         assertThat(store.loadHistory(second.sessionId())).extracting(message -> message.sequence().value())
                 .containsExactly(1L, 2L, 3L, 4L);
         store.append(secondClaim, new ConversationStore.MessageBatch(List.of(new ConversationStore.AssistantData("second done")),
-                ConversationStore.JobUpdate.COMPLETE), NOW.plusSeconds(2));
+                ConversationStore.JobUpdate.COMPLETE, ConversationStore.CompletionDisposition.ANSWER), NOW.plusSeconds(2));
         assertThat(store.loadHistory(second.sessionId())).extracting(message -> message.sequence().value())
                 .containsExactly(1L, 2L, 3L, 4L, 5L);
     }
@@ -820,9 +981,9 @@ class PostgresMessageJobPostgresIT {
         assertThat(claims.stream().filter(optionalClaim -> optionalClaim.isPresent())).hasSize(1);
         MessageWorkClaim claim = claims.stream().flatMap(optionalClaim -> optionalClaim.stream())
                 .findFirst().orElseThrow();
-        List<OptionalInt> reservations = concurrently(() -> store.reserveModelCall(claim, 1, NOW));
+        List<ModelCallReservationResult> reservations = concurrently(() -> store.reserveModelCall(claim, ModelCallPurpose.EXECUTION, 1, NOW));
 
-        assertThat(reservations).containsExactlyInAnyOrder(OptionalInt.of(1), OptionalInt.empty());
+        assertThat(reservations).containsExactlyInAnyOrder(new ModelCallReservationResult.Reserved(1, 1), new ModelCallReservationResult.BudgetExhausted());
         assertThat(jdbcTemplate.queryForObject("select model_calls from message_job where message_job_id = ?", Integer.class,
                 UUID.fromString(receipt.messageJobId().value()))).isEqualTo(1);
     }
@@ -936,6 +1097,9 @@ class PostgresMessageJobPostgresIT {
             AtomicInteger laterToolCalls) {
         ModelRouteId routeId = new ModelRouteId("test");
         ConversationModel model = new ConversationModel() {
+            @Override public IntentResult classifyIntent(IntentRequest request, ModelCallReservation reservation) {
+                throw new AssertionError("Unexpected intent request in ordinary-job fixture");
+            }
             @Override
             public ModelRouteId routeId() {
                 return routeId;
@@ -979,11 +1143,11 @@ class PostgresMessageJobPostgresIT {
                         throw new IllegalStateException(exception);
                     }
                     return new ToolOutput(false, Map.of("first", true));
-                }),
+                }, ToolCapability.ORDINARY),
                 new ToolBinding(new ToolDefinition(new ToolName("second"), "second", Map.of()), (context, arguments) -> {
                     laterToolCalls.incrementAndGet();
                     return new ToolOutput(false, Map.of("second", true));
-                })));
+                }, ToolCapability.ORDINARY)));
         return new JobProcessor(store, models, catalog, new FileSystemSkillLibrary(new SkillProperties()), Clock.systemUTC(), 2,
                 new MessageJobRetryPolicy(3, Duration.ofSeconds(60)), new NoOpConversationTelemetry());
     }
@@ -994,13 +1158,13 @@ class PostgresMessageJobPostgresIT {
         MessageReceipt receipt = receive(store, new IncomingMessage("thread", "alice", "source", "hello"));
         MessageWorkClaim original = store.claimNext("worker", Duration.ofSeconds(30)).orElseThrow();
 
-        assertThat(store.reserveModelCall(original, 2, NOW)).hasValue(1);
+        assertThat(store.reserveModelCall(original, ModelCallPurpose.EXECUTION, 2, NOW)).isEqualTo(new ModelCallReservationResult.Reserved(1, 1));
         jdbcTemplate.update("update message_job set locked_until = clock_timestamp() - interval '1 millisecond' where message_job_id = ?",
                 UUID.fromString(original.messageJobId().value()));
 
         MessageWorkClaim recovered = store.claimNext("recovery-worker", Duration.ofSeconds(30)).orElseThrow();
         assertThat(store.loadHistory(receipt.sessionId())).extracting(message -> message.sequence().value()).containsExactly(1L);
-        assertThat(store.reserveModelCall(recovered, 2, NOW)).hasValue(2);
+        assertThat(store.reserveModelCall(recovered, ModelCallPurpose.EXECUTION, 2, NOW)).isEqualTo(new ModelCallReservationResult.Reserved(2, 2));
     }
 
     @Test
@@ -1014,7 +1178,7 @@ class PostgresMessageJobPostgresIT {
 
         assertThat(replacement.claimNumber()).isGreaterThan(original.claimNumber());
         assertThatThrownBy(() -> store.append(original, new ConversationStore.MessageBatch(
-                List.of(new ConversationStore.AssistantData("stale")), ConversationStore.JobUpdate.KEEP_WORKING), NOW))
+                List.of(new ConversationStore.AssistantData("stale")), ConversationStore.JobUpdate.KEEP_WORKING, ConversationStore.CompletionDisposition.NONE), NOW))
                 .isExactlyInstanceOf(StaleWorkClaimException.class);
         assertThat(jdbcTemplate.queryForObject("select count(*) from session_message", Integer.class)).isEqualTo(1);
         assertThat(jdbcTemplate.queryForObject("select next_sequence from conversation_session", Long.class)).isEqualTo(2L);
@@ -1050,7 +1214,7 @@ class PostgresMessageJobPostgresIT {
         assertThat(store.scheduleRetry(claim, Duration.ZERO, JobFailure.MODEL_UNAVAILABLE)).isTrue();
         MessageWorkClaim retry = store.claimNext("worker", Duration.ofSeconds(30)).orElseThrow();
         store.append(retry, new ConversationStore.MessageBatch(List.of(new ConversationStore.AssistantData("done")),
-                ConversationStore.JobUpdate.COMPLETE), NOW);
+                ConversationStore.JobUpdate.COMPLETE, ConversationStore.CompletionDisposition.ANSWER), NOW);
         assertThat(store.readJob(receipt.messageJobId()).orElseThrow().status()).isEqualTo(JobStatus.DONE);
     }
 
@@ -1172,7 +1336,7 @@ class PostgresMessageJobPostgresIT {
 
         store.append(claim, new ConversationStore.MessageBatch(List.of(new ConversationStore.AssistantData("done")),
                 ConversationStore.JobUpdate.COMPLETE, Optional.empty(), Optional.of(
-                        new ConversationStore.UsageCheckpointData(original, descriptor, 1, 20, 10, 30, shape, 0))), NOW);
+                        new ConversationStore.UsageCheckpointData(original, descriptor, 1, 20, 10, 30, shape, 0)), ConversationStore.CompletionDisposition.ANSWER), NOW);
 
         assertThat(store.loadUsageCheckpoint(receipt.sessionId(), original, descriptor, shape, 0)).isPresent();
         assertThat(store.loadUsageCheckpoint(receipt.sessionId(), changed, descriptor, shape, 0)).isEmpty();

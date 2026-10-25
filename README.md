@@ -29,7 +29,7 @@ guidance is in [AGENTS.md](AGENTS.md).
 
 ## Conversation loop
 
-One submitted user message starts one conversation turn. A turn can make one or more model calls. A model call either returns assistant text or requests tools. The runtime executes every requested call sequentially in the model-provided order, then atomically appends one `ASSISTANT_TOOL_CALLS` event followed by all paired `TOOL` observations in one batch; those observations are supplied to the next model call.
+One submitted user message starts one ordered job. A job can make one or more model calls. A model call either returns assistant text or requests tools. Within the ordinary allowance, the runtime executes admitted calls sequentially in the model-provided order, then atomically appends one `ASSISTANT_TOOL_CALLS` event followed by all paired `TOOL` observations in one batch; those observations are supplied to the next model call. Tool calls returned on the last allowed ordinary request are neither executed nor appended; the bounded handoff below takes precedence.
 
 ```text
 load complete ordered session history and available tools
@@ -65,20 +65,26 @@ On normal jobs with a configured supported attachment route, `createMarkdownRepo
 and `createCsv(title, columns, rows)` save durable PostgreSQL artifacts. They do not upload files or
 claim delivery; their result is `SAVED_PENDING_DELIVERY`. The first route adapter recognizes
 accepted Slack jobs with an original persisted thread binding while Slack is configured.
-HTTP jobs without that route do not expose the creation tools. Compaction requests have no tools.
+HTTP jobs without that route do not expose the creation tools. Compaction, intent classification, and boundary wrap-up requests have no tools.
 
 Markdown bytes are exact UTF-8, without parsing. CSV accepts string headers and rectangular string
 rows, writes a UTF-8 BOM, CRLF, quotes every field, and doubles embedded quotes. Cells whose first
 non-whitespace character is `=`, `+`, `-`, or `@`, or which begin with tab/CR/LF, receive an apostrophe
 prefix. Results disclose this spreadsheet-safe transformation; it is not a universal guarantee for
 all import behaviors. Original input remains in the tool-call audit.
+Runtime storage and the bytes passed to the Slack upload adapter are distinct from
+Slack-hosted downloads: Slack may omit a CSV's UTF-8 BOM when serving a download.
+Record raw hashes and lengths at each boundary; equivalent parsed CSV is not proof
+of byte-identical download preservation.
 
 Limits are 1 MiB serialized bytes per generated file, 10 files / 5 MiB per job, 100 CSV columns,
 10,000 CSV data rows, and 120 Unicode code points per title. Filenames are immutable UUIDs with
 `.md` or `.csv`; titles never select paths. Stable invocation replay returns the same artifact;
 changed input for that identity is rejected. Only artifacts tied to their exact successful
-tool observation in the atomic assistant/tool batch can be released, and release requires a
-successful final assistant answer. Staged orphans and cancelled/failed jobs remain unpublishable.
+tool observation in the atomic assistant/tool batch can be released, and release requires an
+explicit delivered-answer completion. Waiting questions and clarifications never release artifacts.
+Paused-job artifacts stay private; a later report-only job creates its own artifacts from retained
+evidence and can release only those owned by that job. Staged orphans and cancelled/failed jobs remain unpublishable.
 Artifacts inherit conversation retention; this feature adds neither public UUID downloads nor
 automatic deletion. Attachment upload/delivery is a separate adapter responsibility.
 
@@ -157,6 +163,18 @@ are not pinned or automatically restored. Use a **new source message**
 `/skill:review question` to force a current-body reread after editing a file.
 The SHA-256 proves the bytes read, not an immutable version.
 
+Slack skill-load notices are transient operational state, not conversation events.
+Both explicit selections and automatic `readSkill` calls become “loaded” only when
+their actual SKILL/TOOL bytes commit. Definition and relative-reference reads are
+identified separately; failed or interrupted reads never claim successful loading.
+A fast read may skip the loading presentation, but its committed result remains
+pending until that exact Slack presentation is acknowledged. Subsequent ordinary
+status replaces it, without a permanent badge. A paused investigation displays a
+waiting-for-choice status, not a claim that a report was delivered.
+“Loaded” proves committed skill bytes, not model compliance or report correctness.
+Skills are prompt guidance, not validators: independently check provenance, coverage
+and field mapping before accepting a generated report.
+
 Roots are shared trusted operator configuration: every Runtime user can read their
 contents. Grant the Runtime service account read/traverse access only; keep roots
 operator-owned, and use read-only bind mounts (`:ro`) for container deployments.
@@ -165,15 +183,46 @@ mount a home directory, or point roots at `.agents/skills` maintenance/deploymen
 guides. No shell/scripts are executed and no OMP, home, or repository skills are
 discovered automatically.
 
+**Java MQ inventory skill.**
+
+The shipped business skill is
+[`runtime-skills/inventory-java-mq/SKILL.md`](runtime-skills/inventory-java-mq/SKILL.md).
+It is not enabled by the checkout or by OMP Gateway. After approval, copy the
+`inventory-java-mq` directory (not a symlink) into an operator-owned Runtime root,
+for example `/opt/session-agent/skills/inventory-java-mq/SKILL.md`, and configure
+that root as above. Keep the Runtime account read/traverse-only; never mount
+`.agents/skills` as the business library. Restart after adding its discovery metadata.
+
+Use `/skill:inventory-java-mq List Java MQ consumers and settings as CSV` over HTTP,
+or `@bot /skill:inventory-java-mq ...` in Slack. A skill-only selection
+`/skill:inventory-java-mq` loads and asks the model for acknowledgment; automatic
+selection instead requires an actual model `readSkill` call for
+`skill://inventory-java-mq`. Verify those paths separately.
+
+The inventory classifies Java/MQ candidates before deep reads, defaults to
+common/static settings, and records per-repository source pins and precise evidence
+ranges. Environment comparisons require an explicit request. Unknown external
+deployment values do not imply that static coverage is incomplete, and static
+configuration does not prove deployment. Incomplete requested coverage results in
+a progress/gap choice, not an unsolicited partial CSV; delivery of existing evidence
+requires the user's approval. See the deployment
+[configuration](.agents/skills/deploying-with-omp-gateway/references/configuration.md#runtime-本地-skills選用預設停用)
+and [verification](.agents/skills/deploying-with-omp-gateway/references/verification.md#java-mq-業務-skill-驗收)
+references for installation and acceptance boundaries.
+
 The job response contains its IDs, `status`, `retryCount`, and `modelCallCount`, plus
 `phase`, `phaseStartedAt`, `currentToolName`, `failureCode`, `failureMessage`, and
 `cancellationRequestedAt`. `GET /internal/sessions/{sessionId}` exposes the same
 fields in `currentJob`. Absent optional values are explicit JSON `null`.
+`modelCallCount` is the total provider-request ordinal, including ordinary execution,
+compaction, intent classification, and wrap-up. The separately persisted ordinary allowance
+is operational state, not model history or prompt metadata; total ordinals remain artifact identities.
+
 
 | Phase | Meaning |
 | --- | --- |
 | `PREPARING` | Claimed work is preparing the next turn or continuing after a committed batch. |
-| `MODEL_CALL` | A counted model request is in progress, including context compaction requests. |
+| `MODEL_CALL` | A counted model request is in progress, including compaction, intent, and wrap-up. |
 | `TOOL_EXECUTION` | The tool identified by `currentToolName` is running. |
 | `HISTORY_COMMIT` | Runtime is committing history or compaction; this does not expose uncommitted events. |
 
@@ -290,7 +339,48 @@ Startup is safe with no configured connections or when every configured server i
 
 ## Limits, retries, and recovery
 
-`session-agent.model.max-model-calls-per-message` limits Runtime model requests for one user message. Its environment form is `SESSION_AGENT_MAX_MODEL_CALLS_PER_MESSAGE`; the default is 12. The count is reserved immediately before each adapter request, including failed attempts. On the final allowed call, a direct answer completes normally; tool requests are not run and the runtime appends `MODEL_CALL_LIMIT_REACHED`.
+`session-agent.model.max-model-calls-per-message` bounds ordinary execution and context-compaction requests for one user message. Its environment form is `SESSION_AGENT_MAX_MODEL_CALLS_PER_MESSAGE`; the default remains 12. Failed ordinary attempts and retries consume this allowance. Every actual provider request is reserved before sending and also increments the existing total `modelCallCount`; intent and wrap-up have separate one-shot reservations, not additional investigation allowance.
+
+A direct text answer on the last allowed ordinary request completes normally. A tool response
+on that request executes **zero** tools and appends neither the assistant calls nor fabricated
+tool observations. Exhaustion enters durable `WRAP_UP`: at most one no-tools request briefly
+describes confirmed progress and gaps and asks whether to continue investigating or organize
+the evidence. The transient directive contains no counts and is not committed to history.
+The question and durable session waiting generation commit atomically with job completion.
+Waiting is not a running job. A failed, invalid, tool-bearing, or oversized wrap response uses
+a safe deterministic waiting notice; recovery after a reserved but lost request never requeries it.
+Cancellation takes precedence and cannot publish a waiting prompt or release artifacts.
+
+When the next ordered job executes against a pending choice, one no-tools semantic intent
+request classifies that job's exact initiating user message, even if later users are already
+queued in history. `CONTINUE` consumes the observed waiting generation and opens a fresh
+ordinary allowance. `DELIVER` consumes it and persists report-only mode: only trusted local
+report-generation bindings are advertised and invokable, never MCP or skill reads, and
+unknown/uncovered areas must be disclosed. `NEW_QUESTION` consumes it and starts a normal
+task without automatically resuming the old investigation. `CLARIFY` publishes its question
+without tools and preserves the source generation. Invalid/failed/lost intent results fail
+closed with a clarification notice, not permission. Decisions persist before execution.
+An accepted explicit `/skill:name` starts a new task and clears waiting atomically with its
+committed skill resolution; a rejected command preserves waiting.
+
+Report-only work uses the same bounded ordinary loop and may create a report, observe its
+receipt, then answer; exhaustion still hands off without releasing a partial report.
+Control JSON (`intent` and optional CLARIFY-only `clarification`) is internal and strictly
+validated. Ordinary final answers, including JSON-looking text, remain unparsed plain text.
+
+V11 backfills ordinary usage from existing total calls without inferring historical waiting
+state. Drain old workers before migration: mixed old/new workers are unsupported.
+
+For authorized Luna acceptance, use an isolated Runtime preconfigured with
+`openai-codex/gpt-6-luna`, medium reasoning, context window 272000 and output limit
+8192 before any model-producing message, including a valid skill-only selection.
+Do not change the production Sol default. A dedicated smaller ordinary allowance
+can exercise handoff without changing production's 12. Never start a second Socket
+Mode consumer for the same Slack app; a harness may disable only its Socket
+runtime factory while retaining real intake, workers, storage, MCP and Web API.
+Label synthetic ingress explicitly: real API acknowledgements are not evidence
+of human Socket intake or browser-visible status. See the operator
+[verification guide](.agents/skills/deploying-with-omp-gateway/references/verification.md).
 
 Spring AI retries are disabled with `spring.ai.retry.max-attempts=1`. Retrying transient provider failures is owned by the runtime's conversation-job loop, which preserves the already-counted model call and avoids duplicate history. With a direct provider connection, each reservation corresponds to a provider request; when a gateway retries internally, it does not bound the gateway's underlying provider attempts.
 
@@ -471,6 +561,10 @@ is validated against the original channel/message, and is cached durably, includ
 thread query parameters. No additional scope is required for that lookup. A
 separate claim performs the lookup before a later claim updates the notice, so one
 claim never spends two Slack call windows.
+Canonical root links may include `thread_ts` equal to that root's message timestamp;
+reply links resolve to the queried thread root. Both forms retain strict Slack-host,
+path, timestamp and matching-channel validation; question links must still identify
+the exact source message.
 
 Receipt means queued, not running. Active preparation, model waiting and tool
 lookup require a current processing lease. Status also distinguishes retry,

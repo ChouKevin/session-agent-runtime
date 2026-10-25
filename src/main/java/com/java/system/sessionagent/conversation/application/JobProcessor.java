@@ -2,6 +2,11 @@ package com.java.system.sessionagent.conversation.application;
 
 import com.java.system.sessionagent.conversation.domain.MessageWorkClaim;
 import com.java.system.sessionagent.conversation.domain.ConversationHistory;
+import com.java.system.sessionagent.conversation.domain.JobControl;
+import com.java.system.sessionagent.conversation.domain.ModelCallPurpose;
+import com.java.system.sessionagent.conversation.domain.ModelCallReservationResult;
+import com.java.system.sessionagent.tool.port.ToolCapability;
+import java.util.Set;
 import com.java.system.sessionagent.conversation.domain.SkillCommandState;
 import com.java.system.sessionagent.skill.domain.SkillReadResult;
 import com.java.system.sessionagent.skill.port.SkillLibrary;
@@ -58,18 +63,18 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
-import java.util.OptionalInt;
 
 import static com.java.system.sessionagent.conversation.domain.JobFailure.COMPACTION_FAILED;
 import static com.java.system.sessionagent.conversation.domain.JobFailure.CONTEXT_TOO_LARGE;
 import static com.java.system.sessionagent.conversation.domain.JobFailure.INVALID_CONVERSATION_HISTORY;
-import static com.java.system.sessionagent.conversation.domain.JobFailure.MODEL_CALL_LIMIT_REACHED;
 import static com.java.system.sessionagent.conversation.domain.JobFailure.MODEL_OUTPUT_INVALID;
 import static com.java.system.sessionagent.conversation.domain.JobFailure.MODEL_UNAVAILABLE;
 
 public final class JobProcessor implements MessageJobPort {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(JobProcessor.class);
+    private static final Set<ToolCapability> NORMAL_CAPABILITIES = Set.of(ToolCapability.ORDINARY, ToolCapability.REPORT_GENERATION);
+    private static final Set<ToolCapability> REPORT_CAPABILITIES = Set.of(ToolCapability.REPORT_GENERATION);
 
     private final ConversationStore conversationStore;
     private final ConversationModels conversationModels;
@@ -80,6 +85,7 @@ public final class JobProcessor implements MessageJobPort {
     private final MessageJobRetryPolicy retryPolicy;
     private final ConversationTelemetry telemetry;
     private final ContextUsageEstimator contextUsageEstimator = new ContextUsageEstimator();
+    private final JobHandoffCoordinator handoff;
 
     public JobProcessor(
             ConversationStore conversationStore,
@@ -99,6 +105,7 @@ public final class JobProcessor implements MessageJobPort {
         this.maxModelCalls = maxModelCalls;
         this.retryPolicy = Objects.requireNonNull(retryPolicy, "Message job retry policy must not be null");
         this.telemetry = Objects.requireNonNull(telemetry, "Conversation telemetry must not be null");
+        this.handoff = new JobHandoffCoordinator(conversationStore, clock, maxModelCalls);
     }
 
     @Override
@@ -153,6 +160,16 @@ public final class JobProcessor implements MessageJobPort {
             if (Objects.nonNull(command) && command.disposition() == SkillCommandState.Disposition.PENDING) {
                 history = conversationStore.loadContextHistory(claim.sessionId());
             }
+            JobHandoffCoordinator.Decision decision = handoff.prepare(claim, guard, conversationModel, history);
+            if (decision.waitingResponse().isPresent()) {
+                appendWaiting(claim, guard, decision.waitingResponse().orElseThrow(), resultTracker);
+                return;
+            }
+            JobControl control = decision.control();
+            if (control.stage() == JobControl.Stage.WRAP_UP || control.ordinaryCallCount() >= maxModelCalls) {
+                wrapUp(claim, guard, conversationModel, resultTracker);
+                return;
+            }
             ContextHistoryView historyView = new ContextHistoryView(history);
             Map<SessionSequence, ModelContinuation> continuations = Optional.ofNullable(conversationStore.loadContinuations(claim))
                     .orElseGet(Map::of);
@@ -160,7 +177,9 @@ public final class JobProcessor implements MessageJobPort {
                 appendRuntime(claim, guard, MODEL_UNAVAILABLE, ConversationStore.JobUpdate.COMPLETE, resultTracker);
                 return;
             }
-            try (ToolSnapshot tools = toolCatalog.snapshot(claim.sessionId().value(), claim.messageJobId().value())) {
+            Set<ToolCapability> allowed = control.mode() == JobControl.Mode.REPORT_ONLY
+                    ? REPORT_CAPABILITIES : NORMAL_CAPABILITIES;
+            try (ToolSnapshot tools = toolCatalog.snapshot(claim.sessionId().value(), claim.messageJobId().value()).restrictedTo(allowed)) {
                 ReservationState reservation = new ReservationState();
                 ContextState context = contextState(claim, historyView, continuations, tools, activeModelDescriptor, conversationModel);
                 if (context.requiresCompaction()) {
@@ -183,8 +202,7 @@ public final class JobProcessor implements MessageJobPort {
                     reply = result.reply();
                     continuation = result.continuation();
                 } catch (BudgetExhausted exception) {
-                    appendRuntime(claim, guard, MODEL_CALL_LIMIT_REACHED,
-                            ConversationStore.JobUpdate.COMPLETE, resultTracker);
+                    wrapUp(claim, guard, conversationModel, resultTracker);
                     return;
                 } catch (ModelCallFailure failure) {
                     checkCancellation(claim);
@@ -192,6 +210,10 @@ public final class JobProcessor implements MessageJobPort {
                         logModelFailure(claim, reservation.ordinal(), failure.kind(), elapsedSince(requestStartedAt));
                         appendRuntime(claim, guard, INVALID_CONVERSATION_HISTORY,
                                 ConversationStore.JobUpdate.COMPLETE, resultTracker);
+                        return;
+                    }
+                    if (reservation.executionOrdinal() >= maxModelCalls) {
+                        wrapUp(claim, guard, conversationModel, resultTracker);
                         return;
                     }
                     if (failure.kind() == ModelCallFailure.Kind.CONTEXT_TOO_LARGE
@@ -221,9 +243,8 @@ public final class JobProcessor implements MessageJobPort {
                     return;
                 }
                 ModelReply.UseTools useTools = (ModelReply.UseTools) reply;
-                if (ordinal == maxModelCalls) {
-                    appendRuntime(claim, guard, MODEL_CALL_LIMIT_REACHED,
-                            ConversationStore.JobUpdate.COMPLETE, resultTracker);
+                if (reservation.executionOrdinal() >= maxModelCalls) {
+                    wrapUp(claim, guard, conversationModel, resultTracker);
                     return;
                 }
                 Optional<ConversationStore.UsageCheckpointData> usageCheckpoint = checkpoint(result, claim.modelSelection(),
@@ -259,6 +280,7 @@ public final class JobProcessor implements MessageJobPort {
             tracker.ownershipLost();
             return false;
         }
+        conversationStore.startSkillCommand(claim);
         SkillReadResult read = skillLibrary.metadata().stream()
                 .filter(metadata -> metadata.name().equals(command.command().requestedName()))
                 .findFirst()
@@ -297,15 +319,16 @@ public final class JobProcessor implements MessageJobPort {
             ConversationModel conversationModel) {
         if (Objects.isNull(descriptor) || "unspecified".equals(descriptor.modelId())
                 || !org.springframework.util.StringUtils.hasText(conversationModel.systemPrompt())) {
-            return new ContextState(new ModelRequest(history.between(0, Long.MAX_VALUE), continuations, tools), "", Optional.empty(), 0, false, Optional.empty());
+            return new ContextState(new ModelRequest(history.between(0, Long.MAX_VALUE), continuations, tools, ModelRequest.Purpose.ANSWER), "", Optional.empty(), 0, false, Optional.empty());
         }
         Optional<ContextCompaction> compaction = conversationStore.loadCompaction(claim.sessionId());
         List<SessionMessage> visibleHistory = history.between(compaction.map(value -> value.coveredThrough().value()).orElse(0L), Long.MAX_VALUE);
         Map<SessionSequence, ModelContinuation> visibleContinuations = continuationsAfter(continuations, compaction);
         Optional<ContextSummary> summary = compaction.map(value -> value.summary());
         long generation = compaction.map(value -> value.generation()).orElse(0L);
-        ContextUsageProjection projection = new ContextUsageProjection(descriptor, conversationModel.systemPrompt(), tools.definitions(),
-                visibleHistory, generation, summary, history.eligibilityFingerprint());
+        ContextUsageProjection projection = new ContextUsageProjection(descriptor,
+                conversationModel.systemPrompt() + ModelRequest.answerDirective(tools), tools.definitions(),
+                visibleHistory, generation, summary, contextUsageEstimator.eligibilityFingerprint(history.eligibilityFingerprint(), tools));
         String fingerprint = contextUsageEstimator.requestShapeFingerprint(projection);
         long estimate = contextUsageEstimator.estimate(projection,
                 conversationStore.loadUsageCheckpoint(claim.sessionId(), claim.modelSelection(), descriptor, fingerprint, generation)).tokens();
@@ -313,7 +336,7 @@ public final class JobProcessor implements MessageJobPort {
         if (estimate >= threshold) {
             logCompaction(claim, "compact_threshold_reached", "THRESHOLD_REACHED", estimate, descriptor.contextWindowTokens());
         }
-        return new ContextState(new ModelRequest(visibleHistory, visibleContinuations, tools, summary), fingerprint, compaction,
+        return new ContextState(new ModelRequest(visibleHistory, visibleContinuations, tools, summary, ModelRequest.Purpose.ANSWER), fingerprint, compaction,
                 estimate, estimate >= threshold, Optional.of(projection));
     }
 
@@ -360,6 +383,7 @@ public final class JobProcessor implements MessageJobPort {
         CompactionBoundary selected = boundary.orElseThrow();
         logCompaction(claim, "compact_started", reason.name(), context.estimateTokens(), projection.model().contextWindowTokens());
         String summary;
+        reservation.purpose = ModelCallPurpose.COMPACTION;
         try {
             summary = conversationModel.summarize(new ContextCompactionRequest(context.compaction().map(value -> value.summary()),
                     selected.history()), () -> reserveAndLogModelRequest(claim, guard, reservation, projection.model(),
@@ -367,8 +391,7 @@ public final class JobProcessor implements MessageJobPort {
             checkCancellation(claim);
         } catch (BudgetExhausted exception) {
             logCompaction(claim, "compact_failure", "MODEL_LIMIT", context.estimateTokens(), projection.model().contextWindowTokens());
-            appendRuntime(claim, guard, MODEL_CALL_LIMIT_REACHED,
-                    ConversationStore.JobUpdate.COMPLETE, resultTracker);
+            wrapUp(claim, guard, conversationModel, resultTracker);
             return false;
         } catch (ModelCallFailure failure) {
             checkCancellation(claim);
@@ -383,8 +406,11 @@ public final class JobProcessor implements MessageJobPort {
             compactedSummary = new ContextSummary(summary);
         } catch (IllegalArgumentException exception) {
             logCompaction(claim, "compact_failure", "SUMMARY_INVALID", context.estimateTokens(), projection.model().contextWindowTokens());
-            appendRuntime(claim, guard, COMPACTION_FAILED,
-                    ConversationStore.JobUpdate.COMPLETE, resultTracker);
+            if (reservation.executionOrdinal() >= maxModelCalls) {
+                wrapUp(claim, guard, conversationModel, resultTracker);
+            } else {
+                appendRuntime(claim, guard, COMPACTION_FAILED, ConversationStore.JobUpdate.COMPLETE, resultTracker);
+            }
             return false;
         }
         ContextUsageProjection afterProjection = new ContextUsageProjection(projection.model(), projection.systemPrompt(),
@@ -393,8 +419,11 @@ public final class JobProcessor implements MessageJobPort {
         long afterEstimate = contextUsageEstimator.estimate(afterProjection, Optional.empty()).tokens();
         if (afterEstimate >= fourFifths(projection.model().contextWindowTokens())) {
             logCompaction(claim, "compact_failure", "SUMMARY_TOO_LARGE", afterEstimate, projection.model().contextWindowTokens());
-            appendRuntime(claim, guard, CONTEXT_TOO_LARGE,
-                    ConversationStore.JobUpdate.COMPLETE, resultTracker);
+            if (reservation.executionOrdinal() >= maxModelCalls) {
+                wrapUp(claim, guard, conversationModel, resultTracker);
+            } else {
+                appendRuntime(claim, guard, CONTEXT_TOO_LARGE, ConversationStore.JobUpdate.COMPLETE, resultTracker);
+            }
             return false;
         }
         try {
@@ -418,7 +447,11 @@ public final class JobProcessor implements MessageJobPort {
             ModelCallFailure failure,
             ProcessingResultTracker resultTracker) {
         logModelFailure(claim, reservation.ordinal(), failure.kind(), Duration.ZERO);
-        if (failure.kind() == ModelCallFailure.Kind.TRANSIENT && reservation.ordinal() < maxModelCalls
+        if (reservation.executionOrdinal() >= maxModelCalls) {
+            wrapUp(claim, guard, conversationModels.resolve(claim.modelSelection()).orElseThrow(), resultTracker);
+            return false;
+        }
+        if (failure.kind() == ModelCallFailure.Kind.TRANSIENT && reservation.executionOrdinal() < maxModelCalls
                 && scheduleRetry(claim, guard, resultTracker)) {
             return false;
         }
@@ -511,18 +544,19 @@ public final class JobProcessor implements MessageJobPort {
 
     private int reserve(MessageWorkClaim claim, WorkGuard guard, ReservationState state) {
         if (!guard.stillOwned()) {
-            throw new BudgetExhausted();
+            throw new StaleWorkClaimException();
         }
         checkCancellation(claim);
-        OptionalInt reserved = conversationStore.reserveModelCall(claim, maxModelCalls, clock.instant());
-        if (reserved.isEmpty()) {
+        ModelCallReservationResult result = conversationStore.reserveModelCall(claim, state.purpose, maxModelCalls, clock.instant());
+        if (!(result instanceof ModelCallReservationResult.Reserved reserved)) {
             throw new BudgetExhausted();
         }
         if (!guard.stillOwned()) {
             throw new StaleWorkClaimException();
         }
-        state.setOrdinal(reserved.getAsInt());
-        return reserved.getAsInt();
+        state.setOrdinal(reserved.totalOrdinal());
+        state.executionOrdinal = reserved.executionOrdinal();
+        return reserved.totalOrdinal();
     }
 
     private int reserveAndLogModelRequest(
@@ -604,7 +638,7 @@ public final class JobProcessor implements MessageJobPort {
         telemetry.tool(request.toolName().value(), outcome, duration);
         logToolExecution(claim, ordinal, request, outcome, duration);
         return new ConversationStore.ToolObservationData(request.toolCallId(), request.toolName().value(),
-                output.asStructuredValue(), output.artifactReceipt());
+                output.asStructuredValue(), output.artifactReceipt(), output.skillReadReceipt());
     }
 
     private boolean handleModelFailure(
@@ -616,8 +650,12 @@ public final class JobProcessor implements MessageJobPort {
             ProcessingResultTracker resultTracker) {
         int ordinal = reservation.ordinal();
         logModelFailure(claim, ordinal, failure.kind(), duration);
+        if (reservation.executionOrdinal() >= maxModelCalls) {
+            wrapUp(claim, guard, conversationModels.resolve(claim.modelSelection()).orElseThrow(), resultTracker);
+            return false;
+        }
         if (failure.kind() == ModelCallFailure.Kind.CORRECTABLE) {
-            ConversationStore.JobUpdate update = ordinal < maxModelCalls
+            ConversationStore.JobUpdate update = reservation.executionOrdinal() < maxModelCalls
                     ? ConversationStore.JobUpdate.KEEP_WORKING : ConversationStore.JobUpdate.COMPLETE;
             return appendRuntime(claim, guard, MODEL_OUTPUT_INVALID, update, resultTracker)
                     && update == ConversationStore.JobUpdate.KEEP_WORKING;
@@ -627,7 +665,7 @@ public final class JobProcessor implements MessageJobPort {
                     ConversationStore.JobUpdate.COMPLETE, resultTracker);
             return false;
         }
-        if (failure.kind() == ModelCallFailure.Kind.TRANSIENT && ordinal < maxModelCalls
+        if (failure.kind() == ModelCallFailure.Kind.TRANSIENT && reservation.executionOrdinal() < maxModelCalls
                 && scheduleRetry(claim, guard, resultTracker)) {
             return false;
         }
@@ -691,7 +729,7 @@ public final class JobProcessor implements MessageJobPort {
                 messages = List.of(message);
             }
             ConversationStore.MessageBatch batch = new ConversationStore.MessageBatch(messages, update,
-                    Optional.empty(), pending.flatMap(PendingToolBatch::checkpoint), Optional.of(failure));
+                    Optional.empty(), pending.flatMap(PendingToolBatch::checkpoint), Optional.of(failure), ConversationStore.CompletionDisposition.NONE);
             resultTracker.appendOutcomeUncertain = true;
             JobStatus status = conversationStore.append(claim, batch, clock.instant());
             resultTracker.committed(status);
@@ -705,10 +743,34 @@ public final class JobProcessor implements MessageJobPort {
         }
     }
 
+    private boolean canRetryStorage(MessageWorkClaim claim) {
+        JobControl control = conversationStore.loadJobControl(claim);
+        return control.ordinaryCallCount() < maxModelCalls || control.stage() == JobControl.Stage.WRAP_UP;
+    }
+
+    private void wrapUp(MessageWorkClaim claim, WorkGuard guard, ConversationModel model, ProcessingResultTracker tracker) {
+        String text = handoff.wrap(claim, guard, model);
+        appendWaiting(claim, guard, text, tracker);
+    }
+
+    private void appendWaiting(MessageWorkClaim claim, WorkGuard guard, String text, ProcessingResultTracker tracker) {
+        appendResponse(claim, guard, List.of(new ConversationStore.AssistantData(text)), ConversationStore.JobUpdate.COMPLETE,
+                Optional.empty(), Optional.empty(), ConversationStore.CompletionDisposition.WAITING, tracker);
+    }
+
     private boolean appendResponse(MessageWorkClaim claim, WorkGuard guard, List<ConversationStore.MessageData> messages,
             ConversationStore.JobUpdate update, Optional<ModelContinuation> continuation,
             Optional<ConversationStore.UsageCheckpointData> checkpoint,
             ProcessingResultTracker resultTracker) {
+        return appendResponse(claim, guard, messages, update, continuation, checkpoint,
+                update == ConversationStore.JobUpdate.COMPLETE ? ConversationStore.CompletionDisposition.ANSWER
+                        : ConversationStore.CompletionDisposition.NONE, resultTracker);
+    }
+
+    private boolean appendResponse(MessageWorkClaim claim, WorkGuard guard, List<ConversationStore.MessageData> messages,
+            ConversationStore.JobUpdate update, Optional<ModelContinuation> continuation,
+            Optional<ConversationStore.UsageCheckpointData> checkpoint,
+            ConversationStore.CompletionDisposition disposition, ProcessingResultTracker resultTracker) {
         if (!guard.stillOwned()) {
             resultTracker.ownershipLost();
             return false;
@@ -722,9 +784,11 @@ public final class JobProcessor implements MessageJobPort {
                     messages = cancellationMessages();
                     checkpoint = Optional.empty();
                 }
+                disposition = ConversationStore.CompletionDisposition.NONE;
             }
             conversationStore.updateProgress(claim, new JobProgress(JobPhase.HISTORY_COMMIT, clock.instant(), Optional.empty()));
-            ConversationStore.MessageBatch batch = new ConversationStore.MessageBatch(messages, update, continuation, checkpoint);
+            ConversationStore.MessageBatch batch = new ConversationStore.MessageBatch(messages, update, continuation, checkpoint,
+                    Optional.empty(), disposition);
             resultTracker.appendOutcomeUncertain = true;
             JobStatus status = conversationStore.append(claim, batch, clock.instant());
             resultTracker.committed(status);
@@ -761,7 +825,7 @@ public final class JobProcessor implements MessageJobPort {
             Optional<ConversationStore.MessageJobProjection> job = conversationStore.readJob(claim.messageJobId());
             if (failure.kind() != ConversationStoreFailure.Kind.CONTRACT
                     && job.isPresent()
-                    && job.orElseThrow().modelCallCount() < maxModelCalls
+                    && canRetryStorage(claim)
                     && job.orElseThrow().retryCount() < retryPolicy.transientRetries()) {
                 Duration delay = retryDelay(job.orElseThrow().retryCount());
                 boolean scheduled = conversationStore.scheduleRetry(claim, delay, JobFailure.STORAGE_UNAVAILABLE);
@@ -991,6 +1055,12 @@ public final class JobProcessor implements MessageJobPort {
 
     private static final class ReservationState {
         private int ordinal;
+        private int executionOrdinal;
+        private ModelCallPurpose purpose = ModelCallPurpose.EXECUTION;
+
+        private int executionOrdinal() {
+            return executionOrdinal;
+        }
 
         private void setOrdinal(int ordinal) {
             this.ordinal = ordinal;

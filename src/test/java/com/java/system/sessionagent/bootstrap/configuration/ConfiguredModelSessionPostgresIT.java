@@ -18,6 +18,7 @@ import com.java.system.sessionagent.model.adapter.springai.SystemPrompt;
 import com.java.system.sessionagent.storage.adapter.postgres.PostgresConversationStore;
 import com.java.system.sessionagent.tool.domain.ToolName;
 import com.java.system.sessionagent.tool.port.ToolBinding;
+import com.java.system.sessionagent.tool.port.ToolCapability;
 import com.java.system.sessionagent.tool.port.ToolCatalog;
 import com.java.system.sessionagent.tool.port.ToolDefinition;
 import com.java.system.sessionagent.tool.port.ToolOutput;
@@ -300,7 +301,7 @@ class ConfiguredModelSessionPostgresIT {
 
     private static ToolCatalog catalog() {
         ToolBinding lookup = new ToolBinding(new ToolDefinition(new ToolName("lookup"), "Look up a fee", Map.of()),
-                (context, arguments) -> new ToolOutput(false, Map.of("result", "fee is 9")));
+                (context, arguments) -> new ToolOutput(false, Map.of("result", "fee is 9")), ToolCapability.ORDINARY);
         return () -> new ToolSnapshot(List.of(lookup));
     }
 

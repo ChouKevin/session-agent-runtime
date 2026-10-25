@@ -1,4 +1,14 @@
 package com.java.system.sessionagent.storage.adapter.postgres;
+
+import com.java.system.sessionagent.conversation.domain.IntentRequest;
+import com.java.system.sessionagent.conversation.domain.IntentResult;
+
+import com.java.system.sessionagent.conversation.domain.ModelCallPurpose;
+import com.java.system.sessionagent.conversation.domain.ModelCallReservationResult;
+import com.java.system.sessionagent.conversation.domain.WaitingChoice;
+import com.java.system.sessionagent.conversation.domain.FollowUpIntent;
+import com.java.system.sessionagent.conversation.domain.JobStatus;
+import com.java.system.sessionagent.conversation.domain.AssistantMessage;
 import com.java.system.sessionagent.conversation.TestConfiguredModels;
 import com.java.system.sessionagent.conversation.application.JobProcessor;
 import com.java.system.sessionagent.conversation.application.MessageJobRetryPolicy;
@@ -116,6 +126,9 @@ class ArtifactStorePostgresIT {
         AtomicInteger requests = new AtomicInteger();
         ConversationModel model =
                 new ConversationModel() {
+                    @Override public IntentResult classifyIntent(IntentRequest request, ModelCallReservation reservation) {
+                        throw new AssertionError("Unexpected intent request in ordinary-job fixture");
+                    }
                     @Override
                     public ModelRouteId routeId() {
                         return new ModelRouteId("test");
@@ -232,7 +245,7 @@ class ArtifactStorePostgresIT {
         expire(first);
         MessageWorkClaim restarted = conversations.claimNext("restarted", Duration.ofMinutes(1)).orElseThrow();
         assertThat(save(restarted, 1, 0, "old")).isEqualTo(orphan);
-        int call = conversations.reserveModelCall(restarted, 30, Instant.now()).orElseThrow();
+        int call = ((ModelCallReservationResult.Reserved) conversations.reserveModelCall(restarted, ModelCallPurpose.EXECUTION, 30, Instant.now())).totalOrdinal();
         ToolOutput actual = save(restarted, call, 0, "new");
         append(restarted, actual);
         finish(restarted);
@@ -263,7 +276,7 @@ class ArtifactStorePostgresIT {
         append(claim, save(claim, 1, 0, "audit"));
         conversations.append(claim, new ConversationStore.MessageBatch(
                 List.of(new ConversationStore.RuntimeData("MODEL_UNAVAILABLE", "unavailable")), ConversationStore.JobUpdate.COMPLETE,
-                Optional.empty(), Optional.empty(), Optional.of(JobFailure.MODEL_UNAVAILABLE)), Instant.now());
+                Optional.empty(), Optional.empty(), Optional.of(JobFailure.MODEL_UNAVAILABLE), ConversationStore.CompletionDisposition.NONE), Instant.now());
         assertThat(released(claim)).isEmpty();
         assertThat(count("select count(*) from generated_artifact where observation_sequence is not null")).isEqualTo(1);
     }
@@ -329,10 +342,63 @@ class ArtifactStorePostgresIT {
                 .eligible(session, job)).isFalse();
     }
 
+    @Test
+    void waiting_and_clarification_never_release_artifacts_and_later_answer_releases_only_its_own_job() {
+        MessageWorkClaim paused = claim("retained-evidence");
+        ToolOutput old = save(paused, 1, 0, "Paused draft must remain private");
+        append(paused, old);
+        conversations.enterWrapUp(paused, Instant.now());
+        conversations.append(paused, waitingBatch("Continue or organize?"), Instant.now());
+        assertThat(released(paused)).isEmpty();
+
+        conversations.receive(new IncomingMessage("retained-evidence", "alice", "unclear", "yes"), MODEL, model -> Optional.of(MODEL));
+        MessageWorkClaim unclear = conversations.claimNext("worker", Duration.ofMinutes(1)).orElseThrow();
+        WaitingChoice original = conversations.loadJobControl(unclear).waiting().orElseThrow();
+        conversations.reserveModelCall(unclear, ModelCallPurpose.INTENT, 30, Instant.now());
+        conversations.resolveFollowUp(unclear, original, FollowUpIntent.CLARIFY, Instant.now());
+        conversations.append(unclear, waitingBatch("Which option?"), Instant.now());
+        assertThat(released(paused)).isEmpty();
+        assertThat(released(unclear)).isEmpty();
+
+        conversations.receive(new IncomingMessage("retained-evidence", "alice", "deliver", "Organize existing evidence"), MODEL, model -> Optional.of(MODEL));
+        MessageWorkClaim deliver = conversations.claimNext("worker", Duration.ofMinutes(1)).orElseThrow();
+        assertThat(conversations.loadJobControl(deliver).waiting()).contains(original);
+        conversations.reserveModelCall(deliver, ModelCallPurpose.INTENT, 30, Instant.now());
+        conversations.resolveFollowUp(deliver, original, FollowUpIntent.DELIVER, Instant.now());
+        ModelCallReservationResult.Reserved call = (ModelCallReservationResult.Reserved) conversations.reserveModelCall(
+                deliver, ModelCallPurpose.EXECUTION, 30, Instant.now());
+        assertThat(call).isEqualTo(new ModelCallReservationResult.Reserved(2, 1));
+        ToolOutput current = save(deliver, call.totalOrdinal(), 0, "Confirmed facts; uncovered areas marked unknown");
+        append(deliver, current);
+        assertThat(released(deliver)).isEmpty();
+        finish(deliver);
+        assertThat(released(deliver)).hasSize(1);
+        assertThat(released(paused)).isEmpty();
+        assertThat(count("select count(*) from generated_artifact where released")).isEqualTo(1);
+    }
+
+    @Test
+    void cancellation_wins_over_waiting_commit_and_never_releases_the_staged_report() {
+        MessageWorkClaim claim = claim("cancel-waiting");
+        append(claim, save(claim, 1, 0, "Unreleased report"));
+        conversations.enterWrapUp(claim, Instant.now());
+        conversations.requestCancellation(claim.messageJobId());
+        assertThat(conversations.append(claim, waitingBatch("This question must not be committed"), Instant.now()))
+                .isEqualTo(JobStatus.CANCELLED);
+        assertThat(released(claim)).isEmpty();
+        assertThat(count("select count(*) from session_waiting_choice")).isZero();
+        assertThat(conversations.loadHistory(claim.sessionId()).stream().filter(AssistantMessage.class::isInstance)).isEmpty();
+    }
+
+    private static ConversationStore.MessageBatch waitingBatch(String text) {
+        return new ConversationStore.MessageBatch(List.of(new ConversationStore.AssistantData(text)), ConversationStore.JobUpdate.COMPLETE,
+                Optional.empty(), Optional.empty(), Optional.empty(), ConversationStore.CompletionDisposition.WAITING);
+    }
+
     private MessageWorkClaim claim(String key) {
         conversations.receive(new IncomingMessage(key, "alice", key, "hello"), MODEL, model -> Optional.of(MODEL));
         MessageWorkClaim claim = conversations.claimNext("worker", Duration.ofMinutes(1)).orElseThrow();
-        conversations.reserveModelCall(claim, 30, Instant.now()).orElseThrow();
+        conversations.reserveModelCall(claim, ModelCallPurpose.EXECUTION, 30, Instant.now());
         return claim;
     }
 
@@ -354,12 +420,12 @@ class ArtifactStorePostgresIT {
                 new ConversationStore.AssistantToolCallsData(Optional.of("Saving report"), List.of(
                         new ConversationStore.ToolCallData(call, "createMarkdownReport", sourceInputs.get(artifactId)))),
                 new ConversationStore.ToolObservationData(call, "createMarkdownReport", output.asStructuredValue(), output.artifactReceipt())),
-                ConversationStore.JobUpdate.KEEP_WORKING), Instant.now());
+                ConversationStore.JobUpdate.KEEP_WORKING, ConversationStore.CompletionDisposition.NONE), Instant.now());
     }
 
     private void finish(MessageWorkClaim claim) {
         conversations.append(claim, new ConversationStore.MessageBatch(List.of(new ConversationStore.AssistantData("done")),
-                ConversationStore.JobUpdate.COMPLETE), Instant.now());
+                ConversationStore.JobUpdate.COMPLETE, ConversationStore.CompletionDisposition.ANSWER), Instant.now());
     }
 
     private List<ArtifactStore.Artifact> released(MessageWorkClaim claim) {

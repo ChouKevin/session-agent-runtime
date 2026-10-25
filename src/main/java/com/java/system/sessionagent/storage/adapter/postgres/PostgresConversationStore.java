@@ -4,6 +4,11 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.java.system.sessionagent.conversation.domain.ConversationHistory;
+import com.java.system.sessionagent.conversation.domain.JobControl;
+import com.java.system.sessionagent.conversation.domain.WaitingChoice;
+import com.java.system.sessionagent.conversation.domain.FollowUpIntent;
+import com.java.system.sessionagent.conversation.domain.ModelCallPurpose;
+import com.java.system.sessionagent.conversation.domain.ModelCallReservationResult;
 import com.java.system.sessionagent.conversation.domain.SkillCommand;
 import com.java.system.sessionagent.conversation.domain.SkillCommandState;
 import com.java.system.sessionagent.conversation.domain.SkillMessage;
@@ -36,6 +41,7 @@ import com.java.system.sessionagent.conversation.domain.ToolObservation;
 import com.java.system.sessionagent.conversation.domain.ToolCallId;
 import com.java.system.sessionagent.conversation.domain.ToolRequest;
 import com.java.system.sessionagent.tool.domain.ToolName;
+import com.java.system.sessionagent.tool.port.SkillReadReceipt;
 import com.java.system.sessionagent.conversation.domain.UserMessage;
 import com.java.system.sessionagent.conversation.port.in.MessageConflictException;
 import com.java.system.sessionagent.conversation.port.in.QueueFullException;
@@ -74,7 +80,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
-import java.util.OptionalInt;
 import java.util.Set;
 import java.util.UUID;
 import java.util.function.Supplier;
@@ -315,6 +320,20 @@ public final class PostgresConversationStore implements ConversationStore {
     }
 
     @Override
+    public UUID startSkillCommand(MessageWorkClaim claim) {
+        return inTransaction(() -> {
+            requireLiveClaim(claim);
+            rejectCancellation(claim);
+            PostgresConversationMapper.SkillCommandRow command = mapper.loadSkillCommand(messageJobId(claim), sessionId(claim))
+                    .stream().findFirst().orElseThrow(() -> new IllegalArgumentException("Job is not an explicit skill command"));
+            Assert.isTrue(command.disposition().equals("PENDING"), "Only pending commands start a load");
+            return mapper.startSkillLoad(UUID.randomUUID(), messageJobId(claim), sessionId(claim), "EXPLICIT",
+                    SkillReadReceipt.resource("skill://" + command.requestedName()), claim.workerId(), claim.claimNumber(),
+                    null, null).getFirst();
+        });
+    }
+
+    @Override
     public JobStatus resolveSkillCommand(MessageWorkClaim claim, SkillReadResult result, Instant createdAt) {
         Objects.requireNonNull(claim, "Claim must not be null");
         Objects.requireNonNull(result, "Read result must not be null");
@@ -336,11 +355,17 @@ public final class PostgresConversationStore implements ConversationStore {
                 return JobStatus.WORKING;
             }
             boolean accepted = result instanceof SkillReadResult.Success;
+            UUID attemptId = startSkillCommand(claim);
+            String requestedUri = "skill://" + command.command().requestedName();
+            SkillReadReceipt receipt = result instanceof SkillReadResult.Success success
+                    ? SkillReadReceipt.succeeded(attemptId, requestedUri, success.resource().uri(), success.resource().sha256())
+                    : SkillReadReceipt.failed(attemptId, requestedUri, ((SkillReadResult.Failure) result).code());
             MessageData data = accepted ? new SkillData(((SkillReadResult.Success) result).resource())
                     : new RuntimeData(JobFailure.SKILL_UNAVAILABLE.name(), JobFailure.SKILL_UNAVAILABLE.message());
             return append(claim, new MessageBatch(List.of(data),
                     accepted ? JobUpdate.KEEP_WORKING : JobUpdate.COMPLETE, Optional.empty(), Optional.empty(),
-                    accepted ? Optional.empty() : Optional.of(JobFailure.SKILL_UNAVAILABLE)), createdAt, true);
+                    accepted ? Optional.empty() : Optional.of(JobFailure.SKILL_UNAVAILABLE), ConversationStore.CompletionDisposition.NONE),
+                    createdAt, Optional.of(receipt));
         });
     }
 
@@ -519,19 +544,91 @@ public final class PostgresConversationStore implements ConversationStore {
     }
 
     @Override
-    public OptionalInt reserveModelCall(MessageWorkClaim claim, int maxModelCalls, Instant now) {
-        MessageWorkClaim requiredClaim = Objects.requireNonNull(claim, "Message work claim must not be null");
-        Assert.isTrue(maxModelCalls > 0, "Maximum model calls must be positive");
+    public JobControl loadJobControl(MessageWorkClaim claim) {
+        return inTransaction(() -> {
+            requireLiveClaim(claim);
+            rejectCancellation(claim);
+            return jobControl(claim);
+        });
+    }
+
+    private JobControl jobControl(MessageWorkClaim claim) {
+        PostgresConversationMapper.ControlRow row = mapper.loadJobControl(messageJobId(claim));
+        Optional<WaitingChoice> waiting = mapper.loadWaiting(sessionId(claim)).stream().findFirst()
+                .map(value -> new WaitingChoice(new MessageJobId(value.originJob().toString()),
+                        new SessionSequence(value.responseSequence()), value.generation()));
+        JobControl.Stage stage = JobControl.Stage.valueOf(row.controlStage());
+        if (stage == JobControl.Stage.INTENT && waiting.isEmpty() && !row.intentAttempted()) {
+            stage = JobControl.Stage.EXECUTION;
+        }
+        requireLiveClaim(claim);
+        return new JobControl(JobControl.Mode.valueOf(row.executionMode()), stage,
+                new UserMessage(claim.sessionId(), new SessionSequence(row.userMessageSequence()),
+                        Optional.of(claim.messageJobId()), row.createdAt().toInstant(), MessageRole.USER,
+                        row.participantId(), row.message()), waiting, row.ordinaryCalls(),
+                row.intentAttempted(), row.wrapAttempted());
+    }
+
+    @Override
+    public ModelCallReservationResult reserveModelCall(
+            MessageWorkClaim claim, ModelCallPurpose purpose, int maxExecutionCalls, Instant now) {
+        Objects.requireNonNull(purpose, "Model call purpose must not be null");
+        Assert.isTrue(maxExecutionCalls > 0, "Maximum ordinary calls must be positive");
         Objects.requireNonNull(now, "Current time must not be null");
         return inTransaction(() -> {
-            if (mapper.requireLiveClaim(messageJobId(requiredClaim), sessionId(requiredClaim),
-                    requiredClaim.workerId(), requiredClaim.claimNumber()) != 1) {
-                return OptionalInt.empty();
+            requireLiveClaim(claim);
+            rejectCancellation(claim);
+            JobControl control = jobControl(claim);
+            if ((purpose == ModelCallPurpose.INTENT && control.intentAttempted())
+                    || (purpose == ModelCallPurpose.WRAP_UP && control.wrapAttempted())) {
+                return new ModelCallReservationResult.AlreadyAttempted();
             }
-            rejectCancellation(requiredClaim);
-            return mapper.reserveModelCall(messageJobId(requiredClaim), sessionId(requiredClaim), requiredClaim.workerId(),
-                    requiredClaim.claimNumber(), maxModelCalls, timestamp(now)).stream().findFirst().map(OptionalInt::of)
-                    .orElseGet(OptionalInt::empty);
+            if (purpose.ordinary() && (control.ordinaryCallCount() >= maxExecutionCalls
+                    || control.stage() == JobControl.Stage.WRAP_UP)) {
+                return new ModelCallReservationResult.BudgetExhausted();
+            }
+            PostgresConversationMapper.ReservationRow reserved = mapper.reserveModelCall(messageJobId(claim),
+                    purpose.name(), purpose.ordinary(), timestamp(now)).getFirst();
+            requireLiveClaim(claim);
+            return new ModelCallReservationResult.Reserved(reserved.totalOrdinal(), reserved.executionOrdinal());
+        });
+    }
+
+    @Override
+    public JobControl resolveFollowUp(MessageWorkClaim claim, WaitingChoice expected, FollowUpIntent intent, Instant now) {
+        Objects.requireNonNull(expected, "Expected waiting choice must not be null");
+        Objects.requireNonNull(intent, "Follow-up intent must not be null");
+        return inTransaction(() -> {
+            requireLiveClaim(claim);
+            rejectCancellation(claim);
+            JobControl control = jobControl(claim);
+            if (control.stage() != JobControl.Stage.INTENT
+                    || Objects.nonNull(mapper.loadJobControl(messageJobId(claim)).followUpIntent())) {
+                return control;
+            }
+            if (!control.waiting().filter(expected::equals).isPresent()) {
+                throw new StaleWorkClaimException();
+            }
+            if (intent != FollowUpIntent.CLARIFY) {
+                int consumed = mapper.consumeWaiting(sessionId(claim), UUID.fromString(expected.originJob().value()),
+                        expected.responseSequence().value(), expected.generation());
+                if (consumed != 1) {
+                    throw new StaleWorkClaimException();
+                }
+            }
+            mapper.resolveFollowUp(messageJobId(claim), intent == FollowUpIntent.DELIVER ? "REPORT_ONLY" : "NORMAL",
+                    intent == FollowUpIntent.CLARIFY ? "INTENT" : "EXECUTION", intent.name());
+            return jobControl(claim);
+        });
+    }
+
+    @Override
+    public JobControl enterWrapUp(MessageWorkClaim claim, Instant now) {
+        return inTransaction(() -> {
+            requireLiveClaim(claim);
+            rejectCancellation(claim);
+            mapper.enterWrapUp(messageJobId(claim));
+            return jobControl(claim);
         });
     }
 
@@ -558,10 +655,12 @@ public final class PostgresConversationStore implements ConversationStore {
     public JobStatus append(MessageWorkClaim claim, MessageBatch batch, Instant createdAt) {
         Assert.isTrue(batch.messages().stream().noneMatch(SkillData.class::isInstance),
                 "Skill events require command resolution");
-        return append(claim, batch, createdAt, false);
+        return append(claim, batch, createdAt, Optional.empty());
     }
 
-    private JobStatus append(MessageWorkClaim claim, MessageBatch batch, Instant createdAt, boolean resolvingSkill) {
+    private JobStatus append(MessageWorkClaim claim, MessageBatch batch, Instant createdAt,
+            Optional<SkillReadReceipt> commandReceipt) {
+        boolean resolvingSkill = commandReceipt.isPresent();
         MessageWorkClaim requiredClaim = Objects.requireNonNull(claim, "Message work claim must not be null");
         MessageBatch requiredBatch = Objects.requireNonNull(batch, "Message batch must not be null");
         Instant requiredCreatedAt = Objects.requireNonNull(createdAt, "Message creation time must not be null");
@@ -609,6 +708,14 @@ public final class PostgresConversationStore implements ConversationStore {
                         Assert.isTrue(toolOrdinal < actualCalls.size(), "Artifact requires matching assistant tool call");
                         artifactStore.associate(requiredClaim, observation, sequence, actualCalls.get(toolOrdinal), toolOrdinal);
                     }
+                    if (observation.skillReadReceipt().isPresent()) {
+                        Assert.isTrue(toolOrdinal < actualCalls.size()
+                                && actualCalls.get(toolOrdinal).toolCallId().equals(observation.toolCallId())
+                                && actualCalls.get(toolOrdinal).toolName().equals(observation.toolName()),
+                                "Skill receipt requires its matching assistant call");
+                        associateSkillLoad(requiredClaim, observation.skillReadReceipt().orElseThrow(), "AUTOMATIC",
+                                toolOrdinal, sequence);
+                    }
                     toolOrdinal++;
                 } else if (message instanceof RuntimeData runtime) {
                     insertSessionMessage(sessionId, sequence, messageJobId(requiredClaim), "RUNTIME", requiredCreatedAt);
@@ -622,6 +729,11 @@ public final class PostgresConversationStore implements ConversationStore {
                     Assert.isTrue(mapper.resolveSkillCommand(messageJobId(requiredClaim), sessionId,
                             message instanceof SkillData ? "ACCEPTED" : "REJECTED", sequence) == 1,
                             "Skill command must be pending");
+                    associateSkillLoad(requiredClaim, commandReceipt.orElseThrow(), "EXPLICIT", 0, sequence);
+                    if (message instanceof SkillData) {
+                        mapper.clearWaiting(sessionId);
+                        mapper.resolveFollowUp(messageJobId(requiredClaim), "NORMAL", "EXECUTION", "NEW_QUESTION");
+                    }
                 }
             }
             if (cancelled) {
@@ -649,8 +761,18 @@ public final class PostgresConversationStore implements ConversationStore {
                 return JobStatus.CANCELLED;
             } else if (requiredBatch.jobUpdate() == JobUpdate.COMPLETE) {
                 mapper.deleteContinuations(messageJobId(requiredClaim), sessionId);
+                if (requiredBatch.completionDisposition() == CompletionDisposition.WAITING) {
+                    JobControl control = jobControl(requiredClaim);
+                    if (control.stage() == JobControl.Stage.WRAP_UP) {
+                        mapper.recordWaiting(sessionId, messageJobId(requiredClaim), responseSequence.orElseThrow().value());
+                    } else {
+                        Assert.isTrue(control.waiting().isPresent(), "Clarification must preserve an existing waiting choice");
+                    }
+                }
+                mapper.setCompletionDisposition(messageJobId(requiredClaim), requiredBatch.completionDisposition().name());
                 completeJob(requiredClaim, clock.instant(), requiredBatch.failure());
-                boolean successfulAnswer = requiredBatch.failure().isEmpty()
+                boolean successfulAnswer = requiredBatch.completionDisposition() == CompletionDisposition.ANSWER
+                        && requiredBatch.failure().isEmpty()
                         && requiredBatch.messages().stream().anyMatch(AssistantData.class::isInstance);
                 if (successfulAnswer) {
                     artifactStore.release(messageJobId(requiredClaim));
@@ -665,6 +787,15 @@ public final class PostgresConversationStore implements ConversationStore {
             }
             return requiredBatch.jobUpdate() == JobUpdate.COMPLETE ? JobStatus.DONE : JobStatus.WORKING;
         });
+    }
+
+    private void associateSkillLoad(MessageWorkClaim claim, SkillReadReceipt receipt, String source,
+            int toolOrdinal, long sequence) {
+        int associated = mapper.commitSkillLoad(receipt, messageJobId(claim), sessionId(claim), claim.workerId(),
+                claim.claimNumber(), source, toolOrdinal, sequence,
+                receipt.outcome() == SkillReadReceipt.Outcome.SUCCEEDED ? "COMMITTED_SUCCESS" : "COMMITTED_FAILURE",
+                receipt.sha256().orElse(null), receipt.errorCode().orElse(null));
+        Assert.isTrue(associated == 1, "Skill receipt must belong to this live attempt and history event");
     }
 
     @Override

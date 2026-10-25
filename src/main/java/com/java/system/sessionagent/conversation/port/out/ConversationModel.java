@@ -6,6 +6,8 @@ import com.java.system.sessionagent.conversation.domain.ModelRouteId;
 import com.java.system.sessionagent.conversation.domain.ModelRequest;
 import com.java.system.sessionagent.conversation.domain.ModelUsage;
 import com.java.system.sessionagent.conversation.domain.ContextCompactionRequest;
+import com.java.system.sessionagent.conversation.domain.IntentRequest;
+import com.java.system.sessionagent.conversation.domain.IntentResult;
 
 import java.util.function.Consumer;
 
@@ -32,6 +34,8 @@ public interface ConversationModel {
     }
 
     ModelCallResult respond(ModelRequest request, ModelCallReservation reservation, Consumer<ModelUsage> usageObserver);
+    IntentResult classifyIntent(IntentRequest request, ModelCallReservation reservation);
+
 
     default String summarize(ContextCompactionRequest request, ModelCallReservation reservation) {
         throw ModelCallFailure.terminal();

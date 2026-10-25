@@ -1,4 +1,7 @@
 package com.java.system.sessionagent.conversation;
+
+import com.java.system.sessionagent.conversation.domain.ModelCallPurpose;
+import com.java.system.sessionagent.conversation.domain.ModelCallReservationResult;
 import java.nio.charset.StandardCharsets;
 import java.util.UUID;
 
@@ -34,6 +37,7 @@ import com.java.system.sessionagent.skill.domain.SkillReadResult;
 import com.java.system.sessionagent.skill.domain.SkillResource;
 import com.java.system.sessionagent.skill.port.SkillLibrary;
 import com.java.system.sessionagent.tool.domain.ToolName;
+import com.java.system.sessionagent.tool.port.SkillReadReceipt;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.mockito.ArgumentCaptor;
@@ -48,7 +52,6 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.OptionalInt;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import static com.java.system.sessionagent.conversation.MessageJobTestFixtures.*;
@@ -217,6 +220,31 @@ class MessageJobSkillsTest {
         assertThat(batches.getAllValues().getFirst().messages()).hasSize(3);
         assertThat(batches.getAllValues().getFirst().messages().subList(1, 3))
                 .extracting(message -> ((ConversationStore.ToolObservationData) message).toolCallId().value()).containsExactly("bad", "good");
+        List<ConversationStore.ToolObservationData> observations = batches.getAllValues().getFirst().messages().stream()
+                .filter(ConversationStore.ToolObservationData.class::isInstance)
+                .map(ConversationStore.ToolObservationData.class::cast).toList();
+        assertThat(observations).allSatisfy(observation ->
+                assertThat(observation.skillReadReceipt()).isPresent());
+        assertThat(observations).extracting(observation -> observation.skillReadReceipt().orElseThrow().outcome())
+                .containsExactly(SkillReadReceipt.Outcome.FAILED, SkillReadReceipt.Outcome.SUCCEEDED);
+        assertThat(observations).allSatisfy(observation ->
+                assertThat((Map<?, ?>) observation.output()).hasSize(2));
+    }
+
+    @Test
+    void explicit_selection_registers_its_fenced_start_before_reading_current_bytes() {
+        SkillLibrary library = library();
+        Harness harness = new Harness(library);
+        MessageWorkClaim claim = harness.submit("job", "session", "/skill:review question");
+        when(library.read("skill://review")).thenAnswer(invocation -> {
+            verify(harness.store).startSkillCommand(claim);
+            verify(harness.store, never()).resolveSkillCommand(any(), any(), any());
+            return new SkillReadResult.Success(resource("A"));
+        });
+
+        assertThat(harness.process(claim)).isEqualTo(MessageJobProcessingResult.COMPLETED);
+        verify(harness.store, times(1)).startSkillCommand(claim);
+        verify(harness.store).resolveSkillCommand(eq(claim), any(SkillReadResult.Success.class), any());
     }
 
     private static String definition(String body) {
@@ -247,7 +275,7 @@ class MessageJobSkillsTest {
         private Harness(SkillLibrary library) {
             this.library = library;
             when(store.loadContextHistory(any())).thenAnswer(invocation -> histories.get(invocation.<SessionId>getArgument(0)));
-            when(store.reserveModelCall(any(), anyInt(), any())).thenReturn(OptionalInt.of(1));
+            when(store.reserveModelCall(any(), any(ModelCallPurpose.class), anyInt(), any())).thenReturn(new ModelCallReservationResult.Reserved(1, 1));
             when(store.resolveSkillCommand(any(), any(), any())).thenAnswer(invocation -> {
                 MessageWorkClaim claim = invocation.getArgument(0);
                 SkillReadResult read = invocation.getArgument(1);
@@ -297,7 +325,8 @@ class MessageJobSkillsTest {
         }
 
         private JobProcessor processor(ConversationModel model) {
-            return new JobProcessor(store, TestConfiguredModels.withModel(model), new SkillToolCatalog(library), library, Clock.systemUTC(), 3,
+            return new JobProcessor(store, TestConfiguredModels.withModel(model),
+                    new SkillToolCatalog(library, (invocation, uri) -> UUID.randomUUID()), library, Clock.systemUTC(), 3,
                     new MessageJobRetryPolicy(3, Duration.ofSeconds(1)), new NoOpConversationTelemetry());
         }
     }
