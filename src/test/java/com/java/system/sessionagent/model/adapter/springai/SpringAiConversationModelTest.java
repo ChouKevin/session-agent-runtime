@@ -485,7 +485,10 @@ class SpringAiConversationModelTest {
         ModelRequest request = new ModelRequest(history, Map.of(), new ToolSnapshot(List.of()), Optional.empty(), ModelRequest.Purpose.WRAP_UP);
         assertThat(adapter.respond(request, () -> 3).reply()).isEqualTo(new ModelReply.Text("{\"question\":\"Continue?\"}"));
         assertThat(request.history()).containsExactlyElementsOf(history);
-        assertThat(prompts.getFirst().getInstructions().getLast().getText()).contains("investigation stage has ended");
+        assertThat(prompts.getFirst().getInstructions().getFirst().getText())
+                .isEqualTo(new SystemPrompt().content() + "\n\n" + request.transientDirective());
+        assertThat(prompts.getFirst().getInstructions().subList(1, prompts.getFirst().getInstructions().size()))
+                .containsExactlyElementsOf(new HistoryProjector(new ObjectMapper()).project(history));
         assertThat(((ToolCallingChatOptions) prompts.getFirst().getOptions()).getToolCallbacks()).isEmpty();
     }
 
@@ -505,7 +508,9 @@ class SpringAiConversationModelTest {
             ModelRequest request = new ModelRequest(List.of(), tools, ModelRequest.Purpose.ANSWER);
             adapter.respond(request, () -> 2);
             assertThat(request.history()).isEmpty();
-            assertThat(prompts.getFirst().getInstructions().getLast().getText()).contains("unknown", "uncovered", "retained evidence");
+            assertThat(prompts.getFirst().getInstructions().getFirst().getText())
+                    .isEqualTo(new SystemPrompt().content() + "\n\n" + request.transientDirective())
+                    .contains("unknown", "uncovered", "retained evidence");
             assertThat(((ToolCallingChatOptions) prompts.getFirst().getOptions()).getToolCallbacks()).isEmpty();
         }
     }

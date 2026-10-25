@@ -1,5 +1,6 @@
 package com.java.system.sessionagent.conversation.application;
 
+import com.java.system.sessionagent.conversation.domain.AssistantToolCallsMessage;
 import com.java.system.sessionagent.conversation.domain.ContextCompaction;
 import com.java.system.sessionagent.conversation.domain.ContextHistoryView;
 import com.java.system.sessionagent.conversation.domain.ContextSummary;
@@ -11,11 +12,13 @@ import com.java.system.sessionagent.conversation.domain.IntentRequest;
 import com.java.system.sessionagent.conversation.domain.IntentResult;
 import com.java.system.sessionagent.conversation.domain.JobControl;
 import com.java.system.sessionagent.conversation.domain.MessageWorkClaim;
+import com.java.system.sessionagent.conversation.domain.ModelContinuation;
 import com.java.system.sessionagent.conversation.domain.ModelCallPurpose;
 import com.java.system.sessionagent.conversation.domain.ModelCallReservationResult;
 import com.java.system.sessionagent.conversation.domain.ModelReply;
 import com.java.system.sessionagent.conversation.domain.ModelRequest;
 import com.java.system.sessionagent.conversation.domain.SessionMessage;
+import com.java.system.sessionagent.conversation.domain.SessionSequence;
 import com.java.system.sessionagent.conversation.port.in.WorkGuard;
 import com.java.system.sessionagent.conversation.port.out.ConversationModel;
 import com.java.system.sessionagent.conversation.port.out.ConversationStore;
@@ -88,12 +91,22 @@ public final class JobHandoffCoordinator {
             withInitiatingMessage.add(control.initiatingMessage());
             wrapHistory = List.copyOf(withInitiatingMessage);
         }
+        Map<SessionSequence, ModelContinuation> storedContinuations = store.loadContinuations(claim);
+        Map<SessionSequence, ModelContinuation> visibleContinuations = wrapHistory.stream()
+                .filter(AssistantToolCallsMessage.class::isInstance)
+                .map(SessionMessage::sequence)
+                .filter(storedContinuations::containsKey)
+                .collect(java.util.stream.Collectors.toUnmodifiableMap(sequence -> sequence, storedContinuations::get));
+        if (visibleContinuations.values().stream()
+                .anyMatch(continuation -> !model.routeId().equals(continuation.modelRouteId()))) {
+            return WRAP_FALLBACK;
+        }
         if (!fits(model, model.systemPrompt() + ModelRequest.directive(ModelRequest.Purpose.WRAP_UP),
                 wrapHistory, context.summary(), context.generation())) {
             return WRAP_FALLBACK;
         }
         try (ToolSnapshot empty = new ToolSnapshot(List.of())) {
-            ModelRequest request = new ModelRequest(wrapHistory, Map.of(), empty, context.summary(), ModelRequest.Purpose.WRAP_UP);
+            ModelRequest request = new ModelRequest(wrapHistory, visibleContinuations, empty, context.summary(), ModelRequest.Purpose.WRAP_UP);
             try {
                 ModelReply reply = model.respond(request, () -> reserve(claim, guard, ModelCallPurpose.WRAP_UP), ignored -> {}).reply();
                 checkOwnership(claim, guard);

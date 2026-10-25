@@ -63,6 +63,7 @@ final class MessageJobTestFixtures {
             ConversationStore.MessageBatch batch = invocation.getArgument(1);
             return appendedStatus(batch);
         });
+        when(store.appendAndScheduleRetry(any(), any(), any(), any(), any())).thenReturn(JobStatus.RETRY);
         return store;
     }
 

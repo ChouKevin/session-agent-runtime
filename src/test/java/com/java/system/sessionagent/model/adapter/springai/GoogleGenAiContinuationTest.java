@@ -16,10 +16,34 @@ import com.java.system.sessionagent.conversation.domain.SessionId;
 import com.java.system.sessionagent.conversation.domain.SessionSequence;
 import com.java.system.sessionagent.conversation.domain.ToolObservation;
 import com.java.system.sessionagent.conversation.domain.UserMessage;
+import com.java.system.sessionagent.conversation.domain.JobControl;
+import com.java.system.sessionagent.conversation.domain.JobStatus;
+import com.java.system.sessionagent.conversation.domain.MessageWorkClaim;
+import com.java.system.sessionagent.conversation.domain.ModelCallPurpose;
+import com.java.system.sessionagent.conversation.domain.ModelCallReservationResult;
+import com.java.system.sessionagent.conversation.domain.ModelSelection;
+import com.java.system.sessionagent.conversation.domain.ConversationHistory;
+import com.java.system.sessionagent.conversation.application.JobProcessor;
+import com.java.system.sessionagent.conversation.application.MessageJobRetryPolicy;
+import com.java.system.sessionagent.conversation.TestConfiguredModels;
+import com.java.system.sessionagent.conversation.port.in.MessageJobProcessingResult;
+import com.java.system.sessionagent.conversation.port.out.ConversationStore;
+import com.java.system.sessionagent.skill.adapter.filesystem.FileSystemSkillLibrary;
+import com.java.system.sessionagent.skill.configuration.SkillProperties;
+import java.time.Clock;
+import java.time.Duration;
+import java.time.ZoneOffset;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+import org.mockito.ArgumentCaptor;
 import com.java.system.sessionagent.conversation.port.out.NoOpConversationTelemetry;
 import com.java.system.sessionagent.tool.port.ToolSnapshot;
 import com.sun.net.httpserver.HttpServer;
-import org.junit.jupiter.api.Test;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 import org.springframework.ai.google.genai.GoogleGenAiChatModel;
 import org.springframework.ai.google.genai.GoogleGenAiChatOptions;
 import org.springframework.core.retry.RetryPolicy;
@@ -38,8 +62,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 class GoogleGenAiContinuationTest {
 
-    @Test
-    void replays_google_reasoning_text_and_each_signature_on_its_original_part() throws Exception {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void replays_google_reasoning_text_and_each_signature_on_its_original_part_including_runtime_wrap(boolean wrapUp) throws Exception {
         List<String> requests = new CopyOnWriteArrayList<>();
         HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         server.createContext("/", exchange -> {
@@ -82,11 +107,37 @@ class GoogleGenAiContinuationTest {
                     Instant.EPOCH, MessageRole.ASSISTANT_TOOL_CALLS, reply.message(), reply.requests());
             ToolObservation observation = new ToolObservation(sessionId, new SessionSequence(3), jobId, Instant.EPOCH,
                     MessageRole.TOOL, reply.requests().getFirst().toolCallId(), "lookup", Map.of("isError", false, "result", Map.of("fee", 9)));
-            ModelCallResult result = model.respond(new ModelRequest(List.of(user, calls, observation),
-                    Map.of(calls.sequence(), first.continuation().orElseThrow()), new ToolSnapshot(List.of()), ModelRequest.Purpose.ANSWER), reservations::incrementAndGet);
+            if (wrapUp) {
+                ConversationStore store = mock(ConversationStore.class);
+                MessageWorkClaim claim = new MessageWorkClaim(jobId.orElseThrow(), sessionId,
+                        new ModelSelection("test", "v1:test"), "worker", 1, Instant.EPOCH, Instant.EPOCH.plusSeconds(60));
+                JobControl control = new JobControl(JobControl.Mode.NORMAL, JobControl.Stage.WRAP_UP,
+                        user, Optional.empty(), 1, false, false);
+                when(store.loadJobControl(claim)).thenReturn(control);
+                when(store.enterWrapUp(eq(claim), any())).thenReturn(control);
+                when(store.loadContextHistory(sessionId)).thenReturn(new ConversationHistory(List.of(user, calls, observation), Map.of()));
+                when(store.loadContinuations(claim)).thenReturn(Map.of(calls.sequence(), first.continuation().orElseThrow()));
+                when(store.reserveModelCall(eq(claim), eq(ModelCallPurpose.WRAP_UP), eq(1), any())).thenAnswer(invocation ->
+                        new ModelCallReservationResult.Reserved(reservations.incrementAndGet(), 1));
+                when(store.append(eq(claim), any(), any())).thenReturn(JobStatus.DONE);
+                JobProcessor processor = new JobProcessor(store, TestConfiguredModels.withModel(model),
+                        () -> { throw new AssertionError("Wrap must not open ordinary tools"); },
+                        new FileSystemSkillLibrary(new SkillProperties()), Clock.fixed(Instant.EPOCH, ZoneOffset.UTC), 1,
+                        new MessageJobRetryPolicy(3, Duration.ofNanos(1)), new NoOpConversationTelemetry());
+
+                assertThat(processor.process(claim, () -> true)).isEqualTo(MessageJobProcessingResult.COMPLETED);
+                ArgumentCaptor<ConversationStore.MessageBatch> batch = ArgumentCaptor.forClass(ConversationStore.MessageBatch.class);
+                verify(store).append(eq(claim), batch.capture(), any());
+                assertThat(batch.getValue().completionDisposition()).isEqualTo(ConversationStore.CompletionDisposition.WAITING);
+                assertThat(batch.getValue().messages()).containsExactly(new ConversationStore.AssistantData("The fee is 9."));
+            } else {
+                ModelCallResult result = model.respond(new ModelRequest(List.of(user, calls, observation),
+                        Map.of(calls.sequence(), first.continuation().orElseThrow()), new ToolSnapshot(List.of()), ModelRequest.Purpose.ANSWER),
+                        reservations::incrementAndGet);
+                assertThat(result.reply()).isEqualTo(new ModelReply.Text("The fee is 9."));
+            }
 
             assertThat(reply.message()).contains("Checking.");
-            assertThat(result.reply()).isEqualTo(new ModelReply.Text("The fee is 9."));
             assertThat(requests).hasSize(2);
             assertThat(reservations).hasValue(2);
             JsonNode wire = mapper.readTree(requests.get(1));
@@ -103,6 +154,9 @@ class GoogleGenAiContinuationTest {
             assertThat(parts.at("/4/thoughtSignature").asText()).isEqualTo("CAk=");
             assertThat(wire.at("/contents/2/parts/0/functionResponse/name").asText()).isEqualTo("lookup");
             assertThat(wire.at("/contents/2/parts/0/functionResponse/response/result/fee").asInt()).isEqualTo(9);
+            if (wrapUp) {
+                assertThat(wire.path("tools").isMissingNode() || wire.path("tools").isEmpty()).isTrue();
+            }
         } finally {
             server.stop(0);
         }

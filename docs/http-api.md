@@ -115,6 +115,21 @@ worker lease expires, polling hides stale progress and reports
 Reclaim initializes `PREPARING`; the old claim cannot overwrite its progress or
 history. Process restarts do not require an in-memory progress cache.
 
+If a storage failure stops an admitted tool batch before its history append begins,
+recovery preserves already-obtained observations and marks unstarted calls
+`TOOL_NOT_EXECUTED`; those calls were not invoked. The complete assistant/tool
+batch and the `RETRY` transition commit in one transaction. A failed retry
+transition does not leave a separately committed batch behind. After reclaim,
+the next model request can use those durable observations without rerunning the
+completed tool batch. This does not guarantee exactly-once tool execution after
+an arbitrary process crash. An uncertain append response is not permission to
+blindly resend a possibly committed batch.
+
+Provider continuation is internal replay state, not an HTTP history field. It
+survives retry/reclaim for the same job and can accompany visible tool history in
+the final no-tools wrap-up request. Completion or cancellation removes that state
+without deleting the committed assistant/tool observations.
+
 `POST /internal/message-jobs/{messageJobId}/cancel` requires no request body.
 It returns `200` with the current job snapshot for a known job, `404` for an
 unknown job, or `400` for a malformed UUID. Repeating the request is idempotent:

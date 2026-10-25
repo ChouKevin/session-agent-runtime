@@ -126,6 +126,9 @@ public interface ConversationStore {
 
     JobStatus append(MessageWorkClaim claim, MessageBatch batch, Instant createdAt);
 
+    JobStatus appendAndScheduleRetry(
+            MessageWorkClaim claim, MessageBatch batch, Duration retryDelay, JobFailure failure, Instant createdAt);
+
     boolean scheduleRetry(MessageWorkClaim claim, Duration retryDelay, JobFailure failure);
 
     Optional<MessageJobProjection> readJob(MessageJobId messageJobId);

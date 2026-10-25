@@ -33,6 +33,14 @@ import com.java.system.sessionagent.conversation.port.out.StaleWorkClaimExceptio
 import com.java.system.sessionagent.tool.port.ToolCatalog;
 import com.java.system.sessionagent.tool.port.ToolOutput;
 import com.java.system.sessionagent.tool.port.ToolSnapshot;
+import com.java.system.sessionagent.tool.port.ArtifactReceipt;
+import com.java.system.sessionagent.tool.port.SkillReadReceipt;
+import com.java.system.sessionagent.tool.port.ToolExecutionContext;
+import com.java.system.sessionagent.conversation.domain.AssistantToolCallsMessage;
+import com.java.system.sessionagent.conversation.domain.ToolObservation;
+import com.java.system.sessionagent.conversation.domain.MessageRole;
+import com.java.system.sessionagent.conversation.domain.SessionMessage;
+import java.util.UUID;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
@@ -59,6 +67,115 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class MessageJobRecoveryTest {
+    @Test
+    void preserves_completed_tool_results_when_storage_failure_schedules_retry() {
+        ConversationStore store = mockStore();
+        MessageWorkClaim claim = claim();
+        when(store.loadContextHistory(claim.sessionId())).thenReturn(contextHistory(List.of(user())));
+        when(store.reserveModelCall(eq(claim), any(ModelCallPurpose.class), eq(2), any(Instant.class)))
+                .thenReturn(new ModelCallReservationResult.Reserved(1, 1));
+        when(store.readJob(claim.messageJobId())).thenReturn(Optional.of(new ConversationStore.MessageJobProjection(
+                claim.messageJobId(), claim.sessionId(), JobStatus.WORKING, 0, 1,
+                Optional.empty(), Optional.empty(), Optional.empty())));
+        when(store.appendAndScheduleRetry(eq(claim), any(), any(), eq(JobFailure.STORAGE_UNAVAILABLE), any()))
+                .thenReturn(JobStatus.RETRY);
+        AtomicBoolean completedFirst = new AtomicBoolean();
+        Mockito.doAnswer(invocation -> {
+            JobProgress progress = invocation.getArgument(1);
+            if (progress.phase() == JobPhase.TOOL_EXECUTION && completedFirst.getAndSet(false)) {
+                throw ConversationStoreFailure.transientFailure(new IllegalStateException("admission unavailable"));
+            }
+            return null;
+        }).when(store).updateProgress(eq(claim), any());
+        ArtifactReceipt artifactReceipt = new ArtifactReceipt(UUID.randomUUID(), UUID.randomUUID(),
+                new ToolExecutionContext(UUID.fromString(claim.sessionId().value()), UUID.fromString(claim.messageJobId().value()), 1, 0));
+        SkillReadReceipt skillReceipt = SkillReadReceipt.succeeded(UUID.randomUUID(), "skill://review", "skill://review", "a".repeat(64));
+        ToolOutput actual = new ToolOutput(false, Map.of("actual", "completed"),
+                Optional.of(artifactReceipt), Optional.of(skillReceipt));
+        AtomicInteger secondInvocations = new AtomicInteger();
+        ToolCatalog tools = () -> new ToolSnapshot(List.of(
+                binding("first", arguments -> { completedFirst.set(true); return actual; }),
+                binding("second", arguments -> { secondInvocations.incrementAndGet(); return new ToolOutput(false, Map.of()); })));
+        ModelContinuation continuation = new ModelContinuation(TEST_ROUTE_ID, "opaque-v1", new byte[] {1, 2});
+        ConversationModel model = model(TEST_ROUTE_ID, (request, reservation, usage) -> {
+            reservation.reserve();
+            return new ModelCallResult(new ModelReply.UseTools(Optional.of("Checking"), List.of(
+                    request("one", "first"), request("two", "second"))), Optional.of(continuation));
+        });
+
+        assertThat(service(store, model, tools).process(claim, () -> true))
+                .isEqualTo(MessageJobProcessingResult.RETRY_SCHEDULED);
+
+        ArgumentCaptor<ConversationStore.MessageBatch> batch = ArgumentCaptor.forClass(ConversationStore.MessageBatch.class);
+        verify(store).appendAndScheduleRetry(eq(claim), batch.capture(), any(), eq(JobFailure.STORAGE_UNAVAILABLE), any());
+        assertThat(batch.getValue().messages()).containsExactly(
+                new ConversationStore.AssistantToolCallsData(Optional.of("Checking"), List.of(
+                        new ConversationStore.ToolCallData(request("one", "first").toolCallId(), "first", Map.of()),
+                        new ConversationStore.ToolCallData(request("two", "second").toolCallId(), "second", Map.of()))),
+                new ConversationStore.ToolObservationData(request("one", "first").toolCallId(), "first", actual.asStructuredValue(),
+                        Optional.of(artifactReceipt), Optional.of(skillReceipt)),
+                new ConversationStore.ToolObservationData(request("two", "second").toolCallId(), "second",
+                        ToolOutput.runtimeFailure("TOOL_NOT_EXECUTED", "Tool was not executed because Runtime storage failed.").asStructuredValue()));
+        assertThat(batch.getValue().continuation()).contains(continuation);
+        assertThat(secondInvocations).hasValue(0);
+        verify(store, Mockito.never()).append(any(), any(), any());
+        verify(store, Mockito.never()).scheduleRetry(any(), any(), any());
+        ConversationStore.ToolObservationData completed = (ConversationStore.ToolObservationData) batch.getValue().messages().get(1);
+        assertThat(completed.artifactReceipt().orElseThrow()).isSameAs(artifactReceipt);
+        assertThat(completed.skillReadReceipt().orElseThrow()).isSameAs(skillReceipt);
+        List<SessionMessage> retainedHistory = List.of(user(),
+                new AssistantToolCallsMessage(claim.sessionId(), new SessionSequence(2), Optional.of(claim.messageJobId()),
+                        Instant.EPOCH, MessageRole.ASSISTANT_TOOL_CALLS, Optional.of("Checking"),
+                        List.of(request("one", "first"), request("two", "second"))),
+                new ToolObservation(claim.sessionId(), new SessionSequence(3), Optional.of(claim.messageJobId()),
+                        Instant.EPOCH, MessageRole.TOOL, completed.toolCallId(), completed.toolName(), completed.output()),
+                new ToolObservation(claim.sessionId(), new SessionSequence(4), Optional.of(claim.messageJobId()),
+                        Instant.EPOCH, MessageRole.TOOL, request("two", "second").toolCallId(), "second",
+                        ((ConversationStore.ToolObservationData) batch.getValue().messages().get(2)).output()));
+        when(store.loadContextHistory(claim.sessionId())).thenReturn(contextHistory(retainedHistory));
+        when(store.loadContinuations(claim)).thenReturn(Map.of(new SessionSequence(2), continuation));
+        when(store.reserveModelCall(eq(claim), any(ModelCallPurpose.class), eq(2), any(Instant.class)))
+                .thenReturn(new ModelCallReservationResult.Reserved(2, 2));
+        ConversationModel resumed = model(TEST_ROUTE_ID, (request, reservation, usage) -> {
+            reservation.reserve();
+            assertThat(request.history()).containsExactlyElementsOf(retainedHistory);
+            assertThat(request.continuations()).containsEntry(new SessionSequence(2), continuation);
+            return result(new ModelReply.Text("Recovered"));
+        });
+        assertThat(service(store, resumed, tools).process(claim, () -> true)).isEqualTo(MessageJobProcessingResult.COMPLETED);
+        assertThat(secondInvocations).hasValue(0);
+    }
+
+    @Test
+    void does_not_resubmit_a_pending_batch_when_atomic_retry_commit_is_uncertain() {
+        ConversationStore store = mockStore();
+        MessageWorkClaim claim = claim();
+        when(store.loadContextHistory(claim.sessionId())).thenReturn(contextHistory(List.of(user())));
+        when(store.reserveModelCall(eq(claim), any(ModelCallPurpose.class), eq(2), any()))
+                .thenReturn(new ModelCallReservationResult.Reserved(1, 1));
+        when(store.readJob(claim.messageJobId())).thenReturn(Optional.of(new ConversationStore.MessageJobProjection(
+                claim.messageJobId(), claim.sessionId(), JobStatus.WORKING, 0, 1,
+                Optional.empty(), Optional.empty(), Optional.empty())));
+        Mockito.doAnswer(invocation -> {
+            JobProgress progress = invocation.getArgument(1);
+            if (progress.phase() == JobPhase.TOOL_EXECUTION) {
+                throw ConversationStoreFailure.transientFailure(new IllegalStateException("admission failed"));
+            }
+            return null;
+        }).when(store).updateProgress(eq(claim), any());
+        when(store.appendAndScheduleRetry(eq(claim), any(), any(), any(), any()))
+                .thenThrow(ConversationStoreFailure.transientFailure(new IllegalStateException("commit response lost")));
+        ConversationModel model = model(TEST_ROUTE_ID, (request, reservation, usage) -> {
+            reservation.reserve();
+            return result(new ModelReply.UseTools(Optional.empty(), List.of(request("one", "first"))));
+        });
+        assertThat(service(store, model, catalog()).process(claim, () -> true))
+                .isEqualTo(MessageJobProcessingResult.STATE_UNCONFIRMED);
+        verify(store).appendAndScheduleRetry(eq(claim), any(), any(), any(), any());
+        verify(store, Mockito.never()).append(any(), any(), any());
+        verify(store, Mockito.never()).scheduleRetry(any(), any(), any());
+    }
+
     @Test
     void storage_recovery_uses_ordinary_allowance_not_total_control_request_count() {
         ConversationStore store = mockStore();

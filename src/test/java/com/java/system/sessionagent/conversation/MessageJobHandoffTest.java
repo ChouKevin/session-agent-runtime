@@ -1,5 +1,20 @@
 package com.java.system.sessionagent.conversation;
 
+import com.java.system.sessionagent.conversation.domain.ContextCompaction;
+import com.java.system.sessionagent.conversation.domain.ContextSummary;
+import com.java.system.sessionagent.conversation.domain.ModelDescriptor;
+import com.java.system.sessionagent.conversation.domain.ModelRouteId;
+import com.java.system.sessionagent.conversation.port.out.JobCancellationRequestedException;
+import com.java.system.sessionagent.conversation.port.out.StaleWorkClaimException;
+import java.time.Clock;
+import java.time.ZoneOffset;
+import com.java.system.sessionagent.conversation.domain.AssistantToolCallsMessage;
+import com.java.system.sessionagent.conversation.domain.ModelCallResult;
+import com.java.system.sessionagent.conversation.domain.ModelContinuation;
+import com.java.system.sessionagent.conversation.domain.SessionMessage;
+import com.java.system.sessionagent.conversation.domain.ToolCallId;
+import com.java.system.sessionagent.conversation.domain.ToolObservation;
+import java.util.concurrent.atomic.AtomicReference;
 import com.java.system.sessionagent.conversation.domain.ModelCallPurpose;
 import com.java.system.sessionagent.conversation.domain.ModelCallReservationResult;
 import com.java.system.sessionagent.conversation.domain.JobControl;
@@ -48,6 +63,141 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class MessageJobHandoffTest {
+
+    @Test
+    void wrap_up_replays_visible_tool_continuation() {
+        ConversationStore store = mockStore();
+        MessageWorkClaim claim = claim();
+        ModelContinuation continuation = new ModelContinuation(TEST_ROUTE_ID, "opaque-v1", new byte[] {0, 1, -1, 42});
+        List<SessionMessage> committedHistory = List.of(user(),
+                new AssistantToolCallsMessage(claim.sessionId(), new SessionSequence(2),
+                        Optional.of(claim.messageJobId()), Instant.EPOCH, MessageRole.ASSISTANT_TOOL_CALLS,
+                        Optional.of("Checking"), List.of(request("lookup", "first"))),
+                new ToolObservation(claim.sessionId(), new SessionSequence(3), Optional.of(claim.messageJobId()),
+                        Instant.EPOCH, MessageRole.TOOL, new ToolCallId("lookup"), "first",
+                        new ToolOutput(false, Map.of("value", 1)).asStructuredValue()));
+        AtomicReference<Map<SessionSequence, ModelContinuation>> retained = new AtomicReference<>(Map.of());
+        when(store.loadContinuations(claim)).thenAnswer(invocation -> retained.get());
+        when(store.loadContextHistory(claim.sessionId())).thenReturn(contextHistory(List.of(user())),
+                contextHistory(committedHistory));
+        org.mockito.Mockito.doAnswer(invocation -> {
+            ConversationStore.MessageBatch batch = invocation.getArgument(1);
+            if (batch.jobUpdate() == ConversationStore.JobUpdate.KEEP_WORKING) {
+                retained.set(Map.of(new SessionSequence(2), batch.continuation().orElseThrow()));
+            }
+            return appendedStatus(batch);
+        }).when(store).append(eq(claim), any(ConversationStore.MessageBatch.class), any(Instant.class));
+        when(store.reserveModelCall(eq(claim), eq(ModelCallPurpose.EXECUTION), eq(2), any()))
+                .thenReturn(new ModelCallReservationResult.Reserved(1, 1), new ModelCallReservationResult.Reserved(2, 2));
+        when(store.reserveModelCall(eq(claim), eq(ModelCallPurpose.WRAP_UP), eq(2), any()))
+                .thenReturn(new ModelCallReservationResult.Reserved(3, 2));
+        AtomicInteger providerRequests = new AtomicInteger();
+        ConversationModel model = model(TEST_ROUTE_ID, (request, reservation, usage) -> {
+            reservation.reserve();
+            int ordinal = providerRequests.incrementAndGet();
+            if (ordinal == 1) {
+                return new ModelCallResult(new ModelReply.UseTools(Optional.of("Checking"),
+                        List.of(request("lookup", "first"))), Optional.of(continuation));
+            }
+            if (ordinal == 2) {
+                return result(new ModelReply.UseTools(Optional.empty(), List.of(request("discarded", "second"))));
+            }
+            assertThat(request.purpose()).isEqualTo(ModelRequest.Purpose.WRAP_UP);
+            assertThat(request.history()).containsExactlyElementsOf(committedHistory);
+            assertThat(request.continuations()).containsExactly(Map.entry(new SessionSequence(2), continuation));
+            assertThat(request.toolSnapshot().definitions()).isEmpty();
+            return result(new ModelReply.Text("Saved evidence. Continue or organize?"));
+        });
+
+        assertThat(service(store, model, catalog(), 2).process(claim, () -> true))
+                .isEqualTo(MessageJobProcessingResult.COMPLETED);
+
+        assertThat(providerRequests).hasValue(3);
+        ArgumentCaptor<ConversationStore.MessageBatch> batches = ArgumentCaptor.forClass(ConversationStore.MessageBatch.class);
+        verify(store, times(2)).append(eq(claim), batches.capture(), any());
+        assertThat(batches.getAllValues().getFirst().continuation()).contains(continuation);
+        ConversationStore.MessageBatch waiting = batches.getAllValues().getLast();
+        assertThat(waiting.completionDisposition()).isEqualTo(ConversationStore.CompletionDisposition.WAITING);
+        assertThat(waiting.messages()).containsExactly(new ConversationStore.AssistantData("Saved evidence. Continue or organize?"));
+        verify(store).reserveModelCall(eq(claim), eq(ModelCallPurpose.WRAP_UP), eq(2), any());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void wrap_replays_only_visible_assistant_batches_from_the_selected_compaction_snapshot(boolean wrongVisibleRoute) {
+        ConversationStore store = mockStore();
+        MessageWorkClaim claim = claim();
+        ModelContinuation hidden = new ModelContinuation(new ModelRouteId("other"), "opaque", new byte[] {1});
+        ModelContinuation visible = new ModelContinuation(wrongVisibleRoute ? new ModelRouteId("other") : TEST_ROUTE_ID,
+                "opaque", new byte[] {0, -1, 7});
+        List<SessionMessage> history = List.of(user(), calls(claim, 2, "old"), observation(claim, 3, "old"),
+                calls(claim, 4, "visible"), observation(claim, 5, "visible"));
+        ContextSummary summary = new ContextSummary("Earlier evidence");
+        ContextCompaction compaction = new ContextCompaction(1, claim.messageJobId(), ContextCompaction.Reason.THRESHOLD,
+                summary, new SessionSequence(3), new ModelDescriptor(TEST_ROUTE_ID, "test", 32_000),
+                "fingerprint", 100, 10, Instant.EPOCH);
+        when(store.loadContextHistory(claim.sessionId())).thenReturn(contextHistory(history));
+        when(store.loadCompaction(claim.sessionId())).thenReturn(Optional.of(compaction));
+        // A non-tool sequence must never turn into a replay entry either.
+        when(store.loadContinuations(claim)).thenReturn(Map.of(new SessionSequence(2), hidden,
+                new SessionSequence(4), visible, new SessionSequence(5), hidden));
+        when(store.reserveModelCall(eq(claim), eq(ModelCallPurpose.WRAP_UP), eq(2), any()))
+                .thenReturn(new ModelCallReservationResult.Reserved(3, 2));
+        AtomicInteger requests = new AtomicInteger();
+        ConversationModel model = model(TEST_ROUTE_ID, (request, reservation, usage) -> {
+            reservation.reserve();
+            requests.incrementAndGet();
+            assertThat(request.history()).containsExactly(history.get(3), history.get(4), user());
+            assertThat(request.contextSummary()).contains(summary);
+            assertThat(request.continuations()).containsExactly(Map.entry(new SessionSequence(4), visible));
+            assertThat(request.continuations().get(new SessionSequence(4)).payload()).containsExactly(0, -1, 7);
+            assertThat(request.toolSnapshot().definitions()).isEmpty();
+            return result(new ModelReply.Text("Visible evidence saved"));
+        });
+
+        String response = new JobHandoffCoordinator(store, Clock.fixed(Instant.EPOCH, ZoneOffset.UTC), 2)
+                .wrap(claim, () -> true, model);
+
+        assertThat(response).isEqualTo(wrongVisibleRoute ? JobHandoffCoordinator.WRAP_FALLBACK : "Visible evidence saved");
+        assertThat(requests).hasValue(wrongVisibleRoute ? 0 : 1);
+        verify(store, times(1)).loadCompaction(claim.sessionId());
+        if (wrongVisibleRoute) {
+            verify(store, never()).reserveModelCall(any(), any(), org.mockito.ArgumentMatchers.anyInt(), any());
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void wrap_without_continuation_preserves_pre_request_cancellation_and_ownership_checks(boolean cancelled) {
+        ConversationStore store = mockStore();
+        MessageWorkClaim claim = claim();
+        when(store.loadContextHistory(claim.sessionId())).thenReturn(contextHistory(List.of(user())));
+        when(store.isCancellationRequested(claim)).thenReturn(cancelled);
+        AtomicInteger requests = new AtomicInteger();
+        ConversationModel model = model(TEST_ROUTE_ID, (request, reservation, usage) -> {
+            assertThat(request.continuations()).isEmpty();
+            reservation.reserve();
+            requests.incrementAndGet();
+            return result(new ModelReply.Text("must not send"));
+        });
+        JobHandoffCoordinator coordinator = new JobHandoffCoordinator(store, Clock.fixed(Instant.EPOCH, ZoneOffset.UTC), 2);
+
+        assertThatThrownBy(() -> coordinator.wrap(claim, () -> cancelled, model))
+                .isInstanceOf(cancelled ? JobCancellationRequestedException.class : StaleWorkClaimException.class);
+
+        assertThat(requests).hasValue(0);
+        verify(store, never()).reserveModelCall(any(), any(), org.mockito.ArgumentMatchers.anyInt(), any());
+    }
+
+    private static AssistantToolCallsMessage calls(MessageWorkClaim claim, long sequence, String id) {
+        return new AssistantToolCallsMessage(claim.sessionId(), new SessionSequence(sequence), Optional.of(claim.messageJobId()),
+                Instant.EPOCH, MessageRole.ASSISTANT_TOOL_CALLS, Optional.of("Checking"), List.of(request(id, "first")));
+    }
+
+    private static ToolObservation observation(MessageWorkClaim claim, long sequence, String id) {
+        return new ToolObservation(claim.sessionId(), new SessionSequence(sequence), Optional.of(claim.messageJobId()),
+                Instant.EPOCH, MessageRole.TOOL, new ToolCallId(id), "first", Map.of("result", id));
+    }
 
     @Test
     void a_plain_final_answer_on_the_last_allowed_request_completes_without_a_wrap_request() {

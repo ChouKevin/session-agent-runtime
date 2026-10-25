@@ -395,6 +395,42 @@ class MessageJobCancellationTest {
         assertThat(attempted.messages().getFirst()).isInstanceOf(ConversationStore.AssistantToolCallsData.class);
         assertThat(attempted.messages().getLast()).isEqualTo(cancelledTool("two", "second"));
         verify(store, never()).scheduleRetry(any(), any(), any());
+        verify(store, never()).appendAndScheduleRetry(any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void reports_cancellation_winning_atomic_pending_batch_recovery_without_a_second_append() {
+        ConversationStore store = mockStore();
+        MessageWorkClaim claim = claim();
+        when(store.loadContextHistory(claim.sessionId())).thenReturn(contextHistory(List.of(user())));
+        when(store.reserveModelCall(eq(claim), any(ModelCallPurpose.class), eq(2), any()))
+                .thenReturn(new ModelCallReservationResult.Reserved(1, 1));
+        when(store.readJob(claim.messageJobId())).thenReturn(Optional.of(new ConversationStore.MessageJobProjection(
+                claim.messageJobId(), claim.sessionId(), JobStatus.WORKING, 0, 1,
+                Optional.empty(), Optional.empty(), Optional.empty())));
+        AtomicInteger admissions = new AtomicInteger();
+        doAnswer(invocation -> {
+            JobProgress progress = invocation.getArgument(1);
+            if (progress.phase() == JobPhase.TOOL_EXECUTION && admissions.incrementAndGet() == 2) {
+                throw ConversationStoreFailure.transientFailure(new IllegalStateException("admission failed"));
+            }
+            return null;
+        }).when(store).updateProgress(eq(claim), any());
+        when(store.appendAndScheduleRetry(eq(claim), any(), any(), any(), any())).thenReturn(JobStatus.CANCELLED);
+        ConversationModel model = model(TEST_ROUTE_ID, (request, reservation, usage) -> {
+            reservation.reserve();
+            return result(new ModelReply.UseTools(Optional.empty(),
+                    List.of(request("one", "first"), request("two", "second"))));
+        });
+
+        assertThat(service(store, model, catalog()).process(claim, () -> true)).isEqualTo(MessageJobProcessingResult.CANCELLED);
+        ArgumentCaptor<ConversationStore.MessageBatch> batch = ArgumentCaptor.forClass(ConversationStore.MessageBatch.class);
+        verify(store).appendAndScheduleRetry(eq(claim), batch.capture(), any(), eq(JobFailure.STORAGE_UNAVAILABLE), any());
+        assertThat(batch.getValue().messages()).hasSize(3);
+        assertThat(batch.getValue().messages().get(1)).isEqualTo(new ConversationStore.ToolObservationData(
+                request("one", "first").toolCallId(), "first", new ToolOutput(false, Map.of("value", 1)).asStructuredValue()));
+        verify(store, never()).append(any(), any(), any());
+        verify(store, never()).scheduleRetry(any(), any(), any());
     }
 
     @Test

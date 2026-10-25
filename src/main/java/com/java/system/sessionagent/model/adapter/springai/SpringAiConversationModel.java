@@ -329,13 +329,13 @@ public final class SpringAiConversationModel implements ConversationModel {
     private Prompt promptFor(ModelRequest request) {
         List<ToolCallback> callbacks = callbackFactory.create(request.toolSnapshot());
         List<Message> messages = new ArrayList<>();
-        messages.add(new org.springframework.ai.chat.messages.SystemMessage(promptResource.content()));
+        String directive = request.transientDirective();
+        String systemPrompt = StringUtils.hasText(directive)
+                ? promptResource.content() + "\n\n" + directive : promptResource.content();
+        messages.add(new org.springframework.ai.chat.messages.SystemMessage(systemPrompt));
         messages.addAll(historyProjector.project(request.history(), request.continuations(), continuationHandler, request.contextSummary()));
         if (request.purpose() == ModelRequest.Purpose.WRAP_UP) {
             Assert.isTrue(callbacks.isEmpty(), "Wrap-up must not expose tools");
-        }
-        if (StringUtils.hasText(request.transientDirective())) {
-            messages.add(new org.springframework.ai.chat.messages.SystemMessage(request.transientDirective()));
         }
         return new Prompt(List.copyOf(messages), options(callbacks));
     }

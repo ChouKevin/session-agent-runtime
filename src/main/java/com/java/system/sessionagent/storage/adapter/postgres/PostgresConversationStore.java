@@ -792,6 +792,31 @@ public final class PostgresConversationStore implements ConversationStore {
         });
     }
 
+    @Override
+    public JobStatus appendAndScheduleRetry(
+            MessageWorkClaim claim, MessageBatch batch, Duration retryDelay, JobFailure failure, Instant createdAt) {
+        Objects.requireNonNull(batch, "Message batch must not be null");
+        Objects.requireNonNull(retryDelay, "Retry delay must not be null");
+        Objects.requireNonNull(failure, "Job failure must not be null");
+        Assert.isTrue(batch.jobUpdate() == JobUpdate.KEEP_WORKING
+                        && batch.completionDisposition() == CompletionDisposition.NONE,
+                "Retry recovery must keep the tool batch working");
+        Assert.isTrue(batch.messages().getFirst() instanceof AssistantToolCallsData,
+                "Retry recovery requires a complete tool batch");
+        Assert.isTrue(!retryDelay.isNegative(), "Retry delay must not be negative");
+        return inTransaction(() -> {
+            JobStatus status = append(claim, batch, createdAt);
+            if (status == JobStatus.CANCELLED) {
+                return status;
+            }
+            if (!scheduleRetry(claim, retryDelay, failure)) {
+                // A rejected fence must roll back the history inserted in this same transaction.
+                throw new StaleWorkClaimException();
+            }
+            return JobStatus.RETRY;
+        });
+    }
+
     private void associateSkillLoad(MessageWorkClaim claim, SkillReadReceipt receipt, String source,
             int toolOrdinal, long sequence) {
         int associated = mapper.commitSkillLoad(receipt, messageJobId(claim), sessionId(claim), claim.workerId(),

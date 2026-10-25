@@ -252,7 +252,7 @@ public final class JobProcessor implements MessageJobPort {
                         activeModelDescriptor, ordinal, requestShapeFingerprint,
                         context.compaction().map(value -> value.generation()).orElse(0L), history.messages());
                 List<ConversationStore.MessageData> messages = toolBatch(claim, guard, ordinal, useTools, tools,
-                        usageCheckpoint, resultTracker);
+                        continuation, usageCheckpoint, resultTracker);
                 if (!guard.stillOwned()) {
                     return;
                 }
@@ -579,6 +579,7 @@ public final class JobProcessor implements MessageJobPort {
             int ordinal,
             ModelReply.UseTools reply,
             ToolSnapshot tools,
+            Optional<ModelContinuation> continuation,
             Optional<ConversationStore.UsageCheckpointData> checkpoint,
             ProcessingResultTracker resultTracker) {
         List<ConversationStore.MessageData> messages = new ArrayList<>();
@@ -587,7 +588,7 @@ public final class JobProcessor implements MessageJobPort {
                 .toList();
         messages.add(new ConversationStore.AssistantToolCallsData(reply.message(), calls));
         // Keep attempt-local observations reachable if a storage safe point unwinds this batch.
-        resultTracker.pendingToolBatch = Optional.of(new PendingToolBatch(messages, checkpoint));
+        resultTracker.pendingToolBatch = Optional.of(new PendingToolBatch(messages, continuation, checkpoint));
         boolean cancelled = false;
         int toolOrdinal = 0;
         for (ToolRequest request : reply.requests()) {
@@ -830,7 +831,23 @@ public final class JobProcessor implements MessageJobPort {
                     && canRetryStorage(claim)
                     && job.orElseThrow().retryCount() < retryPolicy.transientRetries()) {
                 Duration delay = retryDelay(job.orElseThrow().retryCount());
-                boolean scheduled = conversationStore.scheduleRetry(claim, delay, JobFailure.STORAGE_UNAVAILABLE);
+                boolean scheduled;
+                if (resultTracker.pendingToolBatch.isPresent()) {
+                    PendingToolBatch pending = resultTracker.pendingToolBatch.orElseThrow();
+                    ConversationStore.MessageBatch batch = new ConversationStore.MessageBatch(
+                            pending.messages(), ConversationStore.JobUpdate.KEEP_WORKING, pending.continuation(),
+                            pending.checkpoint(), Optional.empty(), ConversationStore.CompletionDisposition.NONE);
+                    resultTracker.appendOutcomeUncertain = true;
+                    JobStatus status = conversationStore.appendAndScheduleRetry(
+                            claim, batch, delay, JobFailure.STORAGE_UNAVAILABLE, clock.instant());
+                    resultTracker.committed(status);
+                    if (status == JobStatus.CANCELLED) {
+                        return;
+                    }
+                    scheduled = status == JobStatus.RETRY;
+                } else {
+                    scheduled = conversationStore.scheduleRetry(claim, delay, JobFailure.STORAGE_UNAVAILABLE);
+                }
                 if (scheduled) {
                     resultTracker.retryScheduled();
                     telemetry.retry("STORAGE", delay);
@@ -992,6 +1009,7 @@ public final class JobProcessor implements MessageJobPort {
 
     private record PendingToolBatch(
             List<ConversationStore.MessageData> messages,
+            Optional<ModelContinuation> continuation,
             Optional<ConversationStore.UsageCheckpointData> checkpoint) {
 
         private List<ConversationStore.MessageData> cancelUnstarted() {

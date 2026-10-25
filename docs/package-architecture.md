@@ -388,6 +388,22 @@ Waiting is not a running job. A failed, invalid, tool-bearing, or oversized wrap
 a safe deterministic waiting notice; recovery after a reserved but lost request never requeries it.
 Cancellation takes precedence and cannot publish a waiting prompt or release artifacts.
 
+Wrap-up uses the same compaction snapshot for visible history, summary, and continuation
+selection. It replays opaque continuation only for visible `ASSISTANT_TOOL_CALLS`
+sequences on the selected model route. A visible continuation for another route
+uses the safe waiting fallback without a provider request, rather than dropping
+provider state and sending a damaged replay. Compacted and non-tool sequences do
+not enter the wrap continuation map. Provider payload interpretation remains inside
+the model adapter. The adapter combines the base prompt and transient purpose
+directive into one system instruction; ordinary prompts without a directive are
+unchanged, and directives never become stored conversation events.
+
+Continuation belongs to the current job, not the session's future jobs. It commits
+with its assistant/tool batch and survives retry, store reconstruction, and a
+valid reclaim. Compaction deletes covered entries; completion (including a waiting
+response) and cancellation delete the job's remaining continuation. Durable audit
+history is retained independently of this operational replay state.
+
 When the next ordered job executes against a pending choice, one no-tools semantic intent
 request classifies that job's exact initiating user message, even if later users are already
 queued in history. `CONTINUE` consumes the observed waiting generation and opens a fresh
@@ -409,5 +425,21 @@ V11 backfills ordinary usage from existing total calls without inferring histori
 state. Drain old workers before migration: mixed old/new workers are unsupported.
 
 Spring AI retries are disabled with `spring.ai.retry.max-attempts=1`. Retrying transient provider failures is owned by the runtime's conversation-job loop, which preserves the already-counted model call and avoids duplicate history. With a direct provider connection, each reservation corresponds to a provider request; when a gateway retries internally, it does not bound the gateway's underlying provider attempts.
+
+When a known storage failure stops an admitted tool batch before append begins,
+attempt-local observations already obtained are retained unchanged and unstarted
+calls receive `TOOL_NOT_EXECUTED` observations. Recovery's
+`ConversationStore.appendAndScheduleRetry` commits the complete assistant/tool
+batch, optional continuation, applicable usage checkpoint and receipt associations,
+and the fenced `RETRY` transition in one PostgreSQL transaction. A failed retry
+transition rolls back the batch as well; no separately committed working batch
+is left behind. A cancellation that wins this transaction commits cancellation
+instead, without retaining continuation or scheduling a retry.
+
+Once append or atomic recovery has begun, a failed response can mean the
+transaction committed. The processor reports state unconfirmed and does not
+resend that batch or invent a replacement result; durable state and claim/lease
+recovery decide what happens next. This is not tool-result caching or general
+exactly-once execution.
 
 Tool execution has no runtime deduplication layer. A read-only tool can run again if the process crashes after execution and before its observation batch commits. Any future side-effecting tool must provide idempotency at its adapter or external-service boundary.
