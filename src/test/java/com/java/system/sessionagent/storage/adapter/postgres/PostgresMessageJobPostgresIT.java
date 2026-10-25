@@ -2,6 +2,7 @@ package com.java.system.sessionagent.storage.adapter.postgres;
 
 import com.java.system.sessionagent.conversation.domain.ModelCallObservation;
 import com.java.system.sessionagent.conversation.domain.CacheTokenUsage;
+import com.java.system.sessionagent.conversation.domain.JobCacheReport;
 import com.java.system.sessionagent.conversation.domain.IntentRequest;
 import com.java.system.sessionagent.conversation.domain.IntentResult;
 
@@ -41,6 +42,7 @@ import com.java.system.sessionagent.conversation.domain.ModelRouteId;
 import com.java.system.sessionagent.conversation.domain.ModelSelection;
 import com.java.system.sessionagent.conversation.domain.SessionId;
 import com.java.system.sessionagent.conversation.domain.SessionMessage;
+import com.java.system.sessionagent.conversation.domain.UserMessage;
 import com.java.system.sessionagent.conversation.domain.ToolCallId;
 import com.java.system.sessionagent.conversation.domain.ToolRequest;
 import com.java.system.sessionagent.conversation.application.JobProcessor;
@@ -151,6 +153,28 @@ class PostgresMessageJobPostgresIT {
         restarted.recordModelUsage(recovered, new ModelCallObservation(3, Optional.of(new CacheTokenUsage(25_000, 15_000))));
 
         assertThat(restarted.readJob(recovered.messageJobId()).orElseThrow().modelCallCount()).isEqualTo(3);
+        JobCacheReport provisionalReport = JobCacheReport.from(JobStatus.WORKING, 3, 2, 45_000, 25_000);
+        assertThat(restarted.readJob(recovered.messageJobId()).orElseThrow().cacheReport()).contains(provisionalReport);
+        assertThat(restarted.readSession(recovered.sessionId()).orElseThrow().currentJob())
+                .hasValueSatisfying(currentJob -> assertThat(currentJob.cacheReport()).contains(provisionalReport));
+        ConversationStore.MessageJobProjection cancellationRequested =
+                restarted.requestCancellation(recovered.messageJobId()).orElseThrow();
+        assertThat(cancellationRequested.status()).isEqualTo(JobStatus.WORKING);
+        assertThat(cancellationRequested.cacheReport()).contains(provisionalReport);
+        assertThat(cacheAccounting(recovered)).containsExactly(2L, 45_000L, 25_000L, 3L);
+
+        restarted.append(recovered, new ConversationStore.MessageBatch(
+                List.of(new ConversationStore.RuntimeData(JobCancellation.CODE, JobCancellation.MESSAGE)),
+                ConversationStore.JobUpdate.CANCEL, ConversationStore.CompletionDisposition.NONE), NOW);
+        JobCacheReport finalReport = JobCacheReport.from(JobStatus.CANCELLED, 3, 2, 45_000, 25_000);
+        ConversationStore.MessageJobProjection cancelled = restarted.readJob(recovered.messageJobId()).orElseThrow();
+        assertThat(cancelled.status()).isEqualTo(JobStatus.CANCELLED);
+        assertThat(cancelled.cacheReport()).contains(finalReport);
+        assertThat(restarted.readSession(recovered.sessionId()).orElseThrow().currentJob())
+                .hasValueSatisfying(currentJob -> assertThat(currentJob.cacheReport()).contains(finalReport));
+        List<SessionMessage> history = restarted.loadHistory(recovered.sessionId());
+        assertThat(history.getFirst()).isInstanceOf(UserMessage.class);
+        assertThat(((UserMessage) history.getFirst()).message()).isEqualTo("investigate");
         assertThat(cacheAccounting(recovered)).containsExactly(2L, 45_000L, 25_000L, 3L);
     }
 
@@ -208,6 +232,9 @@ class PostgresMessageJobPostgresIT {
                     and cache_usage_cached_input_tokens is null and cache_usage_last_ordinal is null
                 from message_job where message_job_id = ?
                 """, Boolean.class, UUID.fromString(legacy.messageJobId().value()))).isTrue();
+        assertThat(store.readJob(legacy.messageJobId()).orElseThrow().cacheReport()).isEmpty();
+        assertThat(store.readSession(legacy.sessionId()).orElseThrow().currentJob())
+                .hasValueSatisfying(currentJob -> assertThat(currentJob.cacheReport()).isEmpty());
         MessageReceipt fresh = receive(store, new IncomingMessage("fresh-cache", "alice", "fresh-cache-source", "investigate"));
         UUID freshId = UUID.fromString(fresh.messageJobId().value());
         assertThat(jdbcTemplate.queryForObject("""

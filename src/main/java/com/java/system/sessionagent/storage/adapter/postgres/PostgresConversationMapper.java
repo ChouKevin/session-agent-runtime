@@ -695,7 +695,9 @@ public interface PostgresConversationMapper extends BaseMapper<PostgresConversat
             @Param("failureCode") String failureCode);
 
     @Select("""
-            select message_job_id, session_id, status, retry_count, model_calls, cancellation_requested_at,
+            select message_job_id, session_id, status, retry_count, model_calls,
+                cache_usage_known_calls, cache_usage_input_tokens, cache_usage_cached_input_tokens,
+                cancellation_requested_at,
                 case when status = 'WORKING' and locked_until > statement_timestamp() then phase end as phase,
                 case when status = 'WORKING' and locked_until > statement_timestamp() then phase_started_at end as phase_started_at,
                 case when status = 'WORKING' and locked_until > statement_timestamp() then current_tool_name end as current_tool_name,
@@ -705,13 +707,15 @@ public interface PostgresConversationMapper extends BaseMapper<PostgresConversat
             """)
     @Options(flushCache = Options.FlushCachePolicy.FALSE, useCache = false)
     List<JobProjectionRow> readJob(@Param("messageJobId") UUID messageJobId);
-
     @Select("""
             select session.session_id, session.created_at, session.selected_model, job.message_job_id, job.status, job.retry_count, job.model_calls,
+                job.cache_usage_known_calls, job.cache_usage_input_tokens, job.cache_usage_cached_input_tokens,
                 job.phase, job.phase_started_at, job.current_tool_name, job.failure_code, job.cancellation_requested_at
             from conversation_session session
             left join lateral (
-                select message_job_id, session_id, status, retry_count, model_calls, cancellation_requested_at,
+                select message_job_id, session_id, status, retry_count, model_calls,
+                    cache_usage_known_calls, cache_usage_input_tokens, cache_usage_cached_input_tokens,
+                    cancellation_requested_at,
                     case when status = 'WORKING' and locked_until > statement_timestamp() then phase end as phase,
                     case when status = 'WORKING' and locked_until > statement_timestamp() then phase_started_at end as phase_started_at,
                     case when status = 'WORKING' and locked_until > statement_timestamp() then current_tool_name end as current_tool_name,
@@ -724,6 +728,7 @@ public interface PostgresConversationMapper extends BaseMapper<PostgresConversat
             """)
     @Options(flushCache = Options.FlushCachePolicy.FALSE, useCache = false)
     List<SessionProjectionRow> readSession(@Param("sessionId") UUID sessionId);
+
 
     @TableName("message_job")
     class MessageJobEntity {
@@ -966,6 +971,9 @@ public interface PostgresConversationMapper extends BaseMapper<PostgresConversat
             String status,
             int retryCount,
             int modelCalls,
+            Integer cacheUsageKnownCalls,
+            Long cacheUsageInputTokens,
+            Long cacheUsageCachedInputTokens,
             String phase,
             OffsetDateTime phaseStartedAt,
             String currentToolName,
@@ -981,6 +989,9 @@ public interface PostgresConversationMapper extends BaseMapper<PostgresConversat
             String status,
             Integer retryCount,
             Integer modelCalls,
+            Integer cacheUsageKnownCalls,
+            Long cacheUsageInputTokens,
+            Long cacheUsageCachedInputTokens,
             String phase,
             OffsetDateTime phaseStartedAt,
             String currentToolName,

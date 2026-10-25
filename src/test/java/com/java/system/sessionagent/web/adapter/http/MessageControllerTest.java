@@ -5,6 +5,7 @@ import com.java.system.sessionagent.conversation.application.JobCancellationServ
 import com.java.system.sessionagent.conversation.domain.AssistantMessage;
 import com.java.system.sessionagent.conversation.domain.AssistantToolCallsMessage;
 import com.java.system.sessionagent.conversation.domain.IncomingMessage;
+import com.java.system.sessionagent.conversation.domain.JobCacheReport;
 import com.java.system.sessionagent.conversation.domain.JobFailure;
 import com.java.system.sessionagent.conversation.domain.JobPhase;
 import com.java.system.sessionagent.conversation.domain.JobProgress;
@@ -112,30 +113,66 @@ class MessageControllerTest {
         ConversationStore store = mock(ConversationStore.class);
         MessageJobId jobId = new MessageJobId(JOB_ID);
         Instant requestedAt = Instant.parse("2026-10-15T12:30:00Z");
+        JobCacheReport report = JobCacheReport.from(JobStatus.WORKING, 2, 2, 1_000, 250);
+        MessageJobView jobView = new MessageJobView(JOB_ID, SESSION_ID, JobStatus.WORKING, 1, 2,
+                Optional.empty(), Optional.empty(), Optional.of(requestedAt), Optional.of(report));
+        when(queries.findJob(JOB_ID)).thenReturn(Optional.of(jobView));
+        when(queries.session(SESSION_ID)).thenReturn(Optional.of(new SessionDetailView(SESSION_ID, CREATED_AT,
+                Optional.of(jobView), Optional.empty(),
+                new SessionDetailView.ContextUsageView("test-model", 1_000, 10, 0.01, ContextEstimate.Basis.FULL_ESTIMATE))));
+        when(queries.messages(SESSION_ID)).thenReturn(Optional.of(List.of(
+                new UserMessage(new SessionId(SESSION_ID), new SessionSequence(1), Optional.of(jobId), CREATED_AT,
+                        MessageRole.USER, "alice", "original user text"),
+                new AssistantMessage(new SessionId(SESSION_ID), new SessionSequence(2), Optional.of(jobId), CREATED_AT,
+                        MessageRole.ASSISTANT, "original assistant text"))));
         when(store.requestCancellation(jobId)).thenReturn(Optional.of(new ConversationStore.MessageJobProjection(
                 jobId, new SessionId(SESSION_ID), JobStatus.WORKING, 1, 2, Optional.empty(), Optional.empty(),
-                Optional.of(requestedAt))));
+                Optional.of(requestedAt), Optional.of(report))));
         MessageJobCancellationPort cancellationPort = new JobCancellationService(store);
+        MockMvc mvc = mvc(intake, queries, cancellationPort);
 
-        mvc(intake, queries, cancellationPort).perform(post("/internal/message-jobs/{messageJobId}/cancel", JOB_ID))
+        mvc.perform(get("/internal/message-jobs/{messageJobId}", JOB_ID))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.messageJobId").value(JOB_ID))
-                .andExpect(jsonPath("$.sessionId").value(SESSION_ID))
+                .andExpect(jsonPath("$.cacheReport.phase").value("PROVISIONAL"))
+                .andExpect(jsonPath("$.cacheReport.status").value("COMPLETE"))
+                .andExpect(jsonPath("$.cacheReport.requestCount").value(2))
+                .andExpect(jsonPath("$.cacheReport.knownUsageRequestCount").value(2))
+                .andExpect(jsonPath("$.cacheReport.knownInputTokens").value(1_000))
+                .andExpect(jsonPath("$.cacheReport.knownCachedInputTokens").value(250))
+                .andExpect(jsonPath("$.cacheReport.hitRatio").value(0.25));
+        mvc.perform(get("/internal/sessions/{sessionId}", SESSION_ID))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.currentJob.cacheReport.phase").value("PROVISIONAL"))
+                .andExpect(jsonPath("$.currentJob.cacheReport.status").value("COMPLETE"))
+                .andExpect(jsonPath("$.currentJob.cacheReport.requestCount").value(2))
+                .andExpect(jsonPath("$.currentJob.cacheReport.knownUsageRequestCount").value(2))
+                .andExpect(jsonPath("$.currentJob.cacheReport.knownInputTokens").value(1_000))
+                .andExpect(jsonPath("$.currentJob.cacheReport.knownCachedInputTokens").value(250))
+                .andExpect(jsonPath("$.currentJob.cacheReport.hitRatio").value(0.25));
+        mvc.perform(post("/internal/message-jobs/{messageJobId}/cancel", JOB_ID))
+                .andExpect(status().isOk())
                 .andExpect(jsonPath("$.status").value("WORKING"))
-                .andExpect(jsonPath("$.retryCount").value(1))
-                .andExpect(jsonPath("$.modelCallCount").value(2))
-                .andExpect(jsonPath("$.cancellationRequestedAt").value("2026-10-15T12:30:00Z"));
+                .andExpect(jsonPath("$.cacheReport.phase").value("PROVISIONAL"))
+                .andExpect(jsonPath("$.cacheReport.status").value("COMPLETE"))
+                .andExpect(jsonPath("$.cacheReport.hitRatio").value(0.25));
+        mvc.perform(get("/internal/sessions/{sessionId}/messages", SESSION_ID))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$[0].message").value("original user text"))
+                .andExpect(jsonPath("$[1].message").value("original assistant text"));
     }
 
     @Test
     void returns_a_terminal_job_snapshot_when_cancellation_is_already_complete() throws Exception {
         MessageIntakePort intake = mock(MessageIntakePort.class);
         ConversationQueryPort queries = mock(ConversationQueryPort.class);
-        MessageJobCancellationPort cancellationPort = mock(MessageJobCancellationPort.class);
+        ConversationStore store = mock(ConversationStore.class);
+        MessageJobId jobId = new MessageJobId(JOB_ID);
         Instant requestedAt = Instant.parse("2026-10-15T12:30:00Z");
-        when(cancellationPort.cancel(JOB_ID)).thenReturn(Optional.of(new MessageJobView(
-                JOB_ID, SESSION_ID, JobStatus.CANCELLED, 1, 2, Optional.empty(), Optional.empty(),
-                Optional.of(requestedAt))));
+        JobCacheReport report = JobCacheReport.from(JobStatus.CANCELLED, 2, 1, 800, 400);
+        when(store.requestCancellation(jobId)).thenReturn(Optional.of(new ConversationStore.MessageJobProjection(
+                jobId, new SessionId(SESSION_ID), JobStatus.CANCELLED, 1, 2, Optional.empty(), Optional.empty(),
+                Optional.of(requestedAt), Optional.of(report))));
+        MessageJobCancellationPort cancellationPort = new JobCancellationService(store);
 
         mvc(intake, queries, cancellationPort).perform(post("/internal/message-jobs/{messageJobId}/cancel", JOB_ID))
                 .andExpect(status().isOk())
@@ -144,8 +181,39 @@ class MessageControllerTest {
                 .andExpect(jsonPath("$.sessionId").value(SESSION_ID))
                 .andExpect(jsonPath("$.retryCount").value(1))
                 .andExpect(jsonPath("$.modelCallCount").value(2))
-                .andExpect(jsonPath("$.cancellationRequestedAt").value("2026-10-15T12:30:00Z"));
+                .andExpect(jsonPath("$.cancellationRequestedAt").value("2026-10-15T12:30:00Z"))
+                .andExpect(jsonPath("$.cacheReport.phase").value("FINAL"))
+                .andExpect(jsonPath("$.cacheReport.status").value("PARTIAL"))
+                .andExpect(jsonPath("$.cacheReport.requestCount").value(2))
+                .andExpect(jsonPath("$.cacheReport.knownUsageRequestCount").value(1))
+                .andExpect(jsonPath("$.cacheReport.knownInputTokens").value(800))
+                .andExpect(jsonPath("$.cacheReport.knownCachedInputTokens").value(400))
+                .andExpect(jsonPath("$.cacheReport.hitRatio").value(0.5));
     }
+
+    @Test
+    void serializes_zero_denominator_and_untracked_cache_reports_as_null() throws Exception {
+        MessageIntakePort intake = mock(MessageIntakePort.class);
+        ConversationQueryPort queries = mock(ConversationQueryPort.class);
+        String untrackedJobId = "b7e71998-6413-44cd-8e6b-5bb8d4ac4ea9";
+        when(queries.findJob(JOB_ID)).thenReturn(Optional.of(new MessageJobView(
+                JOB_ID, SESSION_ID, JobStatus.DONE, 1, 3, Optional.empty(), Optional.empty(), Optional.empty(),
+                Optional.of(JobCacheReport.from(JobStatus.DONE, 3, 3, 0, 0)))));
+        when(queries.findJob(untrackedJobId)).thenReturn(Optional.of(new MessageJobView(
+                untrackedJobId, SESSION_ID, JobStatus.DONE, 0, 0, Optional.empty(), Optional.empty(), Optional.empty(),
+                Optional.empty())));
+
+        MockMvc mvc = mvc(intake, queries);
+        mvc.perform(get("/internal/message-jobs/{messageJobId}", JOB_ID))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.cacheReport.phase").value("FINAL"))
+                .andExpect(jsonPath("$.cacheReport.status").value("NOT_APPLICABLE"))
+                .andExpect(jsonPath("$.cacheReport.hitRatio").value(nullValue()));
+        mvc.perform(get("/internal/message-jobs/{messageJobId}", untrackedJobId))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.cacheReport").value(nullValue()));
+    }
+
 
     @Test
     void returns_not_found_when_cancelling_an_unknown_job() throws Exception {
@@ -253,7 +321,7 @@ class MessageControllerTest {
         JobProgress progress = new JobProgress(JobPhase.TOOL_EXECUTION, phaseStartedAt, Optional.of("lookup"));
         MessageJobView activeJob = new MessageJobView(
                 JOB_ID, SESSION_ID, JobStatus.WORKING, 1, 2, Optional.of(progress), Optional.empty(),
-                Optional.of(Instant.parse("2026-10-13T15:45:01Z")));
+                Optional.of(Instant.parse("2026-10-13T15:45:01Z")), Optional.empty());
         when(queries.findJob(JOB_ID)).thenReturn(Optional.of(activeJob));
         when(queries.session(SESSION_ID)).thenReturn(Optional.of(new SessionDetailView(SESSION_ID, CREATED_AT,
                 Optional.of(activeJob), Optional.empty(),
@@ -291,7 +359,8 @@ class MessageControllerTest {
         ConversationQueryPort queries = mock(ConversationQueryPort.class);
         JobFailure failure = JobFailure.MODEL_UNAVAILABLE;
         when(queries.findJob(JOB_ID)).thenReturn(Optional.of(new MessageJobView(
-                JOB_ID, SESSION_ID, JobStatus.DONE, 1, 2, Optional.empty(), Optional.of(failure), Optional.empty())));
+                JOB_ID, SESSION_ID, JobStatus.DONE, 1, 2, Optional.empty(), Optional.of(failure), Optional.empty(),
+                Optional.empty())));
 
         mvc(intake, queries).perform(get("/internal/message-jobs/{messageJobId}", JOB_ID))
                 .andExpect(status().isOk())
@@ -464,7 +533,7 @@ class MessageControllerTest {
         ExternalSessionReferenceQueryPort referenceQueries = mock(ExternalSessionReferenceQueryPort.class);
         when(queries.session(SESSION_ID)).thenReturn(Optional.of(new SessionDetailView(SESSION_ID, CREATED_AT,
                 Optional.of(new MessageJobView(JOB_ID, SESSION_ID, JobStatus.DONE, 1, 2, Optional.empty(),
-                        Optional.of(JobFailure.MODEL_OUTPUT_INVALID), Optional.empty())),
+                        Optional.of(JobFailure.MODEL_OUTPUT_INVALID), Optional.empty(), Optional.empty())),
                 Optional.of(new SessionDetailView.CompactionBoundaryView(2, 4, "THRESHOLD", CREATED_AT)),
                 new SessionDetailView.ContextUsageView("gemini-3.1-flash-lite", 1_048_576, 512, 0.00048828125,
                         ContextEstimate.Basis.PROVIDER_PLUS_TRAILING_ESTIMATE))));

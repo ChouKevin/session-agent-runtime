@@ -13,6 +13,7 @@ import com.java.system.sessionagent.conversation.domain.IncomingMessage;
 import com.java.system.sessionagent.conversation.domain.JobStatus;
 import com.java.system.sessionagent.conversation.domain.JobFailure;
 import com.java.system.sessionagent.conversation.domain.JobProgress;
+import com.java.system.sessionagent.conversation.domain.JobCacheReport;
 import com.java.system.sessionagent.conversation.domain.MessageJobId;
 import com.java.system.sessionagent.conversation.domain.MessageReceipt;
 import com.java.system.sessionagent.conversation.domain.MessageWorkClaim;
@@ -154,7 +155,8 @@ public interface ConversationStore {
             int modelCallCount,
             Optional<JobProgress> progress,
             Optional<JobFailure> failure,
-            Optional<Instant> cancellationRequestedAt) {
+            Optional<Instant> cancellationRequestedAt,
+            Optional<JobCacheReport> cacheReport) {
     }
 
     record SessionProjection(SessionId sessionId, Instant createdAt, Optional<MessageJobProjection> currentJob, String selectedModel) {

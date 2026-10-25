@@ -544,7 +544,7 @@ class MessageJobWorkerTest {
         }).when(jobs).process(org.mockito.Mockito.eq(claim), any());
         when(store.readJob(claim.messageJobId())).thenReturn(Optional.of(new ConversationStore.MessageJobProjection(
                 claim.messageJobId(), claim.sessionId(), com.java.system.sessionagent.conversation.domain.JobStatus.DONE,
-                1, 1, Optional.empty(), Optional.empty(), Optional.empty())));
+                1, 1, Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty())));
         Logger logger = (Logger) LoggerFactory.getLogger(MessageJobWorker.class);
         ListAppender<ILoggingEvent> appender = new ListAppender<>();
         appender.start();

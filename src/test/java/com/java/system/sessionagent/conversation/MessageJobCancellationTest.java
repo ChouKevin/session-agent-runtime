@@ -303,7 +303,7 @@ class MessageJobCancellationTest {
         }).when(store).updateProgress(eq(claim), any());
         when(store.readJob(claim.messageJobId())).thenReturn(Optional.of(new ConversationStore.MessageJobProjection(
                 claim.messageJobId(), claim.sessionId(), JobStatus.WORKING, 3, 1,
-                Optional.empty(), Optional.empty(), Optional.empty())));
+                Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty())));
         doAnswer(invocation -> {
             ConversationStore.MessageBatch batch = invocation.getArgument(1);
             // Model the winner by persisting only the actual submitted tool boundary, never synthesizing lost observations.
@@ -415,7 +415,7 @@ class MessageJobCancellationTest {
                 .thenReturn(new ModelCallReservationResult.Reserved(1, 1));
         when(store.readJob(claim.messageJobId())).thenReturn(Optional.of(new ConversationStore.MessageJobProjection(
                 claim.messageJobId(), claim.sessionId(), JobStatus.WORKING, 0, 1,
-                Optional.empty(), Optional.empty(), Optional.empty())));
+                Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty())));
         AtomicInteger admissions = new AtomicInteger();
         doAnswer(invocation -> {
             JobProgress progress = invocation.getArgument(1);
@@ -567,7 +567,7 @@ class MessageJobCancellationTest {
                 ConversationStoreFailure.transientFailure(new IllegalStateException("storage failed")));
         when(store.readJob(claim.messageJobId())).thenReturn(Optional.of(new ConversationStore.MessageJobProjection(
                 claim.messageJobId(), claim.sessionId(), JobStatus.WORKING, 0, 0,
-                Optional.empty(), Optional.empty(), Optional.empty())));
+                Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty())));
         when(store.scheduleRetry(eq(claim), any(), any())).thenAnswer(invocation -> {
             cancelled.set(true);
             throw new JobCancellationRequestedException();

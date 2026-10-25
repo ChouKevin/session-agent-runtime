@@ -11,6 +11,7 @@ import com.java.system.sessionagent.conversation.domain.ModelCallPurpose;
 import com.java.system.sessionagent.conversation.domain.ModelCallReservationResult;
 import com.java.system.sessionagent.conversation.domain.ModelCallObservation;
 import com.java.system.sessionagent.conversation.domain.CacheTokenUsage;
+import com.java.system.sessionagent.conversation.domain.JobCacheReport;
 import com.java.system.sessionagent.conversation.domain.SkillCommand;
 import com.java.system.sessionagent.conversation.domain.SkillCommandState;
 import com.java.system.sessionagent.conversation.domain.SkillMessage;
@@ -1012,12 +1013,17 @@ public final class PostgresConversationStore implements ConversationStore {
         MessageJobId requiredMessageJobId = Objects.requireNonNull(messageJobId, "Message job ID must not be null");
         try {
             return mapper.readJob(UUID.fromString(requiredMessageJobId.value())).stream().findFirst()
-                    .map(row -> new MessageJobProjection(
-                            new MessageJobId(row.messageJobId().toString()), new SessionId(row.sessionId().toString()),
-                            JobStatus.valueOf(row.status()), row.retryCount(), row.modelCalls(),
-                            storedProgress(row.phase(), row.phaseStartedAt(), row.currentToolName()),
-                            Optional.ofNullable(row.failureCode()).map(JobFailure::valueOf),
-                            Optional.ofNullable(row.cancellationRequestedAt()).map(OffsetDateTime::toInstant)));
+                    .map(row -> {
+                        JobStatus status = JobStatus.valueOf(row.status());
+                        return new MessageJobProjection(
+                                new MessageJobId(row.messageJobId().toString()), new SessionId(row.sessionId().toString()),
+                                status, row.retryCount(), row.modelCalls(),
+                                storedProgress(row.phase(), row.phaseStartedAt(), row.currentToolName()),
+                                Optional.ofNullable(row.failureCode()).map(JobFailure::valueOf),
+                                Optional.ofNullable(row.cancellationRequestedAt()).map(OffsetDateTime::toInstant),
+                                storedCacheReport(status, row.modelCalls(), row.cacheUsageKnownCalls(),
+                                        row.cacheUsageInputTokens(), row.cacheUsageCachedInputTokens()));
+                    });
         } catch (RuntimeException exception) {
             throw translate(exception);
         }
@@ -1031,11 +1037,14 @@ public final class PostgresConversationStore implements ConversationStore {
                 Optional<UUID> storedJobId = Optional.ofNullable(row.messageJobId());
                 Optional<MessageJobProjection> currentJob = Optional.empty();
                 if (storedJobId.isPresent()) {
+                    JobStatus status = JobStatus.valueOf(row.status());
                     currentJob = Optional.of(new MessageJobProjection(new MessageJobId(storedJobId.orElseThrow().toString()),
-                            new SessionId(row.sessionId().toString()), JobStatus.valueOf(row.status()), row.retryCount(),
-                            row.modelCalls(), storedProgress(row.phase(), row.phaseStartedAt(), row.currentToolName()),
+                            new SessionId(row.sessionId().toString()), status, row.retryCount(), row.modelCalls(),
+                            storedProgress(row.phase(), row.phaseStartedAt(), row.currentToolName()),
                             Optional.ofNullable(row.failureCode()).map(JobFailure::valueOf),
-                            Optional.ofNullable(row.cancellationRequestedAt()).map(OffsetDateTime::toInstant)));
+                            Optional.ofNullable(row.cancellationRequestedAt()).map(OffsetDateTime::toInstant),
+                            storedCacheReport(status, row.modelCalls(), row.cacheUsageKnownCalls(),
+                                    row.cacheUsageInputTokens(), row.cacheUsageCachedInputTokens())));
                 }
                 return new SessionProjection(new SessionId(row.sessionId().toString()), row.createdAt().toInstant(), currentJob,
                         row.selectedModel());
@@ -1043,6 +1052,18 @@ public final class PostgresConversationStore implements ConversationStore {
         } catch (RuntimeException exception) {
             throw translate(exception);
         }
+    }
+
+    private static Optional<JobCacheReport> storedCacheReport(
+            JobStatus status,
+            int requestCount,
+            Integer knownUsageRequestCount,
+            Long knownInputTokens,
+            Long knownCachedInputTokens) {
+        return Optional.ofNullable(knownUsageRequestCount)
+                .map(knownCount -> JobCacheReport.from(status, requestCount, knownCount,
+                        Objects.requireNonNull(knownInputTokens, "Stored input-token total must not be null"),
+                        Objects.requireNonNull(knownCachedInputTokens, "Stored cached-input-token total must not be null")));
     }
 
     private static Optional<JobProgress> storedProgress(String phase, OffsetDateTime startedAt, String toolName) {

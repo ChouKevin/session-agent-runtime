@@ -1,5 +1,6 @@
 package com.java.system.sessionagent.conversation.port.in;
 
+import com.java.system.sessionagent.conversation.domain.JobCacheReport;
 import com.java.system.sessionagent.conversation.domain.JobFailure;
 import com.java.system.sessionagent.conversation.domain.JobProgress;
 import com.java.system.sessionagent.conversation.domain.JobStatus;
@@ -15,5 +16,6 @@ public record MessageJobView(
         int modelCallCount,
         Optional<JobProgress> progress,
         Optional<JobFailure> failure,
-        Optional<Instant> cancellationRequestedAt) {
+        Optional<Instant> cancellationRequestedAt,
+        Optional<JobCacheReport> cacheReport) {
 }

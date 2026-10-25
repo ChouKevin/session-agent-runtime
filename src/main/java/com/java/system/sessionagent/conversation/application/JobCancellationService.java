@@ -22,7 +22,7 @@ public final class JobCancellationService implements MessageJobCancellationPort 
         return conversationStore.requestCancellation(new MessageJobId(messageJobId))
                 .map(projection -> new MessageJobView(projection.messageJobId().value(), projection.sessionId().value(),
                         projection.status(), projection.retryCount(), projection.modelCallCount(), projection.progress(),
-                        projection.failure(), projection.cancellationRequestedAt()));
+                        projection.failure(), projection.cancellationRequestedAt(), projection.cacheReport()));
     }
 
     @Override

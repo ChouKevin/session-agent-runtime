@@ -108,7 +108,7 @@ class MessageJobRecoveryTest {
                 .thenReturn(new ModelCallReservationResult.Reserved(1, 1));
         when(store.readJob(claim.messageJobId())).thenReturn(Optional.of(new ConversationStore.MessageJobProjection(
                 claim.messageJobId(), claim.sessionId(), JobStatus.WORKING, 0, 1,
-                Optional.empty(), Optional.empty(), Optional.empty())));
+                Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty())));
         when(store.appendAndScheduleRetry(eq(claim), any(), any(), eq(JobFailure.STORAGE_UNAVAILABLE), any()))
                 .thenReturn(JobStatus.RETRY);
         AtomicBoolean completedFirst = new AtomicBoolean();
@@ -187,7 +187,7 @@ class MessageJobRecoveryTest {
                 .thenReturn(new ModelCallReservationResult.Reserved(1, 1));
         when(store.readJob(claim.messageJobId())).thenReturn(Optional.of(new ConversationStore.MessageJobProjection(
                 claim.messageJobId(), claim.sessionId(), JobStatus.WORKING, 0, 1,
-                Optional.empty(), Optional.empty(), Optional.empty())));
+                Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty())));
         Mockito.doAnswer(invocation -> {
             JobProgress progress = invocation.getArgument(1);
             if (progress.phase() == JobPhase.TOOL_EXECUTION) {
@@ -215,7 +215,8 @@ class MessageJobRecoveryTest {
         when(store.loadContextHistory(claim.sessionId())).thenThrow(
                 ConversationStoreFailure.transientFailure(new IllegalStateException("storage interrupted")));
         when(store.readJob(claim.messageJobId())).thenReturn(Optional.of(new ConversationStore.MessageJobProjection(
-                claim.messageJobId(), claim.sessionId(), JobStatus.WORKING, 0, 20, Optional.empty(), Optional.empty(), Optional.empty())));
+                claim.messageJobId(), claim.sessionId(), JobStatus.WORKING, 0, 20,
+                Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty())));
         when(store.loadJobControl(claim)).thenReturn(new JobControl(JobControl.Mode.NORMAL, JobControl.Stage.EXECUTION,
                 user(), Optional.empty(), 1, true, false));
         when(store.scheduleRetry(eq(claim), any(), eq(JobFailure.STORAGE_UNAVAILABLE))).thenReturn(true);
@@ -337,7 +338,8 @@ class MessageJobRecoveryTest {
         when(store.loadContextHistory(claim.sessionId())).thenThrow(ConversationStoreFailure.transientFailure(
                 new IllegalStateException("storage unavailable")));
         when(store.readJob(claim.messageJobId())).thenReturn(Optional.of(new ConversationStore.MessageJobProjection(
-                claim.messageJobId(), claim.sessionId(), JobStatus.WORKING, 0, 0, Optional.empty(), Optional.empty(), Optional.empty())));
+                claim.messageJobId(), claim.sessionId(), JobStatus.WORKING, 0, 0, Optional.empty(), Optional.empty(),
+                Optional.empty(), Optional.empty())));
         when(store.scheduleRetry(eq(claim), any(Duration.class), eq(JobFailure.STORAGE_UNAVAILABLE))).thenReturn(false);
         ConversationModel model = model(TEST_ROUTE_ID, (request, reservation, usage) -> {
             throw new AssertionError("Provider must not be called after the storage failure");
@@ -366,7 +368,8 @@ class MessageJobRecoveryTest {
         when(store.loadContextHistory(claim.sessionId())).thenThrow(ConversationStoreFailure.transientFailure(
                 new IllegalStateException("storage unavailable")));
         when(store.readJob(claim.messageJobId())).thenReturn(Optional.of(new ConversationStore.MessageJobProjection(
-                claim.messageJobId(), claim.sessionId(), JobStatus.WORKING, 0, 0, Optional.empty(), Optional.empty(), Optional.empty())));
+                claim.messageJobId(), claim.sessionId(), JobStatus.WORKING, 0, 0, Optional.empty(), Optional.empty(),
+                Optional.empty(), Optional.empty())));
         when(store.scheduleRetry(eq(claim), any(Duration.class), eq(JobFailure.STORAGE_UNAVAILABLE))).thenReturn(true);
         ConversationModel model = model(TEST_ROUTE_ID, (request, reservation, usage) -> {
             throw new AssertionError("Provider must not be called after the storage failure");

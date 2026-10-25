@@ -2,7 +2,7 @@ package com.java.system.sessionagent.web.adapter.http;
 
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
-import com.java.system.sessionagent.conversation.port.in.SessionDetailView;
+import com.java.system.sessionagent.conversation.domain.JobCacheReport;
 import com.java.system.sessionagent.conversation.domain.JobFailure;
 import com.java.system.sessionagent.conversation.domain.JobProgress;
 import com.java.system.sessionagent.conversation.domain.AssistantMessage;
@@ -12,9 +12,11 @@ import com.java.system.sessionagent.conversation.domain.SessionMessage;
 import com.java.system.sessionagent.conversation.domain.ToolObservation;
 import com.java.system.sessionagent.conversation.domain.UserMessage;
 import com.java.system.sessionagent.conversation.domain.SkillMessage;
+import com.java.system.sessionagent.conversation.port.in.SessionDetailView;
 import com.java.system.sessionagent.conversation.port.in.MessageJobView;
 import com.java.system.sessionagent.slack.domain.SlackDeliveryView;
 
+import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.Optional;
 
@@ -73,13 +75,15 @@ public final class MessageResponses {
             String currentToolName,
             String failureCode,
             String failureMessage,
-            Instant cancellationRequestedAt) {
+            Instant cancellationRequestedAt,
+            CacheReportResponse cacheReport) {
         static CurrentJobSummaryResponse from(MessageJobView view) {
             JobProgressFields progressFields = JobProgressFields.from(view);
             return new CurrentJobSummaryResponse(view.messageJobId(), view.status().name(), view.modelCallCount(),
                     progressFields.phase(), progressFields.phaseStartedAt(), progressFields.currentToolName(),
                     progressFields.failureCode(), progressFields.failureMessage(),
-                    view.cancellationRequestedAt().orElse(null));
+                    view.cancellationRequestedAt().orElse(null),
+                    view.cacheReport().map(CacheReportResponse::from).orElse(null));
         }
     }
 
@@ -94,13 +98,30 @@ public final class MessageResponses {
             String currentToolName,
             String failureCode,
             String failureMessage,
-            Instant cancellationRequestedAt) {
+            Instant cancellationRequestedAt,
+            CacheReportResponse cacheReport) {
         static MessageJobResponse from(MessageJobView view) {
             JobProgressFields progressFields = JobProgressFields.from(view);
             return new MessageJobResponse(view.messageJobId(), view.sessionId(), view.status().name(), view.retryCount(),
                     view.modelCallCount(), progressFields.phase(), progressFields.phaseStartedAt(),
                     progressFields.currentToolName(), progressFields.failureCode(), progressFields.failureMessage(),
-                    view.cancellationRequestedAt().orElse(null));
+                    view.cancellationRequestedAt().orElse(null),
+                    view.cacheReport().map(CacheReportResponse::from).orElse(null));
+        }
+    }
+
+    public record CacheReportResponse(
+            String phase,
+            String status,
+            int requestCount,
+            int knownUsageRequestCount,
+            long knownInputTokens,
+            long knownCachedInputTokens,
+            BigDecimal hitRatio) {
+        static CacheReportResponse from(JobCacheReport report) {
+            return new CacheReportResponse(report.phase().name(), report.status().name(), report.requestCount(),
+                    report.knownUsageRequestCount(), report.knownInputTokens(), report.knownCachedInputTokens(),
+                    report.hitRatio().orElse(null));
         }
     }
 

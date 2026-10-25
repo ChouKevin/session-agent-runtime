@@ -7,6 +7,7 @@ import com.java.system.sessionagent.conversation.domain.IntentResult;
 import com.java.system.sessionagent.conversation.domain.ModelCallPurpose;
 import com.java.system.sessionagent.conversation.domain.ModelCallReservationResult;
 
+import com.java.system.sessionagent.conversation.domain.JobCacheReport;
 import com.java.system.sessionagent.conversation.application.ConversationQueryService;
 import com.java.system.sessionagent.conversation.domain.ContextUsageEstimator;
 import com.java.system.sessionagent.conversation.domain.ConversationHistory;
@@ -166,9 +167,11 @@ class SessionQueryServiceTest {
         SessionId sessionId = new SessionId(SESSION_ID);
         Instant cancellationRequestedAt = Instant.parse("2026-10-13T15:45:01Z");
         JobProgress activeProgress = new JobProgress(JobPhase.MODEL_CALL, cancellationRequestedAt, Optional.empty());
+        JobCacheReport cacheReport = JobCacheReport.from(JobStatus.WORKING, 2, 2, 1_000, 250);
         when(store.readSession(sessionId)).thenReturn(Optional.of(new ConversationStore.SessionProjection(sessionId, CREATED_AT,
                 Optional.of(new ConversationStore.MessageJobProjection(new MessageJobId("f47bdb7e-75c3-4dbf-bdd4-1f8681705b62"), sessionId,
-                        JobStatus.WORKING, 1, 2, Optional.of(activeProgress), Optional.empty(), Optional.of(cancellationRequestedAt))), "test")));
+                        JobStatus.WORKING, 1, 2, Optional.of(activeProgress), Optional.empty(), Optional.of(cancellationRequestedAt),
+                        Optional.of(cacheReport))), "test")));
         when(store.loadContextHistory(sessionId)).thenReturn(new ConversationHistory(List.of(new UserMessage(sessionId, new SessionSequence(1),
                 Optional.of(new MessageJobId("f47bdb7e-75c3-4dbf-bdd4-1f8681705b62")), CREATED_AT, MessageRole.USER, "U01", "private text")), Map.of()));
         when(store.loadCompaction(sessionId)).thenReturn(Optional.empty());
@@ -185,6 +188,7 @@ class SessionQueryServiceTest {
         assertThat(detail.currentJob().orElseThrow().cancellationRequestedAt()).contains(cancellationRequestedAt);
         assertThat(detail.currentJob().orElseThrow().progress()).contains(activeProgress);
         assertThat(detail.currentJob().orElseThrow().failure()).isEmpty();
+        assertThat(detail.currentJob().orElseThrow().cacheReport()).contains(cacheReport);
         assertThat(detail.latestCompaction()).isEmpty();
         assertThat(detail.context().modelId()).isEqualTo("gemini-3.1-flash-lite");
         assertThat(detail.context().capacityTokens()).isEqualTo(1_048_576);
@@ -199,7 +203,7 @@ class SessionQueryServiceTest {
         SessionId sessionId = new SessionId(SESSION_ID);
         JobFailure failure = JobFailure.MODEL_UNAVAILABLE;
         when(store.readJob(jobId)).thenReturn(Optional.of(new ConversationStore.MessageJobProjection(
-                jobId, sessionId, JobStatus.RETRY, 1, 1, Optional.empty(), Optional.of(failure), Optional.empty())));
+                jobId, sessionId, JobStatus.RETRY, 1, 1, Optional.empty(), Optional.of(failure), Optional.empty(), Optional.empty())));
         ConversationQueryService service = new ConversationQueryService(store,
                 TestConfiguredModels.withModel(model(new ModelDescriptor(new ModelRouteId("test"), "test-model", 1_000))),
                 () -> new ToolSnapshot(List.of()), new ContextUsageEstimator());
@@ -218,9 +222,10 @@ class SessionQueryServiceTest {
         MessageJobId jobId = new MessageJobId("f47bdb7e-75c3-4dbf-bdd4-1f8681705b62");
         SessionId sessionId = new SessionId(SESSION_ID);
         Instant cancellationRequestedAt = Instant.parse("2026-10-13T15:45:01Z");
+        JobCacheReport cacheReport = JobCacheReport.from(JobStatus.WORKING, 2, 1, 10, 5);
         when(store.readJob(jobId)).thenReturn(Optional.of(new ConversationStore.MessageJobProjection(
-                jobId, sessionId, JobStatus.WORKING, 0, 0, Optional.empty(), Optional.empty(),
-                Optional.of(cancellationRequestedAt))));
+                jobId, sessionId, JobStatus.WORKING, 0, 2, Optional.empty(), Optional.empty(),
+                Optional.of(cancellationRequestedAt), Optional.of(cacheReport))));
         ConversationQueryService service = new ConversationQueryService(store,
                 TestConfiguredModels.withModel(model(new ModelDescriptor(new ModelRouteId("test"), "test-model", 1_000))),
                 () -> new ToolSnapshot(List.of()), new ContextUsageEstimator());
@@ -228,6 +233,7 @@ class SessionQueryServiceTest {
         MessageJobView view = service.findJob(jobId.value()).orElseThrow();
 
         assertThat(view.cancellationRequestedAt()).contains(cancellationRequestedAt);
+        assertThat(view.cacheReport()).contains(cacheReport);
 
     }
 

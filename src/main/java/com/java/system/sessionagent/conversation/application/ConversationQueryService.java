@@ -92,7 +92,8 @@ public final class ConversationQueryService implements ConversationQueryPort {
 
     private MessageJobView toJobView(ConversationStore.MessageJobProjection projection) {
         return new MessageJobView(projection.messageJobId().value(), projection.sessionId().value(), projection.status(), projection.retryCount(),
-                projection.modelCallCount(), projection.progress(), projection.failure(), projection.cancellationRequestedAt());
+                projection.modelCallCount(), projection.progress(), projection.failure(), projection.cancellationRequestedAt(),
+                projection.cacheReport());
     }
 
     private static Optional<SessionDetailView.CompactionBoundaryView> compactionBoundary(Optional<ContextCompaction> compaction) {

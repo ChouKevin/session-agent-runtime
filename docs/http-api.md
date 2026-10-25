@@ -85,6 +85,51 @@ Absent optional fields within these job responses are explicit JSON `null`.
 compaction, intent classification, and wrap-up. The separately persisted ordinary allowance
 is operational state, not model history or prompt metadata; total ordinals remain artifact identities.
 
+### Cache report
+
+`GET /internal/message-jobs/{messageJobId}`, the cancellation response, and
+`currentJob` in `GET /internal/sessions/{sessionId}` expose the same nullable
+`cacheReport` projection. When present, it contains exactly these fields:
+
+| Field | Meaning |
+| --- | --- |
+| `phase` | `PROVISIONAL` until the job is terminal; `FINAL` only for `DONE` or `CANCELLED`. |
+| `status` | Usage-coverage state: `NOT_CALLED`, `UNAVAILABLE`, `PARTIAL`, `COMPLETE`, or `NOT_APPLICABLE`. |
+| `requestCount` | Total reserved provider-request count for this message job; matches `modelCallCount`. |
+| `knownUsageRequestCount` | Count of requests with a present, valid input/cache token pair. |
+| `knownInputTokens` | Sum of input tokens only across requests with known usage. |
+| `knownCachedInputTokens` | Sum of cached input tokens across the same known requests. |
+| `hitRatio` | `knownCachedInputTokens / knownInputTokens`, rounded HALF_UP to six decimal places; JSON `null` when the denominator is zero. |
+
+The token sums are known-subset totals, not estimates for missing requests.
+Missing, unsupported, or invalid input/cache usage is unknown, not zero; an
+explicit zero pair is known usage. `NOT_CALLED` means no requests were reserved.
+`UNAVAILABLE` means requests were reserved but none had known usage. `PARTIAL`
+means at least one but not all reserved requests had known usage, even if the
+known token sums are zero. `NOT_APPLICABLE` means every request had known usage
+but the known input-token sum is zero. `COMPLETE` means every request had known
+usage and the known input-token sum is positive. Availability of completion or
+total-token usage does not affect cache-usage coverage.
+
+`hitRatio` is a fraction, not a percentage and not an average of per-request
+percentages. For example, `0.555556` corresponds to a `55.6%` display when a
+presentation separately computes its one-decimal percentage from the integer
+known-subset sums. This neutral usage report is not a billing estimate or
+promise.
+
+Finality is independent of coverage and transport state. A `WORKING` job remains
+`PROVISIONAL` after cancellation is requested; it becomes `FINAL` only when
+cancellation commits as `CANCELLED`. `DONE` is also final. Slack delivery
+status does not change report finality.
+
+`requestCount` counts reservations made before provider dispatch. A process may
+crash after reserving a call but before dispatching it, so a reserved unknown
+attempt is not evidence that a provider request was sent or billed. Historical
+jobs without cache-usage tracking return `"cacheReport": null`; newly tracked
+jobs with no requests instead report `NOT_CALLED`. The report exposes no raw
+provider metadata, per-request or per-model breakdown, or billing data.
+
+
 
 | Phase | Meaning |
 | --- | --- |
