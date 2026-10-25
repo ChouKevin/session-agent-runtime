@@ -228,7 +228,7 @@ class RuntimeConfigurationTest {
                 new NoOpConversationTelemetry(), new ObjectMapper(), properties,
                 configuredProfile -> new RuntimeConfiguration.CreatedChatModel(chatModel, Optional.empty()))) {
             assertThatThrownBy(() -> models.defaultConversationModel().respond(
-                    new ModelRequest(List.of(), new ToolSnapshot(List.of()), ModelRequest.Purpose.ANSWER), reservations::incrementAndGet))
+                    new ModelRequest(List.of(), new ToolSnapshot(List.of()), ModelRequest.Purpose.ANSWER), reservations::incrementAndGet, ignored -> { }))
                     .isInstanceOfSatisfying(ModelCallFailure.class,
                             failure -> assertThat(failure.kind()).isEqualTo(expectedKind));
         }

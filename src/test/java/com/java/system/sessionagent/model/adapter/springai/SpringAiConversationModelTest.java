@@ -1,5 +1,21 @@
 package com.java.system.sessionagent.model.adapter.springai;
 
+import com.java.system.sessionagent.conversation.domain.ModelCallObservation;
+import com.java.system.sessionagent.conversation.domain.CacheTokenUsage;
+import com.google.genai.types.GenerateContentResponseUsageMetadata;
+import org.springframework.ai.google.genai.metadata.GoogleGenAiUsage;
+import java.util.concurrent.atomic.AtomicInteger;
+import com.openai.client.OpenAIClient;
+import com.openai.core.RequestOptions;
+import com.openai.core.http.Headers;
+import com.openai.core.http.HttpResponseFor;
+import com.openai.models.chat.completions.ChatCompletion;
+import com.openai.models.chat.completions.ChatCompletionCreateParams;
+import com.openai.models.completions.CompletionUsage;
+import com.openai.services.blocking.ChatService;
+import com.openai.services.blocking.chat.ChatCompletionService;
+import java.io.ByteArrayInputStream;
+import java.io.InputStream;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.java.system.sessionagent.conversation.domain.IntentRequest;
 import com.java.system.sessionagent.conversation.domain.IntentResult;
@@ -63,10 +79,145 @@ import java.util.stream.Stream;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.verify;
 
 class SpringAiConversationModelTest {
 
     private static final ModelRouteId GOOGLE_ROUTE_ID = new ModelRouteId("google-genai");
+
+    @Test
+    void supported_sdk_decorator_preserves_valid_response_identity_and_transport_ownership() {
+        OpenAIClient client = mock(OpenAIClient.class);
+        ChatService chat = mock(ChatService.class);
+        ChatCompletionService completions = mock(ChatCompletionService.class);
+        ChatCompletionService.WithRawResponse raw = mock(ChatCompletionService.WithRawResponse.class);
+        when(client.chat()).thenReturn(chat);
+        when(chat.completions()).thenReturn(completions);
+        when(completions.withRawResponse()).thenReturn(raw);
+        ChatCompletion completion = ChatCompletion.builder().id("completion").created(0).model("test").choices(List.of())
+                .usage(CompletionUsage.builder().promptTokens(8).completionTokens(2).totalTokens(10).build()).build();
+        Headers headers = mock(Headers.class);
+        InputStream body = new ByteArrayInputStream(new byte[] {1, 2});
+        AtomicInteger closes = new AtomicInteger();
+        HttpResponseFor<ChatCompletion> response = new HttpResponseFor<>() {
+            @Override public ChatCompletion parse() { return completion; }
+            @Override public int statusCode() { return 200; }
+            @Override public Headers headers() { return headers; }
+            @Override public Optional<String> requestId() { return Optional.of("request-id"); }
+            @Override public InputStream body() { return body; }
+            @Override public void close() { closes.incrementAndGet(); }
+        };
+        ChatCompletionCreateParams request = ChatCompletionCreateParams.builder().model("test").messages(List.of()).build();
+        RequestOptions options = RequestOptions.none();
+        when(raw.create(request, options)).thenReturn(response);
+        OpenAiUsagePreservingClient decorated = new OpenAiUsagePreservingClient(client);
+
+        try (HttpResponseFor<ChatCompletion> actual = decorated.chat().completions().withRawResponse().create(request, options)) {
+            assertThat(actual.parse()).isSameAs(completion);
+            assertThat(actual.statusCode()).isEqualTo(200);
+            assertThat(actual.headers()).isSameAs(headers);
+            assertThat(actual.requestId()).contains("request-id");
+            assertThat(actual.body()).isSameAs(body);
+            assertThat(closes).hasValue(0);
+        }
+        assertThat(closes).hasValue(1);
+        decorated.close();
+        verify(client).close();
+    }
+
+    @ParameterizedTest(name = "{0}: known cache pair={1}")
+    @MethodSource("responseCategories")
+    void observes_each_returned_response_before_category_specific_validation(String category, boolean known) {
+        GenerateContentResponseUsageMetadata.Builder raw = GenerateContentResponseUsageMetadata.builder()
+                .promptTokenCount(8);
+        if (known) {
+            raw.cachedContentTokenCount(3);
+        }
+        Usage usage = GoogleGenAiUsage.from(raw.build());
+        AssistantMessage message = switch (category) {
+            case "intent" -> new AssistantMessage("{\"intent\":\"CONTINUE\"}");
+            case "malformed-answer", "malformed-summary" -> new AssistantMessage(" ");
+            case "malformed-intent" -> new AssistantMessage("not JSON");
+            case "tools" -> AssistantMessage.builder().toolCalls(List.of(
+                    new AssistantMessage.ToolCall("call", "function", "opaque", "{}"))).build();
+            case "malformed-tools" -> AssistantMessage.builder().toolCalls(List.of(
+                    new AssistantMessage.ToolCall("call", "function", "opaque", "[]"))).build();
+            default -> new AssistantMessage("answer");
+        };
+        AtomicInteger requests = new AtomicInteger();
+        AtomicInteger reservations = new AtomicInteger();
+        ChatModel chat = new ChatModel() {
+            @Override public ToolCallingChatOptions getOptions() { return ToolCallingChatOptions.builder().build(); }
+            @Override public ChatResponse call(Prompt prompt) {
+                assertThat(reservations).hasValue(1);
+                requests.incrementAndGet();
+                return new ChatResponse(List.of(new Generation(message)), ChatResponseMetadata.builder().usage(usage).build());
+            }
+        };
+        SpringAiConversationModel adapter = new SpringAiConversationModel(chat, new SystemPrompt(), new NoOpConversationTelemetry(),
+                new ObjectMapper(), new SpringAiMessagePartsHandler(GOOGLE_ROUTE_ID));
+        List<ModelCallObservation> observed = new ArrayList<>();
+        Runnable invoke = () -> {
+            if (category.endsWith("intent")) {
+                adapter.classifyIntent(intentRequest(), () -> { reservations.incrementAndGet(); return 7; }, observed::add);
+            } else if (category.endsWith("summary")) {
+                adapter.summarize(new ContextCompactionRequest(Optional.empty(), List.of(intentRequest().initiatingMessage())),
+                        () -> { reservations.incrementAndGet(); return 7; }, observed::add);
+            } else {
+                adapter.respond(new ModelRequest(List.of(), new ToolSnapshot(List.of()),
+                        "wrap".equals(category) ? ModelRequest.Purpose.WRAP_UP : ModelRequest.Purpose.ANSWER),
+                        () -> { reservations.incrementAndGet(); return 7; }, observed::add);
+            }
+        };
+        if (category.startsWith("malformed")) {
+            assertThatThrownBy(invoke::run).isInstanceOf(ModelCallFailure.class);
+        } else {
+            invoke.run();
+        }
+        assertThat(requests).hasValue(1);
+        assertThat(reservations).hasValue(1);
+        assertThat(observed).containsExactly(new ModelCallObservation(7,
+                known ? Optional.of(new CacheTokenUsage(8, 3)) : Optional.empty()));
+    }
+
+    private static Stream<Arguments> responseCategories() {
+        return Stream.of("answer", "tools", "summary", "intent", "wrap", "malformed-answer",
+                "malformed-tools", "malformed-summary", "malformed-intent")
+                .flatMap(category -> Stream.of(Arguments.of(category, true), Arguments.of(category, false)));
+    }
+
+    @Test
+    void unsupported_metadata_is_unknown_even_when_normalized_usage_looks_usable() {
+        List<ModelCallObservation> observed = new ArrayList<>();
+        ModelCallResult result = model(new AssistantMessage("done"), usage(8, 2, 10, Optional.of(3L)), GOOGLE_ROUTE_ID)
+                .respond(new ModelRequest(List.of(), new ToolSnapshot(List.of()), ModelRequest.Purpose.ANSWER), () -> 2, observed::add);
+        assertThat(result.reply()).isEqualTo(new ModelReply.Text("done"));
+        assertThat(observed).containsExactly(new ModelCallObservation(2, Optional.empty()));
+    }
+
+    @Test
+    void denied_reservation_or_provider_exception_does_not_invent_an_observation() {
+        AtomicInteger requests = new AtomicInteger();
+        List<ModelCallObservation> observed = new ArrayList<>();
+        ChatModel chat = new ChatModel() {
+            @Override public ToolCallingChatOptions getOptions() { return ToolCallingChatOptions.builder().build(); }
+            @Override public ChatResponse call(Prompt prompt) {
+                requests.incrementAndGet();
+                throw new IllegalStateException("provider unavailable");
+            }
+        };
+        SpringAiConversationModel adapter = new SpringAiConversationModel(chat, new SystemPrompt(), new NoOpConversationTelemetry(),
+                new ObjectMapper(), new SpringAiMessagePartsHandler(GOOGLE_ROUTE_ID));
+        ModelRequest request = new ModelRequest(List.of(), new ToolSnapshot(List.of()), ModelRequest.Purpose.ANSWER);
+        IllegalStateException denied = new IllegalStateException("reservation denied");
+        assertThatThrownBy(() -> adapter.respond(request, () -> { throw denied; }, observed::add)).isSameAs(denied);
+        assertThat(requests).hasValue(0);
+        assertThat(observed).isEmpty();
+        assertThatThrownBy(() -> adapter.respond(request, () -> 3, observed::add)).isInstanceOf(ModelCallFailure.class);
+        assertThat(requests).hasValue(1);
+        assertThat(observed).isEmpty();
+    }
 
     @Test
     void exposes_cached_input_tokens_as_an_optional_usage_component() {
@@ -127,7 +278,7 @@ class SpringAiConversationModelTest {
         UserMessage history = new UserMessage(new SessionId("session-1"), new SessionSequence(1),
                 Optional.of(new MessageJobId("job-1")), Instant.EPOCH, MessageRole.USER, "user", "history");
 
-        model.summarize(new ContextCompactionRequest(Optional.empty(), List.of(history)), () -> 1);
+        model.summarize(new ContextCompactionRequest(Optional.empty(), List.of(history)), () -> 1, ignored -> { });
 
         assertThat(registry.get("session_agent.model.cache_usage").tag("state", "HIT").counter().count())
                 .isEqualTo(1);
@@ -247,7 +398,7 @@ class SpringAiConversationModelTest {
         UserMessage history = new UserMessage(new SessionId("session-1"), new SessionSequence(1), Optional.of(new MessageJobId("job-1")),
                 Instant.EPOCH, MessageRole.USER, "user", "history");
 
-        String summary = model.summarize(new ContextCompactionRequest(Optional.empty(), List.of(history)), () -> 1);
+        String summary = model.summarize(new ContextCompactionRequest(Optional.empty(), List.of(history)), () -> 1, ignored -> { });
 
         assertThat(summary).isEqualTo("summary");
         assertThat(prompts).hasSize(1);
@@ -389,16 +540,18 @@ class SpringAiConversationModelTest {
                 new ToolObservation(new SessionId("session-1"), new SessionSequence(3), Optional.of(new MessageJobId("job-1")),
                         Instant.EPOCH, MessageRole.TOOL, new ToolCallId("call-1"), "first",
                         Map.of("isError", false, "result", Map.of())));
+        List<ModelCallObservation> observed = new ArrayList<>();
         ModelContinuation malformed = new ModelContinuation(routeId,
                 "spring-ai-message-parts-v1", new byte[] {1, 2, 3});
 
         assertThatThrownBy(() -> model.respond(new ModelRequest(history, Map.of(new SessionSequence(2), malformed), new ToolSnapshot(List.of()), ModelRequest.Purpose.ANSWER),
-                () -> { reserved.set(true); return 1; }, usage -> { }))
+                () -> { reserved.set(true); return 1; }, observed::add))
                 .isInstanceOfSatisfying(ModelCallFailure.class,
                         failure -> assertThat(failure.kind()).isEqualTo(ModelCallFailure.Kind.TERMINAL));
 
         assertThat(reserved).isFalse();
         assertThat(providerCalled).isFalse();
+        assertThat(observed).isEmpty();
     }
 
     @ParameterizedTest
@@ -407,7 +560,7 @@ class SpringAiConversationModelTest {
             String json, FollowUpIntent intent, Optional<String> clarification) {
         SpringAiConversationModel adapter = model(new AssistantMessage(json), GOOGLE_ROUTE_ID);
         AtomicBoolean reserved = new AtomicBoolean();
-        IntentResult result = adapter.classifyIntent(intentRequest(), () -> { reserved.set(true); return 7; });
+        IntentResult result = adapter.classifyIntent(intentRequest(), () -> { reserved.set(true); return 7; }, ignored -> { });
         assertThat(result).isEqualTo(new IntentResult(intent, clarification));
         assertThat(reserved).isTrue();
     }
@@ -425,7 +578,7 @@ class SpringAiConversationModelTest {
     @MethodSource("invalidIntentReplies")
     void malformed_internal_intent_cannot_grant_a_mode(String reply) {
         SpringAiConversationModel adapter = model(new AssistantMessage(reply), GOOGLE_ROUTE_ID);
-        assertThatThrownBy(() -> adapter.classifyIntent(intentRequest(), () -> 1)).isInstanceOf(ModelCallFailure.class);
+        assertThatThrownBy(() -> adapter.classifyIntent(intentRequest(), () -> 1, ignored -> { })).isInstanceOf(ModelCallFailure.class);
     }
 
     private static Stream<String> invalidIntentReplies() {
@@ -452,7 +605,7 @@ class SpringAiConversationModelTest {
         SpringAiConversationModel adapter = new SpringAiConversationModel(chat, new SystemPrompt(), new NoOpConversationTelemetry(),
                 new ObjectMapper(), new SpringAiMessagePartsHandler(GOOGLE_ROUTE_ID));
         IntentRequest request = intentRequest();
-        adapter.classifyIntent(request, () -> 1);
+        adapter.classifyIntent(request, () -> 1, ignored -> { });
         Prompt prompt = prompts.getFirst();
         assertThat(prompt.getInstructions().getLast().getText()).contains("current choice").doesNotContain("later queued question");
         assertThat(prompt.getInstructions().getFirst().getText()).contains("Current user sequence: 2");
@@ -465,7 +618,7 @@ class SpringAiConversationModelTest {
     void internal_intent_rejects_a_provider_tool_call_instead_of_treating_it_as_permission() {
         AssistantMessage tool = AssistantMessage.builder().content("{\"intent\":\"DELIVER\"}")
                 .toolCalls(List.of(new AssistantMessage.ToolCall("x", "function", "opaque", "{}"))).build();
-        assertThatThrownBy(() -> model(tool, GOOGLE_ROUTE_ID).classifyIntent(intentRequest(), () -> 1))
+        assertThatThrownBy(() -> model(tool, GOOGLE_ROUTE_ID).classifyIntent(intentRequest(), () -> 1, ignored -> { }))
                 .isInstanceOf(ModelCallFailure.class);
     }
 
@@ -483,7 +636,7 @@ class SpringAiConversationModelTest {
                 new ObjectMapper(), new SpringAiMessagePartsHandler(GOOGLE_ROUTE_ID));
         List<SessionMessage> history = List.of(intentRequest().initiatingMessage());
         ModelRequest request = new ModelRequest(history, Map.of(), new ToolSnapshot(List.of()), Optional.empty(), ModelRequest.Purpose.WRAP_UP);
-        assertThat(adapter.respond(request, () -> 3).reply()).isEqualTo(new ModelReply.Text("{\"question\":\"Continue?\"}"));
+        assertThat(adapter.respond(request, () -> 3, ignored -> { }).reply()).isEqualTo(new ModelReply.Text("{\"question\":\"Continue?\"}"));
         assertThat(request.history()).containsExactlyElementsOf(history);
         assertThat(prompts.getFirst().getInstructions().getFirst().getText())
                 .isEqualTo(new SystemPrompt().content() + "\n\n" + request.transientDirective());
@@ -506,7 +659,7 @@ class SpringAiConversationModelTest {
                 new ObjectMapper(), new SpringAiMessagePartsHandler(GOOGLE_ROUTE_ID));
         try (ToolSnapshot tools = new ToolSnapshot(List.of()).restrictedTo(Set.of(ToolCapability.REPORT_GENERATION))) {
             ModelRequest request = new ModelRequest(List.of(), tools, ModelRequest.Purpose.ANSWER);
-            adapter.respond(request, () -> 2);
+            adapter.respond(request, () -> 2, ignored -> { });
             assertThat(request.history()).isEmpty();
             assertThat(prompts.getFirst().getInstructions().getFirst().getText())
                     .isEqualTo(new SystemPrompt().content() + "\n\n" + request.transientDirective())

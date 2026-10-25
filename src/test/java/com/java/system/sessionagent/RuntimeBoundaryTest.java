@@ -38,11 +38,15 @@ class RuntimeBoundaryTest {
             .should().dependOnClassesThat().resideInAnyPackage("org.springframework.ai.mcp..");
 
     @ArchTest
-    static final ArchRule GOOGLE_SPECIFIC_TYPES_STAY_IN_BOOTSTRAP = noClasses()
-            .that().resideOutsideOfPackage("com.java.system.sessionagent.bootstrap..")
+    static final ArchRule MODEL_PROVIDER_TYPES_STAY_IN_SPRING_AI_ADAPTER_OR_BOOTSTRAP = noClasses()
+            .that().resideOutsideOfPackages(
+                    "com.java.system.sessionagent.model.adapter.springai..",
+                    "com.java.system.sessionagent.bootstrap..")
             .should().dependOnClassesThat().resideInAnyPackage(
                     "com.google..",
-                    "org.springframework.ai.google..");
+                    "com.openai..",
+                    "org.springframework.ai.google..",
+                    "org.springframework.ai.openai..");
 
     @ArchTest
     static final ArchRule PROVIDER_DEPENDENCIES_DO_NOT_LEAK_TO_CORE_RUNTIME_MODULES = noClasses()
@@ -59,6 +63,7 @@ class RuntimeBoundaryTest {
                     "org.springframework.ai..",
                     "io.modelcontextprotocol..",
                     "com.google..",
+                    "com.openai..",
                     "com.java.system.sessionagent.semantic..");
 
     @ArchTest

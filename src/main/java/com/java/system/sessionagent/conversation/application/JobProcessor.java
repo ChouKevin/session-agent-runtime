@@ -86,6 +86,7 @@ public final class JobProcessor implements MessageJobPort {
     private final ConversationTelemetry telemetry;
     private final ContextUsageEstimator contextUsageEstimator = new ContextUsageEstimator();
     private final JobHandoffCoordinator handoff;
+    private final JobCacheUsageRecorder cacheUsageRecorder;
 
     public JobProcessor(
             ConversationStore conversationStore,
@@ -106,6 +107,7 @@ public final class JobProcessor implements MessageJobPort {
         this.retryPolicy = Objects.requireNonNull(retryPolicy, "Message job retry policy must not be null");
         this.telemetry = Objects.requireNonNull(telemetry, "Conversation telemetry must not be null");
         this.handoff = new JobHandoffCoordinator(conversationStore, clock, maxModelCalls);
+        this.cacheUsageRecorder = new JobCacheUsageRecorder(conversationStore);
     }
 
     @Override
@@ -197,7 +199,8 @@ public final class JobProcessor implements MessageJobPort {
                 checkCancellation(claim);
                 try {
                     result = conversationModel.respond(request, () -> reserveAndLogModelRequest(claim, guard, reservation,
-                            activeModelDescriptor, request.history().size(), tools.definitions().size()), usage -> { });
+                            activeModelDescriptor, request.history().size(), tools.definitions().size()),
+                            observation -> cacheUsageRecorder.record(claim, observation));
                     checkCancellation(claim);
                     reply = result.reply();
                     continuation = result.continuation();
@@ -389,7 +392,7 @@ public final class JobProcessor implements MessageJobPort {
         try {
             summary = conversationModel.summarize(new ContextCompactionRequest(context.compaction().map(value -> value.summary()),
                     selected.history()), () -> reserveAndLogModelRequest(claim, guard, reservation, projection.model(),
-                    selected.history().size(), 0));
+                    selected.history().size(), 0), observation -> cacheUsageRecorder.record(claim, observation));
             checkCancellation(claim);
         } catch (BudgetExhausted exception) {
             logCompaction(claim, "compact_failure", "MODEL_LIMIT", context.estimateTokens(), projection.model().contextWindowTokens());

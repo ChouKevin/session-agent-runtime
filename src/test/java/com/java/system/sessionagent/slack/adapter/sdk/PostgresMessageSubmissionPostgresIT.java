@@ -1,5 +1,6 @@
 package com.java.system.sessionagent.slack.adapter.sdk;
 
+import com.java.system.sessionagent.conversation.domain.ModelCallObservation;
 import com.java.system.sessionagent.conversation.domain.IntentRequest;
 import com.java.system.sessionagent.conversation.domain.IntentResult;
 
@@ -41,7 +42,6 @@ import com.java.system.sessionagent.conversation.domain.ModelDescriptor;
 import com.java.system.sessionagent.conversation.domain.ModelReply;
 import com.java.system.sessionagent.conversation.domain.ModelRouteId;
 import com.java.system.sessionagent.conversation.domain.ModelRequest;
-import com.java.system.sessionagent.conversation.domain.ModelUsage;
 import com.java.system.sessionagent.conversation.domain.MessageWorkClaim;
 import com.java.system.sessionagent.conversation.domain.MessageReceipt;
 import com.java.system.sessionagent.conversation.domain.SessionId;
@@ -715,7 +715,7 @@ class PostgresMessageSubmissionPostgresIT {
         AtomicInteger modelCalls = new AtomicInteger();
         ModelDescriptor descriptor = new ModelDescriptor(new ModelRouteId("slack-fake"), "fake", 1_000_000);
         ConversationModel model = new ConversationModel() {
-            @Override public IntentResult classifyIntent(IntentRequest request, ModelCallReservation reservation) {
+            @Override public IntentResult classifyIntent(IntentRequest request, ModelCallReservation reservation, Consumer<ModelCallObservation> observationObserver) {
                 throw new AssertionError("Unexpected intent request in ordinary-job fixture");
             }
             @Override
@@ -732,7 +732,7 @@ class PostgresMessageSubmissionPostgresIT {
             public ModelCallResult respond(
                     ModelRequest request,
                     ModelCallReservation reservation,
-                    Consumer<ModelUsage> usageObserver) {
+                    Consumer<ModelCallObservation> usageObserver) {
                 modelCalls.incrementAndGet();
                 reservation.reserve();
                 return new ModelCallResult(new ModelReply.Text("done"), Optional.empty());

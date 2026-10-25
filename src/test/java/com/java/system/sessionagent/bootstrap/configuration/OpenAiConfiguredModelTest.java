@@ -1,5 +1,8 @@
 package com.java.system.sessionagent.bootstrap.configuration;
 
+import com.java.system.sessionagent.conversation.domain.ModelCallObservation;
+import com.java.system.sessionagent.conversation.domain.CacheTokenUsage;
+import java.util.ArrayList;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.java.system.sessionagent.conversation.domain.AssistantToolCallsMessage;
@@ -53,6 +56,50 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class OpenAiConfiguredModelTest {
+    @ParameterizedTest(name = "OpenAI raw usage: {0}")
+    @MethodSource("openAiAccountingCases")
+    void records_only_explicit_valid_input_cache_pairs_without_extra_http_requests(
+            String scenario, String usageJson, Optional<CacheTokenUsage> expected) throws Exception {
+        AtomicInteger requests = new AtomicInteger();
+        AtomicInteger reservations = new AtomicInteger();
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        String response = """
+                {"id":"chatcmpl-1","object":"chat.completion","created":0,"model":"gpt-5-mini",
+                 "choices":[{"index":0,"message":{"role":"assistant","content":"Hello."},"finish_reason":"stop"}],
+                 "usage":%s}
+                """.formatted(usageJson);
+        server.createContext("/v1/chat/completions", exchange -> respond(exchange, new AtomicReference<>(),
+                new AtomicReference<>(), requests, response));
+        server.start();
+        try (ConfiguredModels models = configuredModels(server)) {
+            List<ModelCallObservation> observed = new ArrayList<>();
+            ModelCallResult result = models.defaultConversationModel().respond(
+                    new ModelRequest(List.of(), new ToolSnapshot(List.of()), ModelRequest.Purpose.ANSWER),
+                    reservations::incrementAndGet, observed::add);
+            assertThat(result.reply()).as(scenario).isEqualTo(new ModelReply.Text("Hello."));
+            assertThat(observed).as(scenario).containsExactly(new ModelCallObservation(1, expected));
+            if ("omitted input".equals(scenario) || "missing completion and total".equals(scenario)) {
+                assertThat(result.usage().available()).as("cache accounting must not invent ordinary usage").isFalse();
+            }
+            assertThat(reservations).hasValue(1);
+            assertThat(requests).hasValue(1);
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    private static Stream<Arguments> openAiAccountingCases() {
+        return Stream.of(
+                Arguments.of("cache hit", "{\"prompt_tokens\":8,\"completion_tokens\":2,\"total_tokens\":10,\"prompt_tokens_details\":{\"cached_tokens\":3}}", Optional.of(new CacheTokenUsage(8, 3))),
+                Arguments.of("explicit cache zero", "{\"prompt_tokens\":8,\"completion_tokens\":2,\"total_tokens\":10,\"prompt_tokens_details\":{\"cached_tokens\":0}}", Optional.of(new CacheTokenUsage(8, 0))),
+                Arguments.of("omitted cache", "{\"prompt_tokens\":8,\"completion_tokens\":2,\"total_tokens\":10}", Optional.empty()),
+                Arguments.of("omitted input", "{\"completion_tokens\":2,\"total_tokens\":2,\"prompt_tokens_details\":{\"cached_tokens\":0}}", Optional.empty()),
+                Arguments.of("cache exceeds input", "{\"prompt_tokens\":5,\"completion_tokens\":2,\"total_tokens\":7,\"prompt_tokens_details\":{\"cached_tokens\":7}}", Optional.empty()),
+                Arguments.of("negative input", "{\"prompt_tokens\":-1,\"completion_tokens\":2,\"total_tokens\":1,\"prompt_tokens_details\":{\"cached_tokens\":0}}", Optional.empty()),
+                Arguments.of("negative cache", "{\"prompt_tokens\":8,\"completion_tokens\":2,\"total_tokens\":10,\"prompt_tokens_details\":{\"cached_tokens\":-1}}", Optional.empty()),
+                Arguments.of("missing completion and total", "{\"prompt_tokens\":8,\"prompt_tokens_details\":{\"cached_tokens\":3}}", Optional.of(new CacheTokenUsage(8, 3))));
+    }
+
     @ParameterizedTest(name = "OpenAI cached input {0}")
     @MethodSource("openAiCacheUsageCases")
     void maps_openai_provider_cache_usage_to_common_telemetry(
@@ -69,7 +116,7 @@ class OpenAiConfiguredModelTest {
         server.start();
         try (ConfiguredModels models = configuredModels(server, new MicrometerConversationTelemetry(registry))) {
             ModelCallResult result = models.defaultConversationModel().respond(
-                    new ModelRequest(List.of(), new ToolSnapshot(List.of()), ModelRequest.Purpose.ANSWER), reservations::incrementAndGet);
+                    new ModelRequest(List.of(), new ToolSnapshot(List.of()), ModelRequest.Purpose.ANSWER), reservations::incrementAndGet, ignored -> { });
 
             assertThat(result.usage()).as(scenario)
                     .isEqualTo(new ModelUsage(8, 2, 10, true, expectedCachedInputTokens));
@@ -117,7 +164,7 @@ class OpenAiConfiguredModelTest {
         server.start();
         try (ConfiguredModels models = configuredModels(server, Duration.ofSeconds(2), 0.25, 0.8)) {
             ModelCallResult result = models.defaultConversationModel().respond(
-                    new ModelRequest(List.of(), new ToolSnapshot(List.of()), ModelRequest.Purpose.ANSWER), reservations::incrementAndGet);
+                    new ModelRequest(List.of(), new ToolSnapshot(List.of()), ModelRequest.Purpose.ANSWER), reservations::incrementAndGet, ignored -> { });
 
             assertThat(result.reply()).isEqualTo(new ModelReply.Text("Hello."));
             assertThat(reservations).hasValue(1);
@@ -144,7 +191,7 @@ class OpenAiConfiguredModelTest {
                 Optional.of(new MessageJobId("job-1")), Instant.EPOCH, MessageRole.USER, "user", "History.");
         try (ConfiguredModels models = configuredModels(server)) {
             String summary = models.defaultConversationModel().summarize(
-                    new ContextCompactionRequest(Optional.empty(), List.of(history)), reservations::incrementAndGet);
+                    new ContextCompactionRequest(Optional.empty(), List.of(history)), reservations::incrementAndGet, ignored -> { });
 
             assertThat(summary).isEqualTo("Concise session summary.");
             assertThat(reservations).hasValue(1);
@@ -173,7 +220,7 @@ class OpenAiConfiguredModelTest {
         server.start();
         try (ConfiguredModels models = configuredModels(server)) {
             assertThatThrownBy(() -> models.defaultConversationModel().respond(
-                    new ModelRequest(List.of(), new ToolSnapshot(List.of()), ModelRequest.Purpose.ANSWER), () -> 1))
+                    new ModelRequest(List.of(), new ToolSnapshot(List.of()), ModelRequest.Purpose.ANSWER), () -> 1, ignored -> { }))
                     .isInstanceOfSatisfying(ModelCallFailure.class,
                             failure -> assertThat(failure.kind()).isEqualTo(ModelCallFailure.Kind.TRANSIENT));
             assertThat(calls).hasValue(1);
@@ -189,7 +236,7 @@ class OpenAiConfiguredModelTest {
         server.start();
         try (ConfiguredModels models = configuredModels(server)) {
             assertThatThrownBy(() -> models.defaultConversationModel().respond(
-                    new ModelRequest(List.of(), new ToolSnapshot(List.of()), ModelRequest.Purpose.ANSWER), () -> 1))
+                    new ModelRequest(List.of(), new ToolSnapshot(List.of()), ModelRequest.Purpose.ANSWER), () -> 1, ignored -> { }))
                     .isInstanceOfSatisfying(ModelCallFailure.class,
                             failure -> assertThat(failure.kind()).isEqualTo(ModelCallFailure.Kind.TRANSIENT));
             assertThat(providerRequests).hasValue(1);
@@ -205,7 +252,7 @@ class OpenAiConfiguredModelTest {
         server.start();
         try (ConfiguredModels models = configuredModels(server)) {
             assertThatThrownBy(() -> models.defaultConversationModel().respond(
-                    new ModelRequest(List.of(), new ToolSnapshot(List.of()), ModelRequest.Purpose.ANSWER), () -> 1))
+                    new ModelRequest(List.of(), new ToolSnapshot(List.of()), ModelRequest.Purpose.ANSWER), () -> 1, ignored -> { }))
                     .isInstanceOfSatisfying(ModelCallFailure.class,
                             failure -> assertThat(failure.kind()).isEqualTo(ModelCallFailure.Kind.TERMINAL));
             assertThat(providerRequests).hasValue(1);
@@ -221,7 +268,7 @@ class OpenAiConfiguredModelTest {
         terminalServer.start();
         try (ConfiguredModels models = configuredModels(terminalServer)) {
             assertThatThrownBy(() -> models.defaultConversationModel().respond(
-                    new ModelRequest(List.of(), new ToolSnapshot(List.of()), ModelRequest.Purpose.ANSWER), () -> 1))
+                    new ModelRequest(List.of(), new ToolSnapshot(List.of()), ModelRequest.Purpose.ANSWER), () -> 1, ignored -> { }))
                     .isInstanceOfSatisfying(ModelCallFailure.class,
                             failure -> assertThat(failure.kind()).isEqualTo(ModelCallFailure.Kind.TERMINAL));
             assertThat(terminalRequests).hasValue(1);
@@ -235,7 +282,7 @@ class OpenAiConfiguredModelTest {
         contextServer.start();
         try (ConfiguredModels models = configuredModels(contextServer)) {
             assertThatThrownBy(() -> models.defaultConversationModel().respond(
-                    new ModelRequest(List.of(), new ToolSnapshot(List.of()), ModelRequest.Purpose.ANSWER), () -> 1))
+                    new ModelRequest(List.of(), new ToolSnapshot(List.of()), ModelRequest.Purpose.ANSWER), () -> 1, ignored -> { }))
                     .isInstanceOfSatisfying(ModelCallFailure.class,
                             failure -> assertThat(failure.kind()).isEqualTo(ModelCallFailure.Kind.CONTEXT_TOO_LARGE));
             assertThat(contextRequests).hasValue(1);
@@ -265,7 +312,7 @@ class OpenAiConfiguredModelTest {
         server.start();
         try (ConfiguredModels models = configuredModels(server, Duration.ofMillis(50))) {
             assertThatThrownBy(() -> models.defaultConversationModel().respond(
-                    new ModelRequest(List.of(), new ToolSnapshot(List.of()), ModelRequest.Purpose.ANSWER), () -> 1))
+                    new ModelRequest(List.of(), new ToolSnapshot(List.of()), ModelRequest.Purpose.ANSWER), () -> 1, ignored -> { }))
                     .isInstanceOfSatisfying(ModelCallFailure.class,
                             failure -> assertThat(failure.kind()).isEqualTo(ModelCallFailure.Kind.TRANSIENT));
             assertThat(providerRequests).hasValue(1);
@@ -292,7 +339,7 @@ class OpenAiConfiguredModelTest {
                 (context, arguments) -> new com.java.system.sessionagent.tool.port.ToolOutput(false, Map.of()), ToolCapability.ORDINARY);
         try (ConfiguredModels models = configuredModels(server)) {
             ModelCallResult result = models.defaultConversationModel().respond(
-                    new ModelRequest(List.of(), new ToolSnapshot(List.of(tool)), ModelRequest.Purpose.ANSWER), () -> 1);
+                    new ModelRequest(List.of(), new ToolSnapshot(List.of(tool)), ModelRequest.Purpose.ANSWER), () -> 1, ignored -> { });
 
             assertThat(result.reply()).isEqualTo(new ModelReply.UseTools(Optional.of("Checking."), List.of(
                     new ToolRequest(new ToolCallId("call-lookup"), new ToolName("lookup"), Map.of("query", "fee")))));
@@ -312,7 +359,7 @@ class OpenAiConfiguredModelTest {
 
             ModelCallResult finalResult = models.defaultConversationModel().respond(
                     new ModelRequest(List.of(calls, observation), Map.of(calls.sequence(), continuation),
-                            new ToolSnapshot(List.of(tool)), ModelRequest.Purpose.ANSWER), () -> 2);
+                            new ToolSnapshot(List.of(tool)), ModelRequest.Purpose.ANSWER), () -> 2, ignored -> { });
 
             assertThat(finalResult.reply()).isEqualTo(new ModelReply.Text("The fee is 9."));
             assertThat(providerRequests).hasValue(2);
@@ -344,7 +391,7 @@ class OpenAiConfiguredModelTest {
                 MessageRole.TOOL, request.toolCallId(), "lookup", Map.of("isError", false, "result", Map.of("fee", 9)));
         try (ConfiguredModels models = configuredModels(server)) {
             ModelCallResult result = models.defaultConversationModel().respond(new ModelRequest(List.of(calls, observation),
-                    Map.of(), new ToolSnapshot(List.of()), ModelRequest.Purpose.ANSWER), () -> 1);
+                    Map.of(), new ToolSnapshot(List.of()), ModelRequest.Purpose.ANSWER), () -> 1, ignored -> { });
 
             assertThat(result.reply()).isEqualTo(new ModelReply.Text("After the tool."));
             assertThat(providerRequests).hasValue(1);

@@ -195,9 +195,13 @@ visible text. An old UTC observation remains static during a complete Runtime
 outage and is not a current liveness assertion. Replay/restart recover the same
 confirmed notice and cached provider permalink, not a guessed workspace URL.
 
-Keep provider SDKs inside their owning adapters. The conversation domain,
-application, ports, generic tool module, storage, web, and worker remain free of
-model, MCP, Google, and Slack SDK types. MCP connections remain independent: an
+Keep provider SDKs inside their owning adapters and bootstrap composition.
+Google and OpenAI SDK/provider-specific Spring AI types are permitted only in
+`model.adapter.springai` and `bootstrap`, not elsewhere in the model package.
+`RuntimeBoundaryTest` enforces this narrow boundary for both providers. The
+conversation domain, application, ports, generic tool module, storage, web, and
+worker remain free of model, MCP, Google, OpenAI, and Slack SDK types.
+MCP connections remain independent: an
 unavailable named server must not hide tools from another available server or
 prevent startup. Tool execution remains sequential in the model-provided order,
 with opaque observations passed back through the generic tool and conversation
@@ -434,6 +438,41 @@ ordinals cannot mutate accounting. Missing/invalid usage advances the watermark
 without known-token sums, so unknown reservations remain in the request denominator.
 SQL/arithmetic failures roll back and propagate to the caller; this store does not
 isolate optional-write failures from application processing.
+
+Each model port method requires a synchronous `ModelCallObservation` consumer.
+The Spring AI adapter retains the total ordinal returned by the pre-request
+reservation and emits exactly one observation immediately after a provider response
+returns, before ordinary reply normalization or intent/summary validation. This
+includes tool-loop responses, discarded last-budget tool responses, compaction,
+intent and wrap-up. Invalid output can still carry known cache usage. Reservation
+denial, invalid pre-dispatch history and provider exceptions emit no observation:
+the durable reserved attempt remains unknown across retries, reclaim and restart.
+A crash between reservation and dispatch is not proof of a billed provider request.
+
+Cache coverage requires explicit, nonnegative raw input/cache fields with cached
+input no greater than input; missing completion or total tokens do not affect it.
+Unsupported usage and omitted fields are unknown, never inferred zero. Provider
+types remain in the model adapter. Google accounting reads native optional fields
+rather than Spring's default-zero prompt getter. Configured OpenAI uses a typed SDK
+client/service response decorator because the pinned Spring mapper reads mandatory
+ordinary token fields before returning a response. Only usage shapes that mapper
+cannot safely consume have standard usage removed and original raw usage preserved
+in adapter-owned response metadata. Valid ordinary responses pass through unchanged;
+the adapter never fabricates ordinary `ModelUsage` or checkpoint availability to
+recover a cache pair. SDK transport headers, status, body, ownership and other
+operations delegate unchanged; no transport rewriting, added request or provider
+retry is involved.
+
+`JobCacheUsageRecorder` routes observations from ordinary execution, compaction and
+handoff into one extra fenced store transaction per returned response. It catches
+only `RuntimeException` from this optional usage write, leaving that reservation
+unknown if the write fails. It does not fail a valid answer, initiate recovery or
+request another model response. Required storage operations and fatal errors keep
+their existing failure behavior. Cancellation requested after a response does not
+erase its usage. Durable cache accounting is independent of the existing
+request-shape and response-boundary proof used for context usage checkpoints:
+neither history/checkpoint atomicity nor tool-batch recovery semantics change.
+
 
 `JobCacheReport` distinguishes no calls, unavailable usage, partial known-subset
 usage, complete usage, and complete zero-input usage. Ratios use summed cached

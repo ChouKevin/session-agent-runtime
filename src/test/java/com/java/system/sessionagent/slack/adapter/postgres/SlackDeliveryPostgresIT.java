@@ -1,5 +1,6 @@
 package com.java.system.sessionagent.slack.adapter.postgres;
 
+import com.java.system.sessionagent.conversation.domain.ModelCallObservation;
 import com.java.system.sessionagent.conversation.domain.IntentRequest;
 import com.java.system.sessionagent.conversation.domain.IntentResult;
 
@@ -69,7 +70,6 @@ import com.java.system.sessionagent.conversation.domain.ModelDescriptor;
 import com.java.system.sessionagent.conversation.domain.ModelReply;
 import com.java.system.sessionagent.conversation.domain.ModelRequest;
 import com.java.system.sessionagent.conversation.domain.ModelRouteId;
-import com.java.system.sessionagent.conversation.domain.ModelUsage;
 import com.java.system.sessionagent.conversation.domain.MessageReceipt;
 import com.java.system.sessionagent.conversation.domain.MessageWorkClaim;
 import com.java.system.sessionagent.conversation.domain.ToolCallId;
@@ -630,7 +630,7 @@ class SlackDeliveryPostgresIT {
         CountDownLatch modelStarted = new CountDownLatch(1);
         CountDownLatch releaseModel = new CountDownLatch(1);
         ConversationModel model = new ConversationModel() {
-            @Override public IntentResult classifyIntent(IntentRequest request, ModelCallReservation reservation) {
+            @Override public IntentResult classifyIntent(IntentRequest request, ModelCallReservation reservation, Consumer<ModelCallObservation> observationObserver) {
                 throw new AssertionError("Unexpected intent request in ordinary-job fixture");
             }
             @Override
@@ -644,7 +644,7 @@ class SlackDeliveryPostgresIT {
             }
 
             @Override
-            public ModelCallResult respond(ModelRequest request, ModelCallReservation reservation, Consumer<ModelUsage> observer) {
+            public ModelCallResult respond(ModelRequest request, ModelCallReservation reservation, Consumer<ModelCallObservation> observer) {
                 reservation.reserve();
                 modelStarted.countDown();
                 try {
@@ -1434,7 +1434,7 @@ class SlackDeliveryPostgresIT {
     private static ConversationModel successfulModel() {
         ModelDescriptor descriptor = new ModelDescriptor(new ModelRouteId("observability-test"), "fake", 1_000_000);
         return new ConversationModel() {
-            @Override public IntentResult classifyIntent(IntentRequest request, ModelCallReservation reservation) {
+            @Override public IntentResult classifyIntent(IntentRequest request, ModelCallReservation reservation, Consumer<ModelCallObservation> observationObserver) {
                 throw new AssertionError("Unexpected intent request in ordinary-job fixture");
             }
             @Override
@@ -1451,7 +1451,7 @@ class SlackDeliveryPostgresIT {
             public ModelCallResult respond(
                     ModelRequest request,
                     ModelCallReservation reservation,
-                    Consumer<ModelUsage> usageObserver) {
+                    Consumer<ModelCallObservation> usageObserver) {
                 reservation.reserve();
                 return new ModelCallResult(new ModelReply.Text("done"), Optional.empty());
             }

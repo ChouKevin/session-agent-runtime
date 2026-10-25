@@ -2,6 +2,11 @@ package com.java.system.sessionagent.bootstrap.configuration;
 
 import com.baomidou.mybatisplus.autoconfigure.ConfigurationCustomizer;
 import com.google.genai.errors.ApiException;
+import com.openai.client.OpenAIClient;
+import com.java.system.sessionagent.model.adapter.springai.OpenAiUsagePreservingClient;
+import io.micrometer.observation.ObservationRegistry;
+import org.springframework.ai.openai.AbstractOpenAiOptions;
+import org.springframework.ai.openai.setup.OpenAiSetup;
 import com.java.system.sessionagent.conversation.application.MessageService;
 import com.java.system.sessionagent.conversation.application.SessionModelService;
 import com.java.system.sessionagent.conversation.application.ConversationQueryService;
@@ -92,6 +97,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -253,7 +259,22 @@ public class RuntimeConfiguration {
             if (profile.reasoningEffort() != null) { // cs-allow provider option is optional
                 options.reasoningEffort(profile.reasoningEffort());
             }
-            return new CreatedChatModel(OpenAiChatModel.builder().options(options.build()).build(), Optional.empty());
+            OpenAiChatOptions configuredOptions = options.build();
+            OpenAIClient client = new OpenAiUsagePreservingClient(OpenAiSetup.setupSyncClient(
+                    configuredOptions.getBaseUrl(), configuredOptions.getApiKey(), configuredOptions.getCredential(),
+                    configuredOptions.getMicrosoftDeploymentName(), configuredOptions.getMicrosoftFoundryServiceVersion(),
+                    configuredOptions.getOrganizationId(), configuredOptions.isMicrosoftFoundry(),
+                    configuredOptions.isGitHubModels(), configuredOptions.getModel(),
+                    Objects.requireNonNullElse(configuredOptions.getTimeout(), AbstractOpenAiOptions.DEFAULT_TIMEOUT),
+                    configuredOptions.getMaxRetries(), configuredOptions.getProxy(), configuredOptions.getCustomHeaders(),
+                    ObservationRegistry.NOOP, null, List.of()));
+            try {
+                return new CreatedChatModel(OpenAiChatModel.builder().options(configuredOptions)
+                        .openAiClient(client).openAiClientAsync(client.async()).build(), Optional.of(client::close));
+            } catch (RuntimeException | Error failure) {
+                closeResource(client::close, failure);
+                throw failure;
+            }
         }
         throw new IllegalArgumentException("Unsupported configured model provider");
     }

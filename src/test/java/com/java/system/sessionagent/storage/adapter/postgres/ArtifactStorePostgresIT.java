@@ -1,5 +1,6 @@
 package com.java.system.sessionagent.storage.adapter.postgres;
 
+import com.java.system.sessionagent.conversation.domain.ModelCallObservation;
 import com.java.system.sessionagent.conversation.domain.IntentRequest;
 import com.java.system.sessionagent.conversation.domain.IntentResult;
 
@@ -16,7 +17,6 @@ import com.java.system.sessionagent.conversation.domain.ModelCallResult;
 import com.java.system.sessionagent.conversation.domain.ModelReply;
 import com.java.system.sessionagent.conversation.domain.ModelRequest;
 import com.java.system.sessionagent.conversation.domain.ModelRouteId;
-import com.java.system.sessionagent.conversation.domain.ModelUsage;
 import com.java.system.sessionagent.conversation.domain.ToolRequest;
 import com.java.system.sessionagent.conversation.port.in.MessageJobProcessingResult;
 import com.java.system.sessionagent.conversation.port.out.ConversationModel;
@@ -126,7 +126,7 @@ class ArtifactStorePostgresIT {
         AtomicInteger requests = new AtomicInteger();
         ConversationModel model =
                 new ConversationModel() {
-                    @Override public IntentResult classifyIntent(IntentRequest request, ModelCallReservation reservation) {
+                    @Override public IntentResult classifyIntent(IntentRequest request, ModelCallReservation reservation, Consumer<ModelCallObservation> observationObserver) {
                         throw new AssertionError("Unexpected intent request in ordinary-job fixture");
                     }
                     @Override
@@ -137,7 +137,7 @@ class ArtifactStorePostgresIT {
                     public ModelCallResult respond(
                             ModelRequest request,
                             ModelCallReservation reservation,
-                            Consumer<ModelUsage> usage) {
+                            Consumer<ModelCallObservation> usage) {
                         reservation.reserve();
                         ModelReply reply = requests.getAndIncrement() == 0
                                 ? new ModelReply.UseTools(Optional.of("Saving"), List.of(

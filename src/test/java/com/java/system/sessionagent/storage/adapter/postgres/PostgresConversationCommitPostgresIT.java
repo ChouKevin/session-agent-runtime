@@ -1,5 +1,6 @@
 package com.java.system.sessionagent.storage.adapter.postgres;
 
+import com.java.system.sessionagent.conversation.domain.ModelCallObservation;
 import com.java.system.sessionagent.conversation.domain.IntentRequest;
 import com.java.system.sessionagent.conversation.domain.IntentResult;
 
@@ -156,11 +157,11 @@ class PostgresConversationCommitPostgresIT {
                         (context, arguments) -> { secondCalls.incrementAndGet(); return output; }, ToolCapability.ORDINARY)));
         List<ModelRequest> requests = new ArrayList<>();
         ConversationModel model = new ConversationModel() {
-            @Override public IntentResult classifyIntent(IntentRequest request, ModelCallReservation reservation) {
+            @Override public IntentResult classifyIntent(IntentRequest request, ModelCallReservation reservation, Consumer<ModelCallObservation> observationObserver) {
                 throw new AssertionError("Unexpected intent request");
             }
             @Override public ModelRouteId routeId() { return new ModelRouteId("test"); }
-            @Override public ModelCallResult respond(ModelRequest request, ModelCallReservation reservation, Consumer<ModelUsage> observer) {
+            @Override public ModelCallResult respond(ModelRequest request, ModelCallReservation reservation, Consumer<ModelCallObservation> observer) {
                 reservation.reserve();
                 requests.add(request);
                 return requests.size() == 1
@@ -374,11 +375,11 @@ class PostgresConversationCommitPostgresIT {
         }).when(interrupted).append(org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any());
         AtomicInteger requests = new AtomicInteger();
         ConversationModel model = new ConversationModel() {
-            @Override public IntentResult classifyIntent(IntentRequest request, ModelCallReservation reservation) {
+            @Override public IntentResult classifyIntent(IntentRequest request, ModelCallReservation reservation, Consumer<ModelCallObservation> observationObserver) {
                 throw new AssertionError("Unexpected intent request in ordinary-job fixture");
             }
             @Override public ModelRouteId routeId() { return new ModelRouteId("test"); }
-            @Override public ModelCallResult respond(ModelRequest request, ModelCallReservation reservation, Consumer<ModelUsage> observer) {
+            @Override public ModelCallResult respond(ModelRequest request, ModelCallReservation reservation, Consumer<ModelCallObservation> observer) {
                 reservation.reserve();
                 requests.incrementAndGet();
                 return new ModelCallResult(request.purpose() == ModelRequest.Purpose.WRAP_UP
@@ -635,20 +636,20 @@ class PostgresConversationCommitPostgresIT {
                 }, ToolCapability.ORDINARY)));
         AtomicInteger answers = new AtomicInteger();
         ConversationModel model = new ConversationModel() {
-            @Override public IntentResult classifyIntent(IntentRequest request, ModelCallReservation reservation) {
+            @Override public IntentResult classifyIntent(IntentRequest request, ModelCallReservation reservation, Consumer<ModelCallObservation> observationObserver) {
                 throw new AssertionError("Unexpected intent request");
             }
             @Override public ModelRouteId routeId() { return descriptor.routeId(); }
             @Override public ModelDescriptor descriptor() { return descriptor; }
             @Override public String systemPrompt() { return "system"; }
-            @Override public String summarize(ContextCompactionRequest request, ModelCallReservation reservation) {
+            @Override public String summarize(ContextCompactionRequest request, ModelCallReservation reservation, Consumer<ModelCallObservation> observationObserver) {
                 calls.add("summary");
                 assertThat(request.history()).filteredOn(UserMessage.class::isInstance)
                         .extracting(message -> ((UserMessage) message).message()).contains(interveningMessage);
                 reservation.reserve();
                 return "summary including intervening user";
             }
-            @Override public ModelCallResult respond(ModelRequest request, ModelCallReservation reservation, Consumer<ModelUsage> observer) {
+            @Override public ModelCallResult respond(ModelRequest request, ModelCallReservation reservation, Consumer<ModelCallObservation> observer) {
                 calls.add("answer");
                 reservation.reserve();
                 if (answers.incrementAndGet() == 1) {
@@ -691,7 +692,7 @@ class PostgresConversationCommitPostgresIT {
         ModelDescriptor descriptor = new ModelDescriptor(new ModelRouteId("google-genai"), "gemini-3.1-flash-lite", 1_048_576);
         ModelUsage usage = new ModelUsage(50, 20, 70, true);
         ConversationModel model = new ConversationModel() {
-            @Override public IntentResult classifyIntent(IntentRequest request, ModelCallReservation reservation) {
+            @Override public IntentResult classifyIntent(IntentRequest request, ModelCallReservation reservation, Consumer<ModelCallObservation> observationObserver) {
                 throw new AssertionError("Unexpected intent request in ordinary-job fixture");
             }
             @Override public ModelRouteId routeId() { return descriptor.routeId(); }
@@ -700,9 +701,8 @@ class PostgresConversationCommitPostgresIT {
             @Override public ModelCallResult respond(
                     ModelRequest request,
                     ModelCallReservation reservation,
-                    Consumer<ModelUsage> usageObserver) {
+                    Consumer<ModelCallObservation> usageObserver) {
                 reservation.reserve();
-                usageObserver.accept(usage);
                 return new ModelCallResult(new ModelReply.Text("done"), Optional.empty(), usage);
             }
         };

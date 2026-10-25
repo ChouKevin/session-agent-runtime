@@ -1,5 +1,6 @@
 package com.java.system.sessionagent.conversation;
 
+import com.java.system.sessionagent.conversation.domain.ModelCallObservation;
 import com.java.system.sessionagent.conversation.application.MessageJobRetryPolicy;
 import com.java.system.sessionagent.conversation.application.JobProcessor;
 import com.java.system.sessionagent.conversation.domain.MessageJobId;
@@ -13,7 +14,6 @@ import com.java.system.sessionagent.conversation.domain.ModelCallResult;
 import com.java.system.sessionagent.conversation.domain.ModelReply;
 import com.java.system.sessionagent.conversation.domain.ModelRequest;
 import com.java.system.sessionagent.conversation.domain.ModelRouteId;
-import com.java.system.sessionagent.conversation.domain.ModelUsage;
 import com.java.system.sessionagent.conversation.domain.SessionId;
 import com.java.system.sessionagent.conversation.domain.SessionSequence;
 import com.java.system.sessionagent.conversation.domain.ToolCallId;
@@ -84,7 +84,7 @@ final class MessageJobTestFixtures {
     }
 
     static ConversationModel model(ModelRouteId routeId, ModelResponder responder) {
-        return model(routeId, (request, reservation) -> { throw new AssertionError("Unexpected intent request"); }, responder);
+        return model(routeId, (request, reservation, observationObserver) -> { throw new AssertionError("Unexpected intent request"); }, responder);
     }
 
     static ConversationModel model(ModelRouteId routeId, IntentResponder intentResponder, ModelResponder responder) {
@@ -94,8 +94,8 @@ final class MessageJobTestFixtures {
                 return routeId;
             }
             @Override
-            public IntentResult classifyIntent(IntentRequest request, ModelCallReservation reservation) {
-                return intentResponder.classify(request, reservation);
+            public IntentResult classifyIntent(IntentRequest request, ModelCallReservation reservation, Consumer<ModelCallObservation> observationObserver) {
+                return intentResponder.classify(request, reservation, observationObserver);
             }
 
 
@@ -103,7 +103,7 @@ final class MessageJobTestFixtures {
             public ModelCallResult respond(
                     ModelRequest request,
                     ModelCallReservation reservation,
-                    Consumer<ModelUsage> usageObserver) {
+                    Consumer<ModelCallObservation> usageObserver) {
                 return responder.respond(request, reservation, usageObserver);
             }
         };
@@ -152,7 +152,7 @@ final class MessageJobTestFixtures {
     }
 
     interface IntentResponder {
-        IntentResult classify(IntentRequest request, ModelCallReservation reservation);
+        IntentResult classify(IntentRequest request, ModelCallReservation reservation, Consumer<ModelCallObservation> observationObserver);
     }
 
     interface ModelResponder {
@@ -160,7 +160,7 @@ final class MessageJobTestFixtures {
         ModelCallResult respond(
                 ModelRequest request,
                 ModelCallReservation reservation,
-                Consumer<ModelUsage> usageObserver);
+                Consumer<ModelCallObservation> usageObserver);
     }
 
     private MessageJobTestFixtures() {

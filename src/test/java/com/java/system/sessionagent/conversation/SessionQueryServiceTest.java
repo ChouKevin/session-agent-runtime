@@ -1,5 +1,6 @@
 package com.java.system.sessionagent.conversation;
 
+import com.java.system.sessionagent.conversation.domain.ModelCallObservation;
 import com.java.system.sessionagent.conversation.domain.IntentRequest;
 import com.java.system.sessionagent.conversation.domain.IntentResult;
 
@@ -105,13 +106,13 @@ class SessionQueryServiceTest {
                 new ContextUsageCheckpoint(descriptor, 1, new SessionSequence(3), 900_000, 99_999, 999_999, "stale-eligibility", 1, CREATED_AT)));
         AtomicReference<ModelRequest> actual = new AtomicReference<>();
         ConversationModel model = new ConversationModel() {
-            @Override public IntentResult classifyIntent(IntentRequest request, ModelCallReservation reservation) {
+            @Override public IntentResult classifyIntent(IntentRequest request, ModelCallReservation reservation, Consumer<ModelCallObservation> observationObserver) {
                 throw new AssertionError("Unexpected intent request in ordinary-job fixture");
             }
             @Override public ModelRouteId routeId() { return TEST_ROUTE_ID; }
             @Override public ModelDescriptor descriptor() { return descriptor; }
             @Override public String systemPrompt() { return "system"; }
-            @Override public ModelCallResult respond(ModelRequest request, ModelCallReservation reservation, Consumer<ModelUsage> observer) {
+            @Override public ModelCallResult respond(ModelRequest request, ModelCallReservation reservation, Consumer<ModelCallObservation> observer) {
                 actual.set(request);
                 reservation.reserve();
                 return result(new ModelReply.Text("done"));
@@ -233,7 +234,7 @@ class SessionQueryServiceTest {
 
     private static ConversationModel model(ModelDescriptor descriptor) {
         return new ConversationModel() {
-            @Override public IntentResult classifyIntent(IntentRequest request, ModelCallReservation reservation) {
+            @Override public IntentResult classifyIntent(IntentRequest request, ModelCallReservation reservation, Consumer<ModelCallObservation> observationObserver) {
                 throw new AssertionError("Unexpected intent request in ordinary-job fixture");
             }
             @Override
@@ -252,10 +253,10 @@ class SessionQueryServiceTest {
             }
 
             @Override
-            public com.java.system.sessionagent.conversation.domain.ModelCallResult respond(
-                    com.java.system.sessionagent.conversation.domain.ModelRequest request,
-                    com.java.system.sessionagent.conversation.port.out.ModelCallReservation reservation,
-                    java.util.function.Consumer<com.java.system.sessionagent.conversation.domain.ModelUsage> usageObserver) {
+            public ModelCallResult respond(
+                    ModelRequest request,
+                    ModelCallReservation reservation,
+                    Consumer<ModelCallObservation> usageObserver) {
                 throw new UnsupportedOperationException("Session query does not call the model");
             }
         };

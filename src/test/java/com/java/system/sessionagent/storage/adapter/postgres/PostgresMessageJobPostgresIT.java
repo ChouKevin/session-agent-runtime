@@ -1,7 +1,7 @@
 package com.java.system.sessionagent.storage.adapter.postgres;
 
-import com.java.system.sessionagent.conversation.domain.CacheTokenUsage;
 import com.java.system.sessionagent.conversation.domain.ModelCallObservation;
+import com.java.system.sessionagent.conversation.domain.CacheTokenUsage;
 import com.java.system.sessionagent.conversation.domain.IntentRequest;
 import com.java.system.sessionagent.conversation.domain.IntentResult;
 
@@ -39,7 +39,6 @@ import com.java.system.sessionagent.conversation.domain.ModelReply.UseTools;
 import com.java.system.sessionagent.conversation.domain.ModelRequest;
 import com.java.system.sessionagent.conversation.domain.ModelRouteId;
 import com.java.system.sessionagent.conversation.domain.ModelSelection;
-import com.java.system.sessionagent.conversation.domain.ModelUsage;
 import com.java.system.sessionagent.conversation.domain.SessionId;
 import com.java.system.sessionagent.conversation.domain.SessionMessage;
 import com.java.system.sessionagent.conversation.domain.ToolCallId;
@@ -493,7 +492,7 @@ class PostgresMessageJobPostgresIT {
         MessageWorkClaim recovered = restarted.claimNext("new", Duration.ofSeconds(30)).orElseThrow();
         AtomicInteger modelCalls = new AtomicInteger();
         ConversationModel model = new ConversationModel() {
-            @Override public IntentResult classifyIntent(IntentRequest request, ModelCallReservation reservation) {
+            @Override public IntentResult classifyIntent(IntentRequest request, ModelCallReservation reservation, Consumer<ModelCallObservation> observationObserver) {
                 throw new AssertionError("Unexpected intent request in ordinary-job fixture");
             }
             @Override
@@ -502,7 +501,7 @@ class PostgresMessageJobPostgresIT {
             }
 
             @Override
-            public ModelCallResult respond(ModelRequest request, ModelCallReservation reservation, Consumer<ModelUsage> observer) {
+            public ModelCallResult respond(ModelRequest request, ModelCallReservation reservation, Consumer<ModelCallObservation> observer) {
                 modelCalls.incrementAndGet();
                 throw new AssertionError("Cancelled reclaimed jobs must not call the provider");
             }
@@ -530,7 +529,7 @@ class PostgresMessageJobPostgresIT {
         AtomicInteger modelCalls = new AtomicInteger();
         AtomicInteger secondCalls = new AtomicInteger();
         ConversationModel model = new ConversationModel() {
-            @Override public IntentResult classifyIntent(IntentRequest request, ModelCallReservation reservation) {
+            @Override public IntentResult classifyIntent(IntentRequest request, ModelCallReservation reservation, Consumer<ModelCallObservation> observationObserver) {
                 throw new AssertionError("Unexpected intent request in ordinary-job fixture");
             }
             @Override
@@ -539,7 +538,7 @@ class PostgresMessageJobPostgresIT {
             }
 
             @Override
-            public ModelCallResult respond(ModelRequest request, ModelCallReservation reservation, Consumer<ModelUsage> observer) {
+            public ModelCallResult respond(ModelRequest request, ModelCallReservation reservation, Consumer<ModelCallObservation> observer) {
                 reservation.reserve();
                 modelCalls.incrementAndGet();
                 return new ModelCallResult(new UseTools(Optional.of("checking"), List.of(
@@ -779,7 +778,7 @@ class PostgresMessageJobPostgresIT {
         CountDownLatch releaseFinalModel = new CountDownLatch(1);
         AtomicInteger turns = new AtomicInteger();
         ConversationModel model = new ConversationModel() {
-            @Override public IntentResult classifyIntent(IntentRequest request, ModelCallReservation reservation) {
+            @Override public IntentResult classifyIntent(IntentRequest request, ModelCallReservation reservation, Consumer<ModelCallObservation> observationObserver) {
                 throw new AssertionError("Unexpected intent request in ordinary-job fixture");
             }
             @Override
@@ -789,7 +788,7 @@ class PostgresMessageJobPostgresIT {
 
             @Override
             public ModelCallResult respond(ModelRequest request, ModelCallReservation reservation,
-                    Consumer<ModelUsage> usageObserver) {
+                    Consumer<ModelCallObservation> usageObserver) {
                 reservation.reserve();
                 if (turns.incrementAndGet() == 1) {
                     modelStarted.countDown();
@@ -1248,7 +1247,7 @@ class PostgresMessageJobPostgresIT {
             AtomicInteger laterToolCalls) {
         ModelRouteId routeId = new ModelRouteId("test");
         ConversationModel model = new ConversationModel() {
-            @Override public IntentResult classifyIntent(IntentRequest request, ModelCallReservation reservation) {
+            @Override public IntentResult classifyIntent(IntentRequest request, ModelCallReservation reservation, Consumer<ModelCallObservation> observationObserver) {
                 throw new AssertionError("Unexpected intent request in ordinary-job fixture");
             }
             @Override
@@ -1260,7 +1259,7 @@ class PostgresMessageJobPostgresIT {
             public ModelCallResult respond(
                     ModelRequest request,
                     ModelCallReservation reservation,
-                    Consumer<ModelUsage> usageObserver) {
+                    Consumer<ModelCallObservation> usageObserver) {
                 reservation.reserve();
                 return new ModelCallResult(new UseTools(Optional.empty(), List.of(
                         new ToolRequest(new ToolCallId("first"), new ToolName("first"), Map.of()),

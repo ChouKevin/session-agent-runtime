@@ -1,5 +1,7 @@
 package com.java.system.sessionagent.conversation;
 
+import com.java.system.sessionagent.conversation.domain.CacheTokenUsage;
+import com.java.system.sessionagent.conversation.domain.ModelCallObservation;
 import com.java.system.sessionagent.conversation.domain.IntentRequest;
 import com.java.system.sessionagent.conversation.domain.IntentResult;
 
@@ -148,6 +150,7 @@ class MessageJobCancellationTest {
             if (fails) {
                 throw ModelCallFailure.transientFailure();
             }
+            usage.accept(new ModelCallObservation(1, Optional.of(new CacheTokenUsage(8, 3))));
             return result(new ModelReply.Text("not committed"));
         });
 
@@ -156,6 +159,11 @@ class MessageJobCancellationTest {
 
         assertThat(requests).hasValue(1);
         verify(store, never()).scheduleRetry(any(), any(), any());
+        if (fails) {
+            verify(store, never()).recordModelUsage(any(), any());
+        } else {
+            verify(store).recordModelUsage(claim, new ModelCallObservation(1, Optional.of(new CacheTokenUsage(8, 3))));
+        }
         assertCancellation(capturedBatch(store, claim));
     }
 
@@ -316,13 +324,13 @@ class MessageJobCancellationTest {
                 binding("second", arguments -> { invoked.add("second"); return secondActual; })));
         ModelDescriptor descriptor = new ModelDescriptor(TEST_ROUTE_ID, "checkpoint-model", 12_000);
         ConversationModel model = new ConversationModel() {
-            @Override public IntentResult classifyIntent(IntentRequest request, ModelCallReservation reservation) {
+            @Override public IntentResult classifyIntent(IntentRequest request, ModelCallReservation reservation, Consumer<ModelCallObservation> observationObserver) {
                 throw new AssertionError("Unexpected intent request in ordinary-job fixture");
             }
             @Override public ModelRouteId routeId() { return TEST_ROUTE_ID; }
             @Override public ModelDescriptor descriptor() { return descriptor; }
             @Override public String systemPrompt() { return "system"; }
-            @Override public ModelCallResult respond(ModelRequest request, ModelCallReservation reservation, Consumer<ModelUsage> usage) {
+            @Override public ModelCallResult respond(ModelRequest request, ModelCallReservation reservation, Consumer<ModelCallObservation> usage) {
                 reservation.reserve();
                 modelCalls.incrementAndGet();
                 return new ModelCallResult(new ModelReply.UseTools(Optional.of("Checking"), List.of(
@@ -501,13 +509,13 @@ class MessageJobCancellationTest {
         doReturn(JobStatus.CANCELLED).when(store).append(eq(claim), any(), any());
         AtomicInteger summaries = new AtomicInteger();
         ConversationModel model = new ConversationModel() {
-            @Override public IntentResult classifyIntent(IntentRequest request, ModelCallReservation reservation) {
+            @Override public IntentResult classifyIntent(IntentRequest request, ModelCallReservation reservation, Consumer<ModelCallObservation> observationObserver) {
                 throw new AssertionError("Unexpected intent request in ordinary-job fixture");
             }
             @Override public ModelRouteId routeId() { return TEST_ROUTE_ID; }
             @Override public ModelDescriptor descriptor() { return new ModelDescriptor(TEST_ROUTE_ID, "capacity", 12_000); }
             @Override public String systemPrompt() { return "system"; }
-            @Override public String summarize(ContextCompactionRequest request, ModelCallReservation reservation) {
+            @Override public String summarize(ContextCompactionRequest request, ModelCallReservation reservation, Consumer<ModelCallObservation> observationObserver) {
                 reservation.reserve();
                 summaries.incrementAndGet();
                 cancelled.set(true);
@@ -516,7 +524,7 @@ class MessageJobCancellationTest {
                 }
                 return "summary";
             }
-            @Override public ModelCallResult respond(ModelRequest request, ModelCallReservation reservation, Consumer<ModelUsage> usage) {
+            @Override public ModelCallResult respond(ModelRequest request, ModelCallReservation reservation, Consumer<ModelCallObservation> usage) {
                 throw new AssertionError("Ordinary model request must not start after cancellation");
             }
         };

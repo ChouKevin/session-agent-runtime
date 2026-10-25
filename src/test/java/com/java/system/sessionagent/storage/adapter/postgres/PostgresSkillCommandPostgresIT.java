@@ -1,5 +1,6 @@
 package com.java.system.sessionagent.storage.adapter.postgres;
 
+import com.java.system.sessionagent.conversation.domain.ModelCallObservation;
 import com.java.system.sessionagent.conversation.domain.IntentRequest;
 import com.java.system.sessionagent.conversation.domain.IntentResult;
 
@@ -13,7 +14,6 @@ import com.java.system.sessionagent.conversation.domain.ModelDescriptor;
 import com.java.system.sessionagent.conversation.domain.ModelReply;
 import com.java.system.sessionagent.conversation.domain.ModelRequest;
 import com.java.system.sessionagent.conversation.domain.ModelRouteId;
-import com.java.system.sessionagent.conversation.domain.ModelUsage;
 import com.java.system.sessionagent.conversation.domain.SessionMessage;
 import com.java.system.sessionagent.conversation.port.out.ConversationModel;
 import com.java.system.sessionagent.conversation.port.out.ModelCallReservation;
@@ -209,17 +209,17 @@ class PostgresSkillCommandPostgresIT {
         List<List<SessionMessage>> summaries = new ArrayList<>();
         List<List<SessionMessage>> responses = new ArrayList<>();
         ConversationModel model = new ConversationModel() {
-            @Override public IntentResult classifyIntent(IntentRequest request, ModelCallReservation reservation) {
+            @Override public IntentResult classifyIntent(IntentRequest request, ModelCallReservation reservation, Consumer<ModelCallObservation> observationObserver) {
                 throw new AssertionError("Unexpected intent request in ordinary-job fixture");
             }
             @Override public ModelRouteId routeId() { return new ModelRouteId("test"); }
             @Override public ModelDescriptor descriptor() { return new ModelDescriptor(routeId(), "bounded", 12_000); }
-            @Override public String summarize(ContextCompactionRequest request, ModelCallReservation reservation) {
+            @Override public String summarize(ContextCompactionRequest request, ModelCallReservation reservation, Consumer<ModelCallObservation> observationObserver) {
                 reservation.reserve();
                 summaries.add(request.history());
                 return "safe summary";
             }
-            @Override public ModelCallResult respond(ModelRequest request, ModelCallReservation reservation, Consumer<ModelUsage> usage) {
+            @Override public ModelCallResult respond(ModelRequest request, ModelCallReservation reservation, Consumer<ModelCallObservation> usage) {
                 reservation.reserve();
                 responses.add(request.history());
                 return new ModelCallResult(new ModelReply.Text("done"), Optional.empty());

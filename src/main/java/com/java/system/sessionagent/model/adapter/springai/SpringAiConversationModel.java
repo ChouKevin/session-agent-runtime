@@ -1,5 +1,7 @@
 package com.java.system.sessionagent.model.adapter.springai;
 
+import java.util.function.Consumer;
+import com.java.system.sessionagent.conversation.domain.ModelCallObservation;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -183,9 +185,10 @@ public final class SpringAiConversationModel implements ConversationModel {
     @Override
     public ModelCallResult respond(
             ModelRequest request,
-            ModelCallReservation reservation) {
+            ModelCallReservation reservation, Consumer<ModelCallObservation> usageObserver) {
         Assert.notNull(request, "Model request must not be null");
         Assert.notNull(reservation, "Model call reservation must not be null");
+        Assert.notNull(usageObserver, "Model call observation observer must not be null");
 
         Prompt prompt;
         try {
@@ -193,7 +196,7 @@ public final class SpringAiConversationModel implements ConversationModel {
         } catch (InvalidConversationHistoryException exception) {
             throw ModelCallFailure.invalidHistory();
         }
-        reservation.reserve();
+        int totalOrdinal = reservation.reserve();
         ChatResponse response;
         long requestStartedAt = System.nanoTime();
         try {
@@ -203,6 +206,7 @@ public final class SpringAiConversationModel implements ConversationModel {
             recordFailure("UNAVAILABLE", requestStartedAt);
             throw failure;
         }
+        usageObserver.accept(new ModelCallObservation(totalOrdinal, CacheTokenUsageExtractor.extractResponse(response)));
         ModelCallResult result;
         try {
             result = normalize(response, objectMapper, continuationHandler);
@@ -216,17 +220,10 @@ public final class SpringAiConversationModel implements ConversationModel {
     }
 
     @Override
-    public ModelCallResult respond(ModelRequest request, ModelCallReservation reservation, java.util.function.Consumer<ModelUsage> usageObserver) {
-        Assert.notNull(usageObserver, "Model usage observer must not be null");
-        ModelCallResult result = respond(request, reservation);
-        usageObserver.accept(result.usage());
-        return result;
-    }
-
-    @Override
-    public String summarize(ContextCompactionRequest request, ModelCallReservation reservation) {
+    public String summarize(ContextCompactionRequest request, ModelCallReservation reservation, Consumer<ModelCallObservation> observationObserver) {
         Assert.notNull(request, "Context compaction request must not be null");
         Assert.notNull(reservation, "Model call reservation must not be null");
+        Assert.notNull(observationObserver, "Model call observation observer must not be null");
         List<Message> messages = new ArrayList<>();
         messages.add(new org.springframework.ai.chat.messages.SystemMessage(compactionPrompt()));
         try {
@@ -242,7 +239,7 @@ public final class SpringAiConversationModel implements ConversationModel {
                 .toolCallbacks(List.of())
                 .build();
         Prompt prompt = new Prompt(List.copyOf(messages), noToolOptions);
-        reservation.reserve();
+        int totalOrdinal = reservation.reserve();
         long requestStartedAt = System.nanoTime();
         ChatResponse response;
         try {
@@ -252,6 +249,7 @@ public final class SpringAiConversationModel implements ConversationModel {
             recordFailure("UNAVAILABLE", requestStartedAt);
             throw failure;
         }
+        observationObserver.accept(new ModelCallObservation(totalOrdinal, CacheTokenUsageExtractor.extractResponse(response)));
         AssistantMessage message = firstActionableMessage(response).orElseThrow(ModelCallFailure::correctable);
         if (message.hasToolCalls() || !StringUtils.hasText(message.getText())) {
             recordFailure("OUTPUT_INVALID", requestStartedAt);
@@ -262,7 +260,8 @@ public final class SpringAiConversationModel implements ConversationModel {
     }
 
     @Override
-    public IntentResult classifyIntent(IntentRequest request, ModelCallReservation reservation) {
+    public IntentResult classifyIntent(IntentRequest request, ModelCallReservation reservation, Consumer<ModelCallObservation> observationObserver) {
+        Assert.notNull(observationObserver, "Model call observation observer must not be null");
         List<Message> messages = new ArrayList<>();
         messages.add(new org.springframework.ai.chat.messages.SystemMessage(request.directive()));
         try {
@@ -274,13 +273,14 @@ public final class SpringAiConversationModel implements ConversationModel {
                 "Current user message (sequence " + request.initiatingMessage().sequence().value() + "):\n"
                         + request.initiatingMessage().message()));
         Prompt prompt = new Prompt(List.copyOf(messages), options(List.of()));
-        reservation.reserve();
+        int totalOrdinal = reservation.reserve();
         ChatResponse response;
         try {
             response = chatModel.call(prompt);
         } catch (RuntimeException exception) {
             throw classifyProviderFailure(exception);
         }
+        observationObserver.accept(new ModelCallObservation(totalOrdinal, CacheTokenUsageExtractor.extractResponse(response)));
         AssistantMessage message = firstActionableMessage(response).orElseThrow(ModelCallFailure::correctable);
         if (message.hasToolCalls() || !StringUtils.hasText(message.getText())) {
             throw ModelCallFailure.correctable();

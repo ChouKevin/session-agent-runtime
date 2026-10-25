@@ -1,5 +1,7 @@
 package com.java.system.sessionagent.conversation;
 
+import com.java.system.sessionagent.conversation.domain.ModelCallObservation;
+import com.java.system.sessionagent.conversation.domain.CacheTokenUsage;
 import com.java.system.sessionagent.conversation.domain.ModelCallPurpose;
 import com.java.system.sessionagent.conversation.domain.ModelCallReservationResult;
 import com.java.system.sessionagent.conversation.domain.JobControl;
@@ -67,6 +69,36 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class MessageJobRecoveryTest {
+    @Test
+    void optional_usage_write_failure_keeps_the_answer_without_retrying_the_model() {
+        ConversationStore store = mockStore();
+        MessageWorkClaim claim = claim();
+        when(store.loadContextHistory(claim.sessionId())).thenReturn(contextHistory(List.of(user())));
+        when(store.reserveModelCall(eq(claim), eq(ModelCallPurpose.EXECUTION), eq(2), any()))
+                .thenReturn(new ModelCallReservationResult.Reserved(1, 1));
+        ModelCallObservation observation = new ModelCallObservation(1, Optional.of(new CacheTokenUsage(8, 3)));
+        Mockito.doThrow(ConversationStoreFailure.transientFailure(new IllegalStateException("usage write unavailable")))
+                .when(store).recordModelUsage(claim, observation);
+        AtomicInteger requests = new AtomicInteger();
+        ConversationModel model = model(TEST_ROUTE_ID, (request, reservation, observer) -> {
+            assertThat(reservation.reserve()).isEqualTo(1);
+            requests.incrementAndGet();
+            observer.accept(observation);
+            return result(new ModelReply.Text("The ordinary answer"));
+        });
+
+        assertThat(service(store, model, catalog()).process(claim, () -> true))
+                .isEqualTo(MessageJobProcessingResult.COMPLETED);
+
+        assertThat(requests).hasValue(1);
+        verify(store).recordModelUsage(claim, observation);
+        ArgumentCaptor<ConversationStore.MessageBatch> batch = ArgumentCaptor.forClass(ConversationStore.MessageBatch.class);
+        verify(store).append(eq(claim), batch.capture(), any());
+        assertThat(batch.getValue().messages()).containsExactly(new ConversationStore.AssistantData("The ordinary answer"));
+        verify(store, Mockito.never()).scheduleRetry(any(), any(), any());
+        verify(store, Mockito.never()).appendAndScheduleRetry(any(), any(), any(), any(), any());
+    }
+
     @Test
     void preserves_completed_tool_results_when_storage_failure_schedules_retry() {
         ConversationStore store = mockStore();

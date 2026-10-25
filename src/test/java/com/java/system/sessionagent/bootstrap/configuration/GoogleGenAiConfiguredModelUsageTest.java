@@ -1,5 +1,9 @@
 package com.java.system.sessionagent.bootstrap.configuration;
 
+import com.java.system.sessionagent.conversation.domain.ModelCallObservation;
+import com.java.system.sessionagent.conversation.domain.CacheTokenUsage;
+import java.util.ArrayList;
+import java.util.concurrent.atomic.AtomicInteger;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.genai.types.GenerateContentResponseUsageMetadata;
 import com.java.system.sessionagent.bootstrap.adapter.metrics.MicrometerConversationTelemetry;
@@ -37,6 +41,49 @@ class GoogleGenAiConfiguredModelUsageTest {
 
     private static final ModelRouteId GOOGLE_ROUTE_ID = new ModelRouteId("google-primary");
 
+    @ParameterizedTest(name = "Google raw usage: {0}")
+    @MethodSource("googleAccountingCases")
+    void records_only_explicit_valid_input_cache_pairs_independently_of_output_usage(
+            String scenario, Integer input, Integer cached, boolean outputPresent, Optional<CacheTokenUsage> expected) {
+        GenerateContentResponseUsageMetadata.Builder metadata = GenerateContentResponseUsageMetadata.builder();
+        Optional.ofNullable(input).ifPresent(metadata::promptTokenCount);
+        Optional.ofNullable(cached).ifPresent(metadata::cachedContentTokenCount);
+        if (outputPresent) {
+            metadata.candidatesTokenCount(2).totalTokenCount(10);
+        }
+        AtomicInteger requests = new AtomicInteger();
+        GoogleGenAiUsage usage = GoogleGenAiUsage.from(metadata.build());
+        ChatModel chat = new ChatModel() {
+            @Override public ToolCallingChatOptions getOptions() { return ToolCallingChatOptions.builder().build(); }
+            @Override public ChatResponse call(Prompt prompt) {
+                requests.incrementAndGet();
+                return new ChatResponse(List.of(new Generation(new AssistantMessage("Google response."))),
+                        ChatResponseMetadata.builder().usage(usage).build());
+            }
+        };
+        SpringAiConversationModel adapter = new SpringAiConversationModel(chat, new SystemPrompt(), new MicrometerConversationTelemetry(new SimpleMeterRegistry()),
+                new ObjectMapper(), new SpringAiMessagePartsHandler(GOOGLE_ROUTE_ID));
+        List<ModelCallObservation> observed = new ArrayList<>();
+        ModelCallResult result = adapter.respond(new ModelRequest(List.of(), new ToolSnapshot(List.of()), ModelRequest.Purpose.ANSWER),
+                () -> 4, observed::add);
+        assertThat(result.reply()).as(scenario).isEqualTo(new ModelReply.Text("Google response."));
+        assertThat(observed).as(scenario).containsExactly(new ModelCallObservation(4, expected));
+        assertThat(requests).hasValue(1);
+    }
+
+    private static Stream<Arguments> googleAccountingCases() {
+        return Stream.of(
+                Arguments.of("cache hit", 8, 3, true, Optional.of(new CacheTokenUsage(8, 3))),
+                Arguments.of("explicit cache zero", 8, 0, true, Optional.of(new CacheTokenUsage(8, 0))),
+                Arguments.of("explicit zero denominator", 0, 0, true, Optional.of(new CacheTokenUsage(0, 0))),
+                Arguments.of("omitted cache", 8, null, true, Optional.empty()),
+                Arguments.of("omitted input must not become zero", null, 0, true, Optional.empty()),
+                Arguments.of("cache exceeds input", 8, 9, true, Optional.empty()),
+                Arguments.of("negative input", -1, 0, true, Optional.empty()),
+                Arguments.of("negative cache", 8, -1, true, Optional.empty()),
+                Arguments.of("missing completion and total", 8, 3, false, Optional.of(new CacheTokenUsage(8, 3))));
+    }
+
     @ParameterizedTest(name = "Google GenAI cached input {0}")
     @MethodSource("googleCacheUsageCases")
     void maps_google_provider_cache_usage_to_common_telemetry(
@@ -63,7 +110,7 @@ class GoogleGenAiConfiguredModelUsageTest {
                 new SpringAiMessagePartsHandler(GOOGLE_ROUTE_ID));
 
         ModelCallResult result = model.respond(
-                new ModelRequest(List.of(), new ToolSnapshot(List.of()), ModelRequest.Purpose.ANSWER), () -> 1);
+                new ModelRequest(List.of(), new ToolSnapshot(List.of()), ModelRequest.Purpose.ANSWER), () -> 1, ignored -> { });
 
         assertThat(result.reply()).as(scenario).isEqualTo(new ModelReply.Text("Google response."));
         assertThat(result.usage()).as(scenario)

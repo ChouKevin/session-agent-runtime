@@ -101,7 +101,7 @@ class GoogleGenAiContinuationTest {
                     MessageRole.USER, "alice", "find the fee");
             AtomicInteger reservations = new AtomicInteger();
 
-            ModelCallResult first = model.respond(new ModelRequest(List.of(user), new ToolSnapshot(List.of()), ModelRequest.Purpose.ANSWER), reservations::incrementAndGet);
+            ModelCallResult first = model.respond(new ModelRequest(List.of(user), new ToolSnapshot(List.of()), ModelRequest.Purpose.ANSWER), reservations::incrementAndGet, ignored -> { });
             ModelReply.UseTools reply = (ModelReply.UseTools) first.reply();
             AssistantToolCallsMessage calls = new AssistantToolCallsMessage(sessionId, new SessionSequence(2), jobId,
                     Instant.EPOCH, MessageRole.ASSISTANT_TOOL_CALLS, reply.message(), reply.requests());
@@ -133,7 +133,7 @@ class GoogleGenAiContinuationTest {
             } else {
                 ModelCallResult result = model.respond(new ModelRequest(List.of(user, calls, observation),
                         Map.of(calls.sequence(), first.continuation().orElseThrow()), new ToolSnapshot(List.of()), ModelRequest.Purpose.ANSWER),
-                        reservations::incrementAndGet);
+                        reservations::incrementAndGet, ignored -> { });
                 assertThat(result.reply()).isEqualTo(new ModelReply.Text("The fee is 9."));
             }
 

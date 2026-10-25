@@ -40,12 +40,14 @@ public final class JobHandoffCoordinator {
             + "organize the existing evidence, or start a different question?";
 
     private final ConversationStore store;
+    private final JobCacheUsageRecorder cacheUsageRecorder;
     private final Clock clock;
     private final int maxExecutionCalls;
     private final ContextUsageEstimator estimator = new ContextUsageEstimator();
 
     public JobHandoffCoordinator(ConversationStore store, Clock clock, int maxExecutionCalls) {
         this.store = store;
+        this.cacheUsageRecorder = new JobCacheUsageRecorder(store);
         this.clock = clock;
         this.maxExecutionCalls = maxExecutionCalls;
     }
@@ -70,7 +72,8 @@ public final class JobHandoffCoordinator {
         }
         IntentResult result;
         try {
-            result = model.classifyIntent(request, () -> reserve(claim, guard, ModelCallPurpose.INTENT));
+            result = model.classifyIntent(request, () -> reserve(claim, guard, ModelCallPurpose.INTENT),
+                    observation -> cacheUsageRecorder.record(claim, observation));
         } catch (ModelCallFailure | AlreadyAttempted exception) {
             return new Decision(control, Optional.of(INTENT_FALLBACK));
         }
@@ -108,7 +111,8 @@ public final class JobHandoffCoordinator {
         try (ToolSnapshot empty = new ToolSnapshot(List.of())) {
             ModelRequest request = new ModelRequest(wrapHistory, visibleContinuations, empty, context.summary(), ModelRequest.Purpose.WRAP_UP);
             try {
-                ModelReply reply = model.respond(request, () -> reserve(claim, guard, ModelCallPurpose.WRAP_UP), ignored -> {}).reply();
+                ModelReply reply = model.respond(request, () -> reserve(claim, guard, ModelCallPurpose.WRAP_UP),
+                        observation -> cacheUsageRecorder.record(claim, observation)).reply();
                 checkOwnership(claim, guard);
                 return reply instanceof ModelReply.Text text ? text.message() : WRAP_FALLBACK;
             } catch (ModelCallFailure | AlreadyAttempted exception) {

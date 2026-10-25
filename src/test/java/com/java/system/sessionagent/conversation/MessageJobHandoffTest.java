@@ -1,5 +1,7 @@
 package com.java.system.sessionagent.conversation;
 
+import com.java.system.sessionagent.conversation.domain.ModelCallObservation;
+import com.java.system.sessionagent.conversation.domain.CacheTokenUsage;
 import com.java.system.sessionagent.conversation.domain.ContextCompaction;
 import com.java.system.sessionagent.conversation.domain.ContextSummary;
 import com.java.system.sessionagent.conversation.domain.ModelDescriptor;
@@ -93,8 +95,10 @@ class MessageJobHandoffTest {
                 .thenReturn(new ModelCallReservationResult.Reserved(3, 2));
         AtomicInteger providerRequests = new AtomicInteger();
         ConversationModel model = model(TEST_ROUTE_ID, (request, reservation, usage) -> {
-            reservation.reserve();
+            int totalOrdinal = reservation.reserve();
             int ordinal = providerRequests.incrementAndGet();
+            usage.accept(new ModelCallObservation(totalOrdinal,
+                    ordinal == 2 ? Optional.empty() : Optional.of(new CacheTokenUsage(8, 3))));
             if (ordinal == 1) {
                 return new ModelCallResult(new ModelReply.UseTools(Optional.of("Checking"),
                         List.of(request("lookup", "first"))), Optional.of(continuation));
@@ -113,6 +117,12 @@ class MessageJobHandoffTest {
                 .isEqualTo(MessageJobProcessingResult.COMPLETED);
 
         assertThat(providerRequests).hasValue(3);
+        ArgumentCaptor<ModelCallObservation> observations = ArgumentCaptor.forClass(ModelCallObservation.class);
+        verify(store, times(3)).recordModelUsage(eq(claim), observations.capture());
+        assertThat(observations.getAllValues()).containsExactly(
+                new ModelCallObservation(1, Optional.of(new CacheTokenUsage(8, 3))),
+                new ModelCallObservation(2, Optional.empty()),
+                new ModelCallObservation(3, Optional.of(new CacheTokenUsage(8, 3))));
         ArgumentCaptor<ConversationStore.MessageBatch> batches = ArgumentCaptor.forClass(ConversationStore.MessageBatch.class);
         verify(store, times(2)).append(eq(claim), batches.capture(), any());
         assertThat(batches.getAllValues().getFirst().continuation()).contains(continuation);
@@ -332,15 +342,15 @@ class MessageJobHandoffTest {
             reports.incrementAndGet();
             return new ToolOutput(false, Map.of());
         }, ToolCapability.REPORT_GENERATION);
-        ConversationModel model = model(TEST_ROUTE_ID, (request, reservation) -> {
+        ConversationModel model = model(TEST_ROUTE_ID, (request, reservation, observationObserver) -> {
             assertThat(request.initiatingMessage()).isEqualTo(current);
             assertThat(request.history()).containsExactly(current, later);
             assertThat(request.waiting()).isEqualTo(wait);
-            reservation.reserve();
+            observationObserver.accept(new ModelCallObservation(reservation.reserve(), Optional.empty()));
             return new IntentResult(intent, Optional.empty());
         }, (request, reservation, usage) -> {
             assertThat(persisted).isTrue();
-            reservation.reserve();
+            usage.accept(new ModelCallObservation(reservation.reserve(), Optional.of(new CacheTokenUsage(8, 3))));
             if (responses.incrementAndGet() == 1) {
                 assertThat(request.toolSnapshot().definitions()).extracting(definition -> definition.name().value())
                         .contains("opaqueReport");
@@ -357,6 +367,10 @@ class MessageJobHandoffTest {
                 .isEqualTo(MessageJobProcessingResult.COMPLETED);
         assertThat(ordinary).hasValue(intent == FollowUpIntent.DELIVER ? 0 : 1);
         assertThat(reports).hasValue(1);
+        verify(store).recordModelUsage(claim, new ModelCallObservation(1, Optional.empty()));
+        verify(store).recordModelUsage(claim, new ModelCallObservation(2, Optional.of(new CacheTokenUsage(8, 3))));
+        verify(store).recordModelUsage(claim, new ModelCallObservation(3, Optional.of(new CacheTokenUsage(8, 3))));
+        assertThat(responses).hasValue(2);
         ArgumentCaptor<ConversationStore.MessageBatch> batches = ArgumentCaptor.forClass(ConversationStore.MessageBatch.class);
         verify(store, times(2)).append(eq(claim), batches.capture(), any());
         assertThat(batches.getAllValues().getLast().completionDisposition()).isEqualTo(ConversationStore.CompletionDisposition.ANSWER);
@@ -379,7 +393,7 @@ class MessageJobHandoffTest {
                 .thenReturn(new ModelCallReservationResult.Reserved(1, 0));
         when(store.resolveFollowUp(eq(claim), eq(waiting()), eq(FollowUpIntent.CLARIFY), any())).thenReturn(control);
         AtomicInteger intentRequests = new AtomicInteger();
-        ConversationModel model = model(TEST_ROUTE_ID, (request, reservation) -> {
+        ConversationModel model = model(TEST_ROUTE_ID, (request, reservation, observationObserver) -> {
             reservation.reserve();
             intentRequests.incrementAndGet();
             if (failed) {
@@ -411,7 +425,7 @@ class MessageJobHandoffTest {
         when(store.reserveModelCall(eq(claim), eq(ModelCallPurpose.INTENT), eq(2), any()))
                 .thenReturn(new ModelCallReservationResult.Reserved(1, 0));
         AtomicInteger intentRequests = new AtomicInteger();
-        ConversationModel model = model(TEST_ROUTE_ID, (request, reservation) -> {
+        ConversationModel model = model(TEST_ROUTE_ID, (request, reservation, observationObserver) -> {
             reservation.reserve();
             intentRequests.incrementAndGet();
             throw new AssertionError("simulated process loss after reservation");
@@ -420,6 +434,7 @@ class MessageJobHandoffTest {
         assertThatThrownBy(() -> service(store, model, forbidden).process(claim, () -> true)).isInstanceOf(AssertionError.class);
         assertThat(service(store, model, forbidden).process(claim, () -> true)).isEqualTo(MessageJobProcessingResult.COMPLETED);
         assertThat(intentRequests).hasValue(1);
+        verify(store, never()).recordModelUsage(any(), any());
         verify(store, never()).resolveFollowUp(any(), any(), any(), any());
     }
 
@@ -446,6 +461,7 @@ class MessageJobHandoffTest {
         assertThatThrownBy(() -> service(store, model, forbidden, 1).process(claim, () -> true)).isInstanceOf(AssertionError.class);
         assertThat(service(store, model, forbidden, 1).process(claim, () -> true)).isEqualTo(MessageJobProcessingResult.COMPLETED);
         assertThat(requests).hasValue(1);
+        verify(store, never()).recordModelUsage(any(), any());
         ArgumentCaptor<ConversationStore.MessageBatch> batch = ArgumentCaptor.forClass(ConversationStore.MessageBatch.class);
         verify(store).append(eq(claim), batch.capture(), any());
         assertThat(batch.getValue().completionDisposition()).isEqualTo(ConversationStore.CompletionDisposition.WAITING);

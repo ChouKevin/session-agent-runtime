@@ -1,5 +1,7 @@
 package com.java.system.sessionagent.conversation;
 
+import com.java.system.sessionagent.conversation.domain.CacheTokenUsage;
+import com.java.system.sessionagent.conversation.domain.ModelCallObservation;
 import com.java.system.sessionagent.conversation.domain.IntentRequest;
 import com.java.system.sessionagent.conversation.domain.IntentResult;
 
@@ -22,7 +24,6 @@ import com.java.system.sessionagent.conversation.domain.ModelDescriptor;
 import com.java.system.sessionagent.conversation.domain.ModelReply;
 import com.java.system.sessionagent.conversation.domain.ModelRequest;
 import com.java.system.sessionagent.conversation.domain.ModelRouteId;
-import com.java.system.sessionagent.conversation.domain.ModelUsage;
 import com.java.system.sessionagent.conversation.domain.SessionMessage;
 import com.java.system.sessionagent.conversation.domain.SessionSequence;
 import com.java.system.sessionagent.conversation.domain.ToolCallId;
@@ -84,7 +85,7 @@ class MessageJobContextCompactionTest {
 
         assertThat(service(store, model, catalog(), 1).process(claim, () -> true)).isEqualTo(MessageJobProcessingResult.COMPLETED);
         assertThat(requests).hasValue(2);
-        verify(model, Mockito.never()).summarize(any(), any());
+        verify(model, Mockito.never()).summarize(any(), any(), any());
         verify(store, Mockito.never()).compact(any(), any(), any());
         ArgumentCaptor<ConversationStore.MessageBatch> batch = ArgumentCaptor.forClass(ConversationStore.MessageBatch.class);
         verify(store).append(eq(claim), batch.capture(), any());
@@ -108,8 +109,8 @@ class MessageJobContextCompactionTest {
 
         assertThat(service(store, model, () -> { throw new AssertionError("No tools before intent resolution"); })
                 .process(claim, () -> true)).isEqualTo(MessageJobProcessingResult.COMPLETED);
-        verify(model, Mockito.never()).classifyIntent(any(), any());
-        verify(model, Mockito.never()).summarize(any(), any());
+        verify(model, Mockito.never()).classifyIntent(any(), any(), any());
+        verify(model, Mockito.never()).summarize(any(), any(), any());
         verify(store, Mockito.never()).reserveModelCall(any(), any(), any(Integer.class), any());
         ArgumentCaptor<ConversationStore.MessageBatch> batch = ArgumentCaptor.forClass(ConversationStore.MessageBatch.class);
         verify(store).append(eq(claim), batch.capture(), any());
@@ -134,7 +135,7 @@ class MessageJobContextCompactionTest {
         assertThat(service(store, model, () -> { throw new AssertionError("No tools during wrap"); }, 1)
                 .process(claim, () -> true)).isEqualTo(MessageJobProcessingResult.COMPLETED);
         verify(model, Mockito.never()).respond(any(), any(), any());
-        verify(model, Mockito.never()).summarize(any(), any());
+        verify(model, Mockito.never()).summarize(any(), any(), any());
         verify(store, Mockito.never()).reserveModelCall(any(), any(), any(Integer.class), any());
         ArgumentCaptor<ConversationStore.MessageBatch> batch = ArgumentCaptor.forClass(ConversationStore.MessageBatch.class);
         verify(store).append(eq(claim), batch.capture(), any());
@@ -154,16 +155,16 @@ class MessageJobContextCompactionTest {
                 new SkillCommandState(claim.messageJobId(), SkillCommand.parse("/skill:review").orElseThrow(),
                         SkillCommandState.Disposition.ACCEPTED, Optional.of(skill.sequence())))));
         ConversationModel model = new ConversationModel() {
-            @Override public IntentResult classifyIntent(IntentRequest request, ModelCallReservation reservation) {
+            @Override public IntentResult classifyIntent(IntentRequest request, ModelCallReservation reservation, Consumer<ModelCallObservation> observationObserver) {
                 throw new AssertionError("Unexpected intent request in ordinary-job fixture");
             }
             @Override public ModelRouteId routeId() { return TEST_ROUTE_ID; }
             @Override public ModelDescriptor descriptor() { return new ModelDescriptor(TEST_ROUTE_ID, "test-capacity", 12_000); }
             @Override public String systemPrompt() { return "system"; }
-            @Override public String summarize(ContextCompactionRequest request, ModelCallReservation reservation) {
+            @Override public String summarize(ContextCompactionRequest request, ModelCallReservation reservation, Consumer<ModelCallObservation> observationObserver) {
                 throw new AssertionError("SKILL is not a native assistant response");
             }
-            @Override public ModelCallResult respond(ModelRequest request, ModelCallReservation reservation, Consumer<ModelUsage> usage) {
+            @Override public ModelCallResult respond(ModelRequest request, ModelCallReservation reservation, Consumer<ModelCallObservation> usage) {
                 throw new AssertionError("Oversized context must not reach response");
             }
         };
@@ -236,20 +237,20 @@ class MessageJobContextCompactionTest {
         }).when(store).compact(eq(claim), any(), any());
         List<String> requests = new ArrayList<>();
         ConversationModel model = new ConversationModel() {
-            @Override public IntentResult classifyIntent(IntentRequest request, ModelCallReservation reservation) {
+            @Override public IntentResult classifyIntent(IntentRequest request, ModelCallReservation reservation, Consumer<ModelCallObservation> observationObserver) {
                 throw new AssertionError("Unexpected intent request in ordinary-job fixture");
             }
             @Override public ModelRouteId routeId() { return TEST_ROUTE_ID; }
             @Override public ModelDescriptor descriptor() { return new ModelDescriptor(TEST_ROUTE_ID, "test-capacity", 12_000); }
             @Override public String systemPrompt() { return "system"; }
-            @Override public String summarize(ContextCompactionRequest request, ModelCallReservation reservation) {
+            @Override public String summarize(ContextCompactionRequest request, ModelCallReservation reservation, Consumer<ModelCallObservation> observationObserver) {
                 requests.add("summary");
                 assertThat(request.history()).containsExactlyElementsOf(expectedSummary);
                 assertThat(request.previousSummary()).isEqualTo(prior.map(ContextCompaction::summary));
                 reservation.reserve();
                 return "compacted";
             }
-            @Override public ModelCallResult respond(ModelRequest request, ModelCallReservation reservation, Consumer<ModelUsage> usage) {
+            @Override public ModelCallResult respond(ModelRequest request, ModelCallReservation reservation, Consumer<ModelCallObservation> usage) {
                 requests.add("response");
                 assertThat(request.history()).containsExactlyElementsOf(expectedSuffix);
                 reservation.reserve();
@@ -290,23 +291,23 @@ class MessageJobContextCompactionTest {
         List<String> callOrder = new ArrayList<>();
         ModelDescriptor descriptor = new ModelDescriptor(TEST_ROUTE_ID, "test-capacity", 12_000);
         ConversationModel model = new ConversationModel() {
-            @Override public IntentResult classifyIntent(IntentRequest request, ModelCallReservation reservation) {
+            @Override public IntentResult classifyIntent(IntentRequest request, ModelCallReservation reservation, Consumer<ModelCallObservation> observationObserver) {
                 throw new AssertionError("Unexpected intent request in ordinary-job fixture");
             }
             @Override public ModelRouteId routeId() { return TEST_ROUTE_ID; }
             @Override public ModelDescriptor descriptor() { return descriptor; }
             @Override public String systemPrompt() { return "system"; }
             @Override public String summarize(ContextCompactionRequest request,
-                    ModelCallReservation reservation) {
+                    ModelCallReservation reservation, Consumer<ModelCallObservation> observationObserver) {
                 callOrder.add("compact");
-                reservation.reserve();
+                observationObserver.accept(new ModelCallObservation(reservation.reserve(), Optional.of(new CacheTokenUsage(16, 4))));
                 return "old discussion summary";
             }
-            @Override public ModelCallResult respond(ModelRequest request, ModelCallReservation reservation, Consumer<ModelUsage> usageObserver) {
+            @Override public ModelCallResult respond(ModelRequest request, ModelCallReservation reservation, Consumer<ModelCallObservation> usageObserver) {
                 callOrder.add("ordinary");
                 assertThat(request.contextSummary()).contains(new ContextSummary("old discussion summary"));
                 assertThat(request.history()).containsExactly(rawHistory.get(3));
-                reservation.reserve();
+                usageObserver.accept(new ModelCallObservation(reservation.reserve(), Optional.empty()));
                 return result(new ModelReply.Text("done"));
             }
         };
@@ -314,6 +315,8 @@ class MessageJobContextCompactionTest {
         service(store, model, catalog()).process(claim, () -> true);
 
         assertThat(callOrder).containsExactly("compact", "ordinary");
+        verify(store).recordModelUsage(claim, new ModelCallObservation(1, Optional.of(new CacheTokenUsage(16, 4))));
+        verify(store).recordModelUsage(claim, new ModelCallObservation(2, Optional.empty()));
         assertThat(rawHistory).extracting(message -> message.sequence().value()).containsExactly(1L, 2L, 3L, 4L);
         assertThat(compacted.get()).isNotNull();
         assertThat(compacted.get().coveredThrough().value()).isEqualTo(3L);
@@ -343,18 +346,18 @@ class MessageJobContextCompactionTest {
         }).when(store).compact(eq(claim), any(ConversationStore.CompactionData.class), any(Instant.class));
         ModelDescriptor descriptor = new ModelDescriptor(TEST_ROUTE_ID, "test-capacity", 12_000);
         ConversationModel model = new ConversationModel() {
-            @Override public IntentResult classifyIntent(IntentRequest request, ModelCallReservation reservation) {
+            @Override public IntentResult classifyIntent(IntentRequest request, ModelCallReservation reservation, Consumer<ModelCallObservation> observationObserver) {
                 throw new AssertionError("Unexpected intent request in ordinary-job fixture");
             }
             @Override public ModelRouteId routeId() { return TEST_ROUTE_ID; }
             @Override public ModelDescriptor descriptor() { return descriptor; }
             @Override public String systemPrompt() { return "system"; }
             @Override public String summarize(ContextCompactionRequest request,
-                    ModelCallReservation reservation) {
+                    ModelCallReservation reservation, Consumer<ModelCallObservation> observationObserver) {
                 reservation.reserve();
                 return "summary ".repeat(5_000);
             }
-            @Override public ModelCallResult respond(ModelRequest request, ModelCallReservation reservation, Consumer<ModelUsage> usage) {
+            @Override public ModelCallResult respond(ModelRequest request, ModelCallReservation reservation, Consumer<ModelCallObservation> usage) {
                 throw new AssertionError("An oversized compacted context must not make an ordinary model request");
             }
         };
@@ -407,20 +410,20 @@ class MessageJobContextCompactionTest {
         List<String> callOrder = new ArrayList<>();
         ModelDescriptor descriptor = new ModelDescriptor(TEST_ROUTE_ID, "test-capacity", 12_000);
         ConversationModel model = new ConversationModel() {
-            @Override public IntentResult classifyIntent(IntentRequest request, ModelCallReservation reservation) {
+            @Override public IntentResult classifyIntent(IntentRequest request, ModelCallReservation reservation, Consumer<ModelCallObservation> observationObserver) {
                 throw new AssertionError("Unexpected intent request in ordinary-job fixture");
             }
             @Override public ModelRouteId routeId() { return TEST_ROUTE_ID; }
             @Override public ModelDescriptor descriptor() { return descriptor; }
             @Override public String systemPrompt() { return "system"; }
             @Override public String summarize(ContextCompactionRequest request,
-                    ModelCallReservation reservation) {
+                    ModelCallReservation reservation, Consumer<ModelCallObservation> observationObserver) {
                 callOrder.add("compact");
                 assertThat(request.history()).containsExactlyElementsOf(committedHistory);
                 reservation.reserve();
                 return "current tool summary";
             }
-            @Override public ModelCallResult respond(ModelRequest request, ModelCallReservation reservation, Consumer<ModelUsage> usage) {
+            @Override public ModelCallResult respond(ModelRequest request, ModelCallReservation reservation, Consumer<ModelCallObservation> usage) {
                 callOrder.add("ordinary");
                 if (callOrder.size() == 1) {
                     assertThat(request.history()).containsExactly(currentUser);
@@ -464,17 +467,17 @@ class MessageJobContextCompactionTest {
         when(store.loadContextHistory(claim.sessionId())).thenReturn(contextHistory(incompleteHistory));
         ModelDescriptor descriptor = new ModelDescriptor(TEST_ROUTE_ID, "test-capacity", 12_000);
         ConversationModel model = new ConversationModel() {
-            @Override public IntentResult classifyIntent(IntentRequest request, ModelCallReservation reservation) {
+            @Override public IntentResult classifyIntent(IntentRequest request, ModelCallReservation reservation, Consumer<ModelCallObservation> observationObserver) {
                 throw new AssertionError("Unexpected intent request in ordinary-job fixture");
             }
             @Override public ModelRouteId routeId() { return TEST_ROUTE_ID; }
             @Override public ModelDescriptor descriptor() { return descriptor; }
             @Override public String systemPrompt() { return "system"; }
             @Override public String summarize(ContextCompactionRequest request,
-                    ModelCallReservation reservation) {
+                    ModelCallReservation reservation, Consumer<ModelCallObservation> observationObserver) {
                 throw new AssertionError("Incomplete tool batches must not be summarized");
             }
-            @Override public ModelCallResult respond(ModelRequest request, ModelCallReservation reservation, Consumer<ModelUsage> usage) {
+            @Override public ModelCallResult respond(ModelRequest request, ModelCallReservation reservation, Consumer<ModelCallObservation> usage) {
                 throw new AssertionError("Context threshold requires compaction before an ordinary request");
             }
         };
@@ -513,19 +516,19 @@ class MessageJobContextCompactionTest {
         List<String> calls = new ArrayList<>();
         ModelDescriptor descriptor = new ModelDescriptor(TEST_ROUTE_ID, "test-capacity", 20_000);
         ConversationModel model = new ConversationModel() {
-            @Override public IntentResult classifyIntent(IntentRequest request, ModelCallReservation reservation) {
+            @Override public IntentResult classifyIntent(IntentRequest request, ModelCallReservation reservation, Consumer<ModelCallObservation> observationObserver) {
                 throw new AssertionError("Unexpected intent request in ordinary-job fixture");
             }
             @Override public ModelRouteId routeId() { return TEST_ROUTE_ID; }
             @Override public ModelDescriptor descriptor() { return descriptor; }
             @Override public String systemPrompt() { return "system"; }
             @Override public String summarize(ContextCompactionRequest request,
-                    ModelCallReservation reservation) {
+                    ModelCallReservation reservation, Consumer<ModelCallObservation> observationObserver) {
                 calls.add("compact");
                 reservation.reserve();
                 return "previous summary";
             }
-            @Override public ModelCallResult respond(ModelRequest request, ModelCallReservation reservation, Consumer<ModelUsage> usageObserver) {
+            @Override public ModelCallResult respond(ModelRequest request, ModelCallReservation reservation, Consumer<ModelCallObservation> usageObserver) {
                 calls.add("ordinary");
                 reservation.reserve();
                 if (calls.size() == 1) {
