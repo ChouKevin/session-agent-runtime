@@ -87,6 +87,7 @@ public final class PostgresConversationStore implements ConversationStore {
     private final Clock clock;
     private final ObjectMapper objectMapper;
     private final PostgresIntakeCapacity intakeCapacity;
+    private final PostgresArtifactStore artifactStore;
 
     public PostgresConversationStore(DataSource dataSource, Clock clock, ObjectMapper objectMapper) {
         this(dataSource, clock, objectMapper, new PostgresIntakeCapacity(dataSource));
@@ -115,6 +116,7 @@ public final class PostgresConversationStore implements ConversationStore {
         this.clock = Objects.requireNonNull(clock, "Clock must not be null");
         this.objectMapper = Objects.requireNonNull(objectMapper, "Object mapper must not be null");
         this.intakeCapacity = Objects.requireNonNull(intakeCapacity, "Intake capacity must not be null");
+        this.artifactStore = new PostgresArtifactStore(requiredDataSource, objectMapper);
     }
 
     @Override
@@ -579,6 +581,8 @@ public final class PostgresConversationStore implements ConversationStore {
             UUID sessionId = sessionId(requiredClaim);
             Optional<SessionSequence> continuationSequence = Optional.empty();
             Optional<SessionSequence> responseSequence = Optional.empty();
+            List<ToolCallData> actualCalls = List.of();
+            int toolOrdinal = 0;
             for (MessageData message : requiredBatch.messages()) {
                 if (cancelled && !(message instanceof AssistantToolCallsData) && !(message instanceof ToolObservationData)) {
                     continue;
@@ -590,6 +594,8 @@ public final class PostgresConversationStore implements ConversationStore {
                     mapper.insertAssistantMessage(sessionId, sequence, assistant.message());
                     responseSequence = Optional.of(new SessionSequence(sequence));
                 } else if (message instanceof AssistantToolCallsData assistantToolCalls) {
+                    actualCalls = assistantToolCalls.calls();
+                    toolOrdinal = 0;
                     insertSessionMessage(sessionId, sequence, messageJobId(requiredClaim), "ASSISTANT_TOOL_CALLS", requiredCreatedAt);
                     mapper.insertAssistantToolCalls(sessionId, sequence, assistantToolCalls.message().orElse(null),
                             json(storedToolCalls(assistantToolCalls.calls()))); // cs-allow nullable database column represents optional assistant text
@@ -599,6 +605,11 @@ public final class PostgresConversationStore implements ConversationStore {
                     insertSessionMessage(sessionId, sequence, messageJobId(requiredClaim), "TOOL", requiredCreatedAt);
                     mapper.insertToolObservation(sessionId, sequence, observation.toolCallId().value(), observation.toolName(),
                             json(observation.output()));
+                    if (observation.artifactReceipt().isPresent()) {
+                        Assert.isTrue(toolOrdinal < actualCalls.size(), "Artifact requires matching assistant tool call");
+                        artifactStore.associate(requiredClaim, observation, sequence, actualCalls.get(toolOrdinal), toolOrdinal);
+                    }
+                    toolOrdinal++;
                 } else if (message instanceof RuntimeData runtime) {
                     insertSessionMessage(sessionId, sequence, messageJobId(requiredClaim), "RUNTIME", requiredCreatedAt);
                     mapper.insertRuntimeMessage(sessionId, sequence, runtime.code(), runtime.message());
@@ -639,6 +650,11 @@ public final class PostgresConversationStore implements ConversationStore {
             } else if (requiredBatch.jobUpdate() == JobUpdate.COMPLETE) {
                 mapper.deleteContinuations(messageJobId(requiredClaim), sessionId);
                 completeJob(requiredClaim, clock.instant(), requiredBatch.failure());
+                boolean successfulAnswer = requiredBatch.failure().isEmpty()
+                        && requiredBatch.messages().stream().anyMatch(AssistantData.class::isInstance);
+                if (successfulAnswer) {
+                    artifactStore.release(messageJobId(requiredClaim));
+                }
             } else {
                 int rows = mapper.finishWorkingBatch(messageJobId(requiredClaim), sessionId,
                         requiredClaim.workerId(), requiredClaim.claimNumber(), timestamp(clock.instant()),

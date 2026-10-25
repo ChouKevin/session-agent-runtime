@@ -35,7 +35,7 @@ public final class SkillToolCatalog implements ToolCatalog {
         ToolDefinition definition = ToolDefinition.fromExposedName("readSkill", description.toString(), Map.of(
                 "type", "object", "properties", Map.of("uri", Map.of("type", "string")),
                 "required", List.of("uri"), "additionalProperties", false));
-        return new ToolSnapshot(List.of(new ToolBinding(definition, this::read)));
+        return new ToolSnapshot(List.of(new ToolBinding(definition, (invocation, arguments) -> read(arguments))));
     }
 
     private ToolOutput read(Map<String, Object> arguments) {

@@ -5,5 +5,5 @@ import java.util.Map;
 @FunctionalInterface
 public interface ToolExecutor {
 
-    ToolOutput execute(Map<String, Object> arguments);
+    ToolOutput execute(ToolInvocation invocation, Map<String, Object> arguments);
 }

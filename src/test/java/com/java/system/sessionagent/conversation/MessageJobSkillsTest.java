@@ -1,4 +1,6 @@
 package com.java.system.sessionagent.conversation;
+import java.nio.charset.StandardCharsets;
+import java.util.UUID;
 
 import com.java.system.sessionagent.conversation.application.JobProcessor;
 import com.java.system.sessionagent.conversation.application.MessageJobRetryPolicy;
@@ -270,7 +272,8 @@ class MessageJobSkillsTest {
 
         private MessageWorkClaim submit(String id, String session, String text) {
             MessageWorkClaim template = claim();
-            MessageWorkClaim claim = new MessageWorkClaim(new MessageJobId(id), new SessionId(session), template.modelSelection(), template.workerId(),
+            MessageWorkClaim claim = new MessageWorkClaim(new MessageJobId(UUID.nameUUIDFromBytes(id.getBytes(StandardCharsets.UTF_8)).toString()),
+                    new SessionId(UUID.nameUUIDFromBytes(session.getBytes(StandardCharsets.UTF_8)).toString()), template.modelSelection(), template.workerId(),
                     template.claimNumber(), template.claimedAt(), template.lockedUntil());
             ConversationHistory prior = histories.getOrDefault(claim.sessionId(), new ConversationHistory(List.of(), Map.of()));
             List<SessionMessage> messages = new ArrayList<>(prior.messages());

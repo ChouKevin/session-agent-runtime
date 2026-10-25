@@ -21,7 +21,7 @@ public final class CompositeToolCatalog implements ToolCatalog {
                 ToolSnapshot child = Objects.requireNonNull(catalog.snapshot(), "Child snapshot must not be null");
                 children.add(child);
                 for (ToolDefinition definition : child.definitions()) {
-                    bindings.add(new ToolBinding(definition, arguments -> child.invoke(definition.name(), arguments)));
+                    bindings.add(new ToolBinding(definition, (invocation, arguments) -> child.invoke(invocation, definition.name(), arguments)));
                 }
             }
             return new ToolSnapshot(bindings, () -> closeAll(children));

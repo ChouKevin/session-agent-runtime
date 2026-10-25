@@ -242,12 +242,12 @@ class PostgresMessageJobPostgresIT {
             }
         };
         ToolCatalog tools = () -> new ToolSnapshot(List.of(
-                new ToolBinding(new ToolDefinition(new ToolName("first"), "first", Map.of()), arguments -> {
+                new ToolBinding(new ToolDefinition(new ToolName("first"), "first", Map.of()), (context, arguments) -> {
                     firstStarted.countDown();
                     awaitGate(releaseFirst);
                     return new ToolOutput(false, Map.of("result", "actual first result"));
                 }),
-                new ToolBinding(new ToolDefinition(new ToolName("second"), "second", Map.of()), arguments -> {
+                new ToolBinding(new ToolDefinition(new ToolName("second"), "second", Map.of()), (context, arguments) -> {
                     secondCalls.incrementAndGet();
                     return new ToolOutput(false, Map.of("unexpected", true));
                 })));
@@ -494,12 +494,12 @@ class PostgresMessageJobPostgresIT {
             }
         };
         ToolCatalog tools = () -> new ToolSnapshot(List.of(
-                new ToolBinding(new ToolDefinition(new ToolName("first"), "first", Map.of()), arguments -> {
+                new ToolBinding(new ToolDefinition(new ToolName("first"), "first", Map.of()), (context, arguments) -> {
                     firstToolStarted.countDown();
                     awaitGate(releaseFirstTool);
                     return new ToolOutput(false, Map.of("result", "first"));
                 }),
-                new ToolBinding(new ToolDefinition(new ToolName("second"), "second", Map.of()), arguments -> {
+                new ToolBinding(new ToolDefinition(new ToolName("second"), "second", Map.of()), (context, arguments) -> {
                     secondToolStarted.countDown();
                     awaitGate(releaseSecondTool);
                     return new ToolOutput(true, Map.of("error", "ordinary tool failure"));
@@ -969,7 +969,7 @@ class PostgresMessageJobPostgresIT {
             }
         };
         ToolCatalog catalog = () -> new ToolSnapshot(List.of(
-                new ToolBinding(new ToolDefinition(new ToolName("first"), "first", Map.of()), arguments -> {
+                new ToolBinding(new ToolDefinition(new ToolName("first"), "first", Map.of()), (context, arguments) -> {
                     firstToolCalls.incrementAndGet();
                     firstToolStarted.countDown();
                     try {
@@ -980,7 +980,7 @@ class PostgresMessageJobPostgresIT {
                     }
                     return new ToolOutput(false, Map.of("first", true));
                 }),
-                new ToolBinding(new ToolDefinition(new ToolName("second"), "second", Map.of()), arguments -> {
+                new ToolBinding(new ToolDefinition(new ToolName("second"), "second", Map.of()), (context, arguments) -> {
                     laterToolCalls.incrementAndGet();
                     return new ToolOutput(false, Map.of("second", true));
                 })));

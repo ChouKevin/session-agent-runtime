@@ -135,7 +135,7 @@ class SlackProgressPostgresIT {
     void registration_failure_rolls_back_parent_and_part_confirmation_and_can_retry_safely() {
         accept("1.000001", "");
         SlackDeliveryClaim notice = delivery.claimNext("notice", Duration.ofMinutes(1), 5).orElseThrow();
-        SlackDeliveryPart part = delivery.nextPart(notice, () -> List.of("queued"), Duration.ofMinutes(1)).orElseThrow();
+        SlackDeliveryPart part = delivery.nextPart(notice, Duration.ofMinutes(1)).orElseThrow();
         jdbc.execute("""
                 create function fail_progress_registration() returns trigger language plpgsql as $$
                 begin raise exception 'injected registration failure'; end;
@@ -188,7 +188,7 @@ class SlackProgressPostgresIT {
         complete(job);
         UUID answer = answer(job);
         jdbc.update("insert into slack_delivery_part(delivery_id,part_index,part_text,status,slack_message_ts,sent_at) values (?,0,'answer','SENT','final',clock_timestamp())", answer);
-        jdbc.update("update slack_delivery set status='SENT',slack_message_ts='final',sent_at=clock_timestamp() where delivery_id=?", answer);
+        jdbc.update("update slack_delivery set status='SENT',items_prepared=true,slack_message_ts='final',sent_at=clock_timestamp() where delivery_id=?", answer);
         jdbc.update("delete from slack_question_progress");
         progress.discover();
         assertThat(jdbc.queryForObject("select count(*) from slack_question_progress", Integer.class)).isZero();
@@ -261,12 +261,71 @@ class SlackProgressPostgresIT {
         assertThat(progress.refresh(claim).orElseThrow().request().text()).contains("傳送");
         UUID answer = answer(job);
         jdbc.update("insert into slack_delivery_part(delivery_id,part_index,part_text,status) values (?,0,'one','PENDING'), (?,1,'two','PENDING')", answer, answer);
-        jdbc.update("update slack_delivery set status='SENT', slack_message_ts='answer', sent_at=clock_timestamp() where delivery_id=?", answer);
+        jdbc.update("update slack_delivery set status='SENT',items_prepared=true,slack_message_ts='answer',sent_at=clock_timestamp() where delivery_id=?", answer);
         assertThat(progress.refresh(claim).orElseThrow().request().text()).contains("傳送");
         jdbc.update("update slack_delivery_part set status='SENT',slack_message_ts='part',sent_at=clock_timestamp() where delivery_id=?", answer);
         assertThat(progress.refresh(claim).orElseThrow().request().text()).contains("已完成");
         jdbc.update("update message_job set failure_code='MODEL_UNAVAILABLE' where message_job_id=?", job);
         assertThat(progress.refresh(claim).orElseThrow().request().text()).contains("處理失敗");
+    }
+
+    @Test
+    void completion_requires_preparation_and_every_file_confirmation_and_recovery_does_not_reopen_success() {
+        UUID job = accept("1.000001", ""); sendNotice("notice");
+        complete(job);
+        UUID answer = answer(job);
+        SlackProgressClaim claim = claim();
+        assertState(claim, SlackProgressState.DELIVERING);
+        jdbc.update("""
+                insert into slack_delivery_part(delivery_id,part_index,part_text,presentation,status,slack_message_ts,sent_at)
+                values (?,0,'answer','MARKDOWN','SENT','text',clock_timestamp()),
+                       (?,1,'Report','FILE','SENT','F1',clock_timestamp()), (?,2,'Report','FILE','PENDING',null,null)
+                """, answer, answer, answer);
+        for (int index : List.of(1, 2)) {
+            jdbc.update("""
+                    insert into slack_delivery_upload(delivery_id,part_index,identity,filename,title,media_type,content,state,file_id,upload_url)
+                    values (?,?,?,'report.md','Report','text/markdown',? ,?,?,'https://files.slack.com/upload/v1/test')
+                    """, answer, index, UUID.randomUUID(), new byte[] {1}, index == 1 ? "SENT" : "UPLOADED", "F" + index);
+        }
+        jdbc.update("update slack_delivery set status='SENT',slack_message_ts='text',sent_at=clock_timestamp() where delivery_id=?", answer);
+        assertState(claim, SlackProgressState.DELIVERING);
+        jdbc.update("update slack_delivery set items_prepared=true where delivery_id=?", answer);
+        assertState(claim, SlackProgressState.DELIVERING);
+        jdbc.update("update slack_delivery_part set status='SENT',slack_message_ts='F2',sent_at=clock_timestamp() where delivery_id=? and part_index=2", answer);
+        assertState(claim, SlackProgressState.DELIVERING);
+        jdbc.update("update slack_delivery_upload set state='SENT' where delivery_id=? and part_index=2", answer);
+        assertState(claim, SlackProgressState.COMPLETED);
+        jdbc.update("delete from slack_question_progress where message_job_id=?", job);
+        progress = store();
+        progress.discover();
+        assertThat(jdbc.queryForObject("select count(*) from slack_question_progress", Integer.class)).isZero();
+    }
+
+    @Test
+    void failed_or_unconfirmed_file_is_delivery_failure_without_overriding_job_failure_or_cancellation() {
+        UUID job = accept("1.000001", ""); sendNotice("notice");
+        complete(job);
+        UUID answer = answer(job);
+        jdbc.update("insert into slack_delivery_part(delivery_id,part_index,part_text,presentation,status) values (?,0,'Report','FILE','PENDING')", answer);
+        jdbc.update("""
+                insert into slack_delivery_upload(delivery_id,part_index,identity,filename,title,media_type,content,state,file_id,upload_url)
+                values (?,0,?,'report.md','Report','text/markdown',?,'FAILED','F1','https://files.slack.com/upload/v1/test')
+                """, answer, UUID.randomUUID(), new byte[] {1});
+        SlackProgressClaim claim = claim();
+        assertState(claim, SlackProgressState.DELIVERY_FAILED);
+        jdbc.update("update slack_delivery_upload set state='UNCONFIRMED' where delivery_id=?", answer);
+        assertState(claim, SlackProgressState.DELIVERY_FAILED);
+        jdbc.update("update message_job set failure_code='MODEL_UNAVAILABLE' where message_job_id=?", job);
+        assertState(claim, SlackProgressState.FAILED);
+        jdbc.update("update message_job set status='CANCELLED',failure_code=null,cancellation_requested_at=clock_timestamp() where message_job_id=?", job);
+        assertState(claim, SlackProgressState.CANCELLED);
+        assertThat(jdbc.queryForObject("select model_calls from message_job where message_job_id=?", Integer.class, job)).isZero();
+    }
+
+    private void assertState(SlackProgressClaim claim, SlackProgressState expected) {
+        assertThat(progress.refresh(claim)).isPresent();
+        assertThat(jdbc.queryForObject("select observed_state from slack_question_progress where message_job_id=?",
+                String.class, claim.messageJobId())).isEqualTo(expected.name());
     }
 
     @Test
@@ -276,7 +335,7 @@ class SlackProgressPostgresIT {
         sendNotice("notice");
         UUID answer = answer(job);
         SlackDeliveryClaim answerClaim = delivery.claimNext("answer", Duration.ofMinutes(1), 5).orElseThrow();
-        SlackDeliveryPart part = delivery.nextPart(answerClaim, () -> List.of("answer"), Duration.ofMinutes(1)).orElseThrow();
+        SlackDeliveryPart part = delivery.nextPart(answerClaim, Duration.ofMinutes(1)).orElseThrow();
         assertThat(delivery.markPartSent(answerClaim, part, "final")).isTrue();
         assertThat(jdbc.queryForObject("select count(*) from slack_question_progress", Integer.class)).isOne();
         progress.discover();
@@ -440,13 +499,13 @@ class SlackProgressPostgresIT {
         assertThat(jdbc.queryForObject("select retired from slack_question_progress where message_job_id=?", Boolean.class, first)).isTrue();
         assertThat(jdbc.queryForObject("select status from slack_delivery where delivery_id=?", String.class, answerId)).isEqualTo("PENDING");
         SlackDeliveryClaim answerClaim = delivery.claimNext("answer", Duration.ofMinutes(1), 5).orElseThrow();
-        SlackDeliveryPart part = delivery.nextPart(answerClaim, () -> List.of("answer"), Duration.ofMinutes(1)).orElseThrow();
+        SlackDeliveryPart part = delivery.nextPart(answerClaim, Duration.ofMinutes(1)).orElseThrow();
         assertThat(delivery.markPartSent(answerClaim, part, "final")).isTrue();
         assertThat(jdbc.queryForObject("select status from slack_delivery where delivery_id=?", String.class, answerId)).isEqualTo("SENT");
     }
 
     private static SlackWebApi updating(java.util.function.Consumer<SlackUpdateRequest> update) {
-        return new SlackWebApi() {
+        return new com.java.system.sessionagent.slack.TextSlackWebApi() {
             @Override
             public String post(SlackPostRequest request) { throw new AssertionError("Progress cannot post"); }
             @Override
@@ -472,7 +531,7 @@ class SlackProgressPostgresIT {
     }
     private void sendNotice(String timestamp) {
         SlackDeliveryClaim claim = delivery.claimNext("notice", Duration.ofMinutes(1), 5).orElseThrow();
-        SlackDeliveryPart part = delivery.nextPart(claim, () -> List.of("queued"), Duration.ofMinutes(1)).orElseThrow();
+        SlackDeliveryPart part = delivery.nextPart(claim, Duration.ofMinutes(1)).orElseThrow();
         assertThat(delivery.markPartSent(claim, part, timestamp)).isTrue();
     }
     private SlackProgressClaim claim() { return progress.claimNext("progress", Duration.ofMinutes(1)).orElseThrow(); }

@@ -1,5 +1,6 @@
 package com.java.system.sessionagent.tool;
 
+import static com.java.system.sessionagent.tool.TestToolInvocation.invocation;
 import com.java.system.sessionagent.tool.domain.ToolName;
 import com.java.system.sessionagent.tool.port.CompositeToolCatalog;
 import com.java.system.sessionagent.tool.port.ToolBinding;
@@ -29,7 +30,7 @@ class CompositeToolCatalogTest {
     void retains_real_resource_until_parent_close() throws Exception {
         Path file = Files.writeString(root.resolve("resource"), "retained");
         FileChannel channel = FileChannel.open(file, StandardOpenOption.READ);
-        ToolCatalog child = () -> new ToolSnapshot(List.of(new ToolBinding(definition("read"), arguments -> {
+        ToolCatalog child = () -> new ToolSnapshot(List.of(new ToolBinding(definition("read"), (context, arguments) -> {
             try {
                 ByteBuffer bytes = ByteBuffer.allocate(8);
                 channel.read(bytes, 0);
@@ -43,7 +44,7 @@ class CompositeToolCatalogTest {
         ToolSnapshot parent = new CompositeToolCatalog(List.of(child)).snapshot();
         try {
             assertThat(channel.isOpen()).isTrue();
-            assertThat(parent.invoke(new ToolName("read"), Map.of()).result()).isEqualTo("retained");
+            assertThat(parent.invoke(invocation(), new ToolName("read"), Map.of()).result()).isEqualTo("retained");
         } finally {
             parent.close();
         }
@@ -81,6 +82,6 @@ class CompositeToolCatalogTest {
     }
 
     private ToolSnapshot snapshot(String name, Runnable close) {
-        return new ToolSnapshot(List.of(new ToolBinding(definition(name), arguments -> new ToolOutput(false, arguments))), close);
+        return new ToolSnapshot(List.of(new ToolBinding(definition(name), (context, arguments) -> new ToolOutput(false, arguments))), close);
     }
 }

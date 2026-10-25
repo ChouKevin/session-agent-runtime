@@ -7,7 +7,7 @@ import com.java.system.sessionagent.slack.domain.SlackDeliveryClaim;
 import com.java.system.sessionagent.slack.domain.SlackDeliveryFailureCategory;
 import com.java.system.sessionagent.slack.domain.SlackDeliveryView;
 import com.java.system.sessionagent.slack.domain.SlackPostRequest;
-import com.java.system.sessionagent.slack.port.out.SlackDeliveryStore;
+import com.java.system.sessionagent.slack.TextOnlySlackDeliveryStore;
 
 import org.junit.jupiter.api.Test;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
@@ -18,8 +18,6 @@ import java.util.ArrayDeque;
 import java.util.Optional;
 import java.util.Queue;
 import java.util.UUID;
-import java.util.List;
-import java.util.function.Supplier;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
@@ -73,7 +71,7 @@ class SlackDeliveryLifecycleTest {
         return new SlackProperties("xapp-test", "xoxb-test", "UBOT", Duration.ofSeconds(1), Duration.ofMillis(25));
     }
 
-    private static final class OneClaimStore implements SlackDeliveryStore {
+    private static final class OneClaimStore implements TextOnlySlackDeliveryStore {
 
         private final Queue<SlackDeliveryClaim> claims = new ArrayDeque<>(java.util.List.of(new SlackDeliveryClaim(
                 UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), 1, 1, "delivery-worker", Instant.now().plusSeconds(30),
@@ -92,10 +90,9 @@ class SlackDeliveryLifecycleTest {
         @Override
         public Optional<com.java.system.sessionagent.slack.domain.SlackDeliveryPart> nextPart(
                 SlackDeliveryClaim claim,
-                Supplier<List<String>> texts,
                 Duration leaseDuration) {
             return sent ? Optional.empty()
-                    : Optional.of(new com.java.system.sessionagent.slack.domain.SlackDeliveryPart(0, texts.get().getFirst()));
+                    : Optional.of(new com.java.system.sessionagent.slack.domain.SlackDeliveryPart(0, claim.postRequest().text()));
         }
 
         @Override

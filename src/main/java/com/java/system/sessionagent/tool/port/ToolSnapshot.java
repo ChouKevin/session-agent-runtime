@@ -46,14 +46,15 @@ public final class ToolSnapshot implements AutoCloseable {
         return definitions;
     }
 
-    public ToolOutput invoke(ToolName name, Map<String, Object> arguments) {
+    public ToolOutput invoke(ToolInvocation invocation, ToolName name, Map<String, Object> arguments) {
+        Assert.notNull(invocation, "Tool invocation must not be null");
         Assert.notNull(name, "Tool name must not be null");
         Assert.notNull(arguments, "Tool arguments must not be null");
         Optional<ToolBinding> binding = Optional.ofNullable(bindings.get(name));
         if (binding.isEmpty()) {
             return ToolOutput.runtimeFailure(TOOL_NOT_AVAILABLE, TOOL_NOT_AVAILABLE_MESSAGE);
         }
-        ToolOutput output = binding.orElseThrow().executor().execute(arguments);
+        ToolOutput output = binding.orElseThrow().executor().execute(invocation, arguments);
         return Objects.requireNonNull(output, "Tool output must not be null");
     }
 

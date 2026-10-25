@@ -1,7 +1,7 @@
 # Current package architecture
 
 This guide describes the production packages that exist in the repository today.
-The source root is `src/main/java/com/java/system/sessionagent/`. The ten
+The source root is `src/main/java/com/java/system/sessionagent/`. The eleven
 top-level packages below are the closed Spring Modulith modules. Subpackages
 express the role of the code that is present now; a module does not gain an
 empty layer merely to complete a pattern.
@@ -13,6 +13,7 @@ empty layer merely to complete a pattern.
 | `conversation` — `domain`, `application`, `port/in`, `port/out` | Owns session, message, job, history, context, and model/tool loop rules. `domain` holds provider-neutral state and invariants; `application` coordinates intake, queries, and message-job processing; `port/in` holds contracts called by adapters and workers; `port/out` holds model, storage, and telemetry contracts implemented outside the module. |
 | `tool` — `domain`, `port` | Defines generic tool names, definitions, snapshots, calls, executors, and outputs. Tool names, schemas, arguments, and results remain provider data; this module does not know an MCP or model SDK. |
 | `skill` — `domain`, `port`, `configuration`, `adapter/filesystem`, `adapter/tool` | Owns startup-only skill metadata, bounded current-file reads, and the provider-neutral `readSkill` tool. Bootstrap owns the library lifecycle and composes skill and MCP leaves into the sole catalog. |
+| `artifact` — `application`, `port` | Owns bounded first-party Markdown/CSV encoding, route-gated creation tools, and durable artifact storage contracts; no provider SDK or conversation dependency. |
 | `model` — `adapter/springai` | Maps the provider-neutral conversation model contract to Spring AI and Google GenAI, including prompts, history projection, tool callbacks, usage, and continuation data. Provider types stay inside this adapter. |
 | `mcp` — `domain`, `configuration`, `adapter/sdk`, `adapter/actuator` | Owns named MCP connection state and properties, SDK connection lifecycle, discovery, tool routing/adaptation, refresh/reconnect, and safe actuator diagnostics. Raw MCP metadata, schemas, and results do not become Runtime DTOs. |
 | `storage` — `adapter/postgres`, `adapter/postgres/jdbc` | Implements conversation persistence with PostgreSQL, Flyway-backed tables, MyBatis mappers, ordered history, job claims, and atomic history writes. The narrow JDBC export owns shared intake admission and UUID mapping for PostgreSQL adapters. |
@@ -37,6 +38,7 @@ The complete named-interface map is intentionally kept in one assertion in
 | --- | --- |
 | `tool` | `domain`; `port` |
 | `skill` | `domain`; `port`; `configuration`; `adapter.filesystem`; `adapter.tool` |
+| `artifact` | `application`; `port` |
 | `conversation` | `domain`; `application`; `port.in`; `port.out` |
 | `model` | `adapter.springai` |
 | `mcp` | `configuration`; `adapter.sdk`; `adapter.actuator` |
@@ -56,19 +58,67 @@ Every other allowance is currently used by production code.
 | --- | --- | --- |
 | `tool` | none | none |
 | `skill` | `tool :: domain`; `tool :: port` | `tool :: port` |
+| `artifact` | `tool :: domain`; `tool :: port` | `tool :: domain`; `tool :: port` |
 | `conversation` | `tool :: domain`; `tool :: port`; `skill :: domain`; `skill :: port` | `tool :: domain`; `tool :: port`; `skill :: domain`; `skill :: port` |
 | `model` | `conversation :: domain`; `conversation :: port.out`; `tool :: domain`; `tool :: port`; `skill :: domain` | `conversation :: domain`; `conversation :: port.out`; `tool :: domain`; `tool :: port`; `skill :: domain` |
 | `mcp` | `tool :: port` | `tool :: port` |
-| `storage` | `conversation :: domain`; `conversation :: port.in`; `conversation :: port.out`; `tool :: domain`; `skill :: domain` | `conversation :: domain`; `conversation :: port.in`; `conversation :: port.out`; `tool :: domain`; `skill :: domain` |
+| `storage` | `conversation :: domain`; `conversation :: port.in`; `conversation :: port.out`; `tool :: domain`; `tool :: port`; `skill :: domain`; `artifact :: port` | `conversation :: domain`; `conversation :: port.in`; `conversation :: port.out`; `tool :: domain`; `tool :: port`; `skill :: domain`; `artifact :: port` |
 | `web` | `conversation :: domain`; `conversation :: port.in`; `tool :: domain`; `slack :: domain`; `slack :: port.out`; `skill :: domain` | `conversation :: domain`; `conversation :: port.in`; `slack :: domain`; `slack :: port.out`; `skill :: domain` |
 | `worker` | `conversation :: domain`; `conversation :: port.in`; `conversation :: port.out` | `conversation :: domain`; `conversation :: port.in`; `conversation :: port.out` |
-| `slack` | `conversation :: domain`; `conversation :: port.in`; `storage :: adapter.postgres.jdbc` | `conversation :: domain`; `conversation :: port.in`; `storage :: adapter.postgres.jdbc` |
-| `bootstrap` | `tool :: port`; `skill :: port`; `skill :: configuration`; `skill :: adapter.filesystem`; `skill :: adapter.tool`; `mcp :: configuration`; `mcp :: adapter.sdk`; `mcp :: adapter.actuator`; `conversation :: application`; `conversation :: domain`; `conversation :: port.in`; `conversation :: port.out`; `model :: adapter.springai`; `storage :: adapter.postgres`; `storage :: adapter.postgres.jdbc`; `web`; `worker :: application`; `worker :: configuration`; `slack :: domain`; `slack :: application`; `slack :: port.out`; `slack :: adapter.sdk`; `slack :: adapter.postgres`; `slack :: configuration` | `tool :: port`; `skill :: port`; `skill :: configuration`; `skill :: adapter.filesystem`; `skill :: adapter.tool`; `mcp :: configuration`; `mcp :: adapter.sdk`; `mcp :: adapter.actuator`; `conversation :: application`; `conversation :: domain`; `conversation :: port.in`; `conversation :: port.out`; `model :: adapter.springai`; `storage :: adapter.postgres`; `storage :: adapter.postgres.jdbc`; `worker :: application`; `worker :: configuration`; `slack :: domain`; `slack :: application`; `slack :: port.out`; `slack :: adapter.sdk`; `slack :: adapter.postgres`; `slack :: configuration` |
+| `slack` | `conversation :: domain`; `conversation :: port.in`; `storage :: adapter.postgres.jdbc`; `artifact :: port` | `conversation :: domain`; `conversation :: port.in`; `storage :: adapter.postgres.jdbc`; `artifact :: port` |
+| `bootstrap` | `tool :: port`; `artifact :: application`; `artifact :: port`; `skill :: port`; `skill :: configuration`; `skill :: adapter.filesystem`; `skill :: adapter.tool`; `mcp :: configuration`; `mcp :: adapter.sdk`; `mcp :: adapter.actuator`; `conversation :: application`; `conversation :: domain`; `conversation :: port.in`; `conversation :: port.out`; `model :: adapter.springai`; `storage :: adapter.postgres`; `storage :: adapter.postgres.jdbc`; `web`; `worker :: application`; `worker :: configuration`; `slack :: domain`; `slack :: application`; `slack :: port.out`; `slack :: adapter.sdk`; `slack :: adapter.postgres`; `slack :: configuration` | `tool :: port`; `artifact :: application`; `artifact :: port`; `skill :: port`; `skill :: configuration`; `skill :: adapter.filesystem`; `skill :: adapter.tool`; `mcp :: configuration`; `mcp :: adapter.sdk`; `mcp :: adapter.actuator`; `conversation :: application`; `conversation :: domain`; `conversation :: port.in`; `conversation :: port.out`; `model :: adapter.springai`; `storage :: adapter.postgres`; `storage :: adapter.postgres.jdbc`; `worker :: application`; `worker :: configuration`; `slack :: domain`; `slack :: application`; `slack :: port.out`; `slack :: adapter.sdk`; `slack :: adapter.postgres`; `slack :: configuration` |
 
 `JobProcessor` resolves only the claim's PENDING selection before responses or
 summaries and reloads its committed context. ACCEPTED selections reuse stored
 bytes. Resolution shares the ordinary append uncertainty tracker: an ambiguous
 write stops the attempt without resubmission or a replacement failure batch.
+
+Tool executors receive a trusted `ToolInvocation`: the four-field stable
+`ToolExecutionContext` plus separate worker/claim-number lease authority. Only Runtime
+constructs production invocations, after counting the actual model request. Catalog
+snapshots may receive job/session identifiers for route eligibility without depending
+on conversation types; MCP and skill executors ignore invocation metadata.
+Artifact receipts are internal tool-port metadata, not model-visible JSON. PostgreSQL
+compares the exact successful output, original arguments, invocation ordinal, tool
+identity and job ownership while associating the actual TOOL event in its transaction.
+Successful final text releases only associated artifacts; orphans remain hidden.
+Encoding preserves Markdown UTF-8 without a parser. CSV remains string data in the
+tool audit while the export adds BOM/CRLF, quotes/escapes fields, and prefixes
+formula-leading cells with an apostrophe; the tool observation discloses the
+spreadsheet-safe transformation rather than promising universal spreadsheet safety.
+Creation has no Slack side effect and no model-supplied channel/path/capability.
+
+
+Slack presents final assistant text as a whole native Markdown block (fixed
+accessible notification) or exact UTF-8 `answer.md` above the conservative
+10,000-code-point/UTF-16-unit boundary. Notices remain plain text. Typed ordered
+delivery items and the released artifact set are prepared atomically before any
+parent completion. PostgreSQL owns upload capabilities, file IDs, stages, and the
+delivery claim fence. Each allocation/byte-upload/finalization is bounded by a
+renewed lease; successful stages release and reschedule rather than holding a
+database transaction over HTTP. Finalization intent is persisted first, and
+unacknowledged recovered intent is `UNCONFIRMED`, never automatically repeated.
+Parent `SENT` requires every text item and upload to be confirmed `SENT`.
+The Slack SDK and isolated no-redirect/no-credential byte transport stay inside
+`slack/adapter/sdk`; conversation final text remains provider-neutral.
+V10's progress view observes the full prepared set in one statement snapshot:
+successful jobs remain `DELIVERING` until parent, text/file items and each FILE
+upload are `SENT`. Missing preparation or upload evidence is not completion;
+`FAILED`/`UNCONFIRMED` upload evidence yields `DELIVERY_FAILED`. Cancellation and
+processing-failure precedence remains unchanged. Discovery reuses this view's
+delivered predicate, so historical completed questions are not reopened. Progress
+updates still use each question's own queued notice and an independent executor.
+
+Unsupported Markdown/file permission errors are delivery failures, not parser,
+splitting or plain-text fallback paths. `files:write` and any app
+reinstall/reauthorization require separate approval; Runtime adds no `files:read`
+reconciliation. Artifact bytes, final-answer upload bytes and sensitive capabilities
+inherit PostgreSQL/backup access and conversation retention. This feature adds no
+automatic expiry/deletion or public artifact URL. An uncertain finalization is
+retained for operator reconciliation, never repaired by another model turn or
+automatic finalize/reallocation.
+
+
 
 `storage :: adapter.postgres.jdbc` exposes only shared PostgreSQL integration
 components: `PostgresIntakeCapacity` and `PostgresUuidTypeHandler`. Slack depends
@@ -190,10 +240,11 @@ cross-layer behavior.
 | Model adapter behavior | `model/adapter/springai/HistoryProjectorTest`, `SpringAiConversationModelTest`, `SpringAiToolCallbackFactoryTest`, `SpringAiMessagePartsHandlerTest`, `GoogleGenAiContinuationTest`, and the explicitly gated `GoogleModelLiveTest`. Ordered continuation tests retain reasoning, per-part signatures, unknown provider parts and media; local fake-HTTP provider tests exercise replay without model quota. |
 | MCP adapter behavior | `mcp/adapter/sdk/McpConnectionClientFactoryTest`, `McpConnectionManagerTest`, `McpToolCatalogTest`, `McpToolResultMapperTest`, and `McpConnectionsEndpointTest`. The endpoint test stays in this package because it exercises the SDK adapter's private seam. |
 | PostgreSQL and HTTP adapters | `storage/adapter/postgres/PostgresConversationCommitPostgresIT`, `PostgresMessageIntakePostgresIT`, and `PostgresMessageJobPostgresIT`; `web/adapter/http/MessageControllerTest`; and Slack persistence tests described below. |
+| Durable generated artifacts | `artifact/ArtifactEncoderTest`, `ArtifactToolCatalogTest`, and `storage/adapter/postgres/ArtifactStorePostgresIT`; bounds, CSV safety, trusted invocation identity, route eligibility, exact actual-observation association, PostgreSQL rollback/lease/restart/replay/isolation, and orphan invisibility. |
 | Worker behavior | `worker/application/MessageJobWorkerTest`, covering claim, renewal, processing, retry, limit, and recovery coordination. |
 | Slack application and adapters | `slack/application/MessageHandlerTest`, `SlackDeliveryLifecycleTest`, `SlackDeliveryWorkerTest`, `SlackProgressWorkerTest`, `SlackProgressLifecycleTest`, and `SlackSocketLifecycleTest`; `slack/adapter/postgres/SlackDeliveryPostgresIT` and `SlackProgressPostgresIT`; and SDK-seam tests in `slack/adapter/sdk`, including `SlackConfigurationTest`, `PostgresMessageSubmissionPostgresIT`, `SlackSocketShutdownTest`, `SlackBoltSocketClientTest`, and `SlackSdkWebApiTest` (real SDK calls against local fake HTTP, including question permalink identity and update errors). |
 | Bootstrap configuration and metrics | `bootstrap/configuration/RuntimeConfigurationTest`, `ApplicationStartupTest`, `RuntimePropertiesTest`, and `LoggingConfigurationTest`; `bootstrap/adapter/metrics/RuntimeObservabilityTest`. |
-| Architecture and dependency boundaries | `ApplicationModulesTest` verifies the nine closed modules, the exact allowed dependency map, and the complete named-interface map. `RuntimeBoundaryTest` verifies provider boundaries, MCP and Slack SDK confinement to their SDK adapters, and the domain/port direction rules for conversation and Slack. |
+| Architecture and dependency boundaries | `ApplicationModulesTest` verifies the eleven closed modules, the exact allowed dependency map, and the complete named-interface map. `RuntimeBoundaryTest` verifies provider boundaries, MCP and Slack SDK confinement to their SDK adapters, and the domain/port direction rules for conversation and Slack. |
 
 The ordinary suite uses local fake model/tool boundaries and keeps local HTTP
 exposure loopback-only. `SlackSdkWebApiTest` starts a fake JDK HTTP server on

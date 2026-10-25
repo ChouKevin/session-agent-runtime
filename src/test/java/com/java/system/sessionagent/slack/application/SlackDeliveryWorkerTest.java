@@ -6,7 +6,7 @@ import com.java.system.sessionagent.slack.domain.SlackDeliveryFailureCategory;
 import com.java.system.sessionagent.slack.domain.SlackDeliveryView;
 import com.java.system.sessionagent.slack.domain.SlackPostFailure;
 import com.java.system.sessionagent.slack.domain.SlackPostRequest;
-import com.java.system.sessionagent.slack.port.out.SlackDeliveryStore;
+import com.java.system.sessionagent.slack.TextOnlySlackDeliveryStore;
 import com.java.system.sessionagent.slack.PostingSlackWebApi;
 
 import ch.qos.logback.classic.Logger;
@@ -23,11 +23,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Queue;
-import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Set;
 import java.util.UUID;
-import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -107,7 +105,7 @@ class SlackDeliveryWorkerTest {
 
         assertThat(appender.list).extracting(event -> keyValues(event).get("event"))
                 .contains("slack_delivery_attempt", "slack_delivery_ambiguous")
-                .doesNotContain("slack_delivery_sent");
+                .doesNotContain("slack_delivery_item_sent");
         ILoggingEvent ambiguous = appender.list.stream()
                 .filter(event -> "slack_delivery_ambiguous".equals(keyValues(event).get("event")))
                 .findFirst().orElseThrow();
@@ -153,50 +151,17 @@ class SlackDeliveryWorkerTest {
     }
 
     @Test
-    void sends_a_long_delivery_as_ordered_slack_safe_parts() {
-        String terminalText = "x".repeat(4_001);
+    void delivers_a_whole_persisted_markdown_item_without_a_splitter() {
+        String text = "x".repeat(8_001);
         FakeDeliveryStore store = new FakeDeliveryStore(List.of(claim(1, 1,
-                new SlackPostRequest("C1", "1.000001", terminalText))));
+                new SlackPostRequest("C1", "1.000001", text, com.java.system.sessionagent.slack.domain.SlackPresentation.MARKDOWN))));
         FakeSlackWebApi slack = new FakeSlackWebApi();
-        SlackDeliveryWorker worker = new SlackDeliveryWorker(store, slack, new SlackDeliveryProperties(), "delivery-worker");
-
-        assertThat(worker.poll()).isTrue();
-
-        assertThat(slack.posts).extracting(SlackPostRequest::text)
-                .containsExactly("x".repeat(4_000), "x");
+        assertThat(new SlackDeliveryWorker(store, slack, new SlackDeliveryProperties(), "delivery-worker").poll()).isTrue();
+        assertThat(slack.posts).extracting(SlackPostRequest::text).containsExactly(text);
+        assertThat(slack.posts.getFirst().presentation()).isEqualTo(com.java.system.sessionagent.slack.domain.SlackPresentation.MARKDOWN);
     }
 
-    @Test
-    void resumes_with_the_first_unsent_persisted_part_without_resplitting() {
-        SlackDeliveryClaim firstClaim = claim(1, 1, new SlackPostRequest("C1", "1.000001", "new implementation text"));
-        FakeDeliveryStore store = new FakeDeliveryStore(List.of(firstClaim));
-        store.persist(firstClaim, List.of("saved part one", "saved part two"), 1);
-        FakeSlackWebApi slack = new FakeSlackWebApi();
-        SlackDeliveryWorker worker = new SlackDeliveryWorker(store, slack, new SlackDeliveryProperties(), "delivery-worker");
 
-        assertThat(worker.poll()).isTrue();
-
-        assertThat(slack.posts).extracting(SlackPostRequest::text).containsExactly("saved part two");
-        assertThat(store.textSuppliersUsed).isZero();
-    }
-
-    @Test
-    void resumes_after_a_rate_limited_second_part_without_resending_the_confirmed_prefix() {
-        SlackDeliveryClaim firstClaim = claim(1, 1, new SlackPostRequest("C1", "1.000001", "x".repeat(4_001)));
-        SlackDeliveryClaim retryClaim = new SlackDeliveryClaim(firstClaim.deliveryId(), firstClaim.kind(), firstClaim.sessionId(),
-                firstClaim.messageJobId(), 2, 2, "delivery-worker", firstClaim.lockedUntil(), firstClaim.postRequest());
-        FakeDeliveryStore store = new FakeDeliveryStore(List.of(firstClaim, retryClaim));
-        FakeSlackWebApi slack = new FakeSlackWebApi();
-        slack.failOnPost(2, new SlackPostFailure(SlackDeliveryFailureCategory.RATE_LIMIT, Optional.of(Duration.ofSeconds(7))));
-        SlackDeliveryWorker worker = new SlackDeliveryWorker(store, slack, new SlackDeliveryProperties(), "delivery-worker");
-
-        assertThat(worker.poll()).isTrue();
-        assertThat(worker.poll()).isTrue();
-
-        assertThat(slack.posts).extracting(SlackPostRequest::text)
-                .containsExactly("x".repeat(4_000), "x", "x");
-        assertThat(store.retryDelays).containsExactly(Duration.ofSeconds(7));
-    }
 
     @Test
     void marks_a_truncated_part_permanently_failed_while_retaining_its_known_timestamp() {
@@ -212,19 +177,6 @@ class SlackDeliveryWorkerTest {
         assertThat(store.failedMessageTimestamps).containsExactly(Optional.of("2.000004"));
     }
 
-    @Test
-    void stops_before_later_parts_when_an_earlier_part_fails_permanently() {
-        FakeDeliveryStore store = new FakeDeliveryStore(List.of(claim(1, 1,
-                new SlackPostRequest("C1", "1.000001", "x".repeat(8_001)))));
-        FakeSlackWebApi slack = new FakeSlackWebApi();
-        slack.failOnPost(2, new SlackPostFailure(SlackDeliveryFailureCategory.PERMANENT, Optional.empty()));
-        SlackDeliveryWorker worker = new SlackDeliveryWorker(store, slack, new SlackDeliveryProperties(), "delivery-worker");
-
-        assertThat(worker.poll()).isTrue();
-
-        assertThat(slack.posts).extracting(SlackPostRequest::text).containsExactly("x".repeat(4_000), "x".repeat(4_000));
-        assertThat(store.failedCategories).containsExactly(SlackDeliveryFailureCategory.PERMANENT);
-    }
 
     private static SlackDeliveryClaim claim(long claimNumber, int attempts, SlackPostRequest post) {
         return new SlackDeliveryClaim(UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), claimNumber, attempts, "delivery-worker",
@@ -235,7 +187,7 @@ class SlackDeliveryWorkerTest {
         return event.getKeyValuePairs().stream().collect(Collectors.toMap(pair -> pair.key, pair -> pair.value));
     }
 
-    private static final class FakeDeliveryStore implements SlackDeliveryStore {
+    private static final class FakeDeliveryStore implements TextOnlySlackDeliveryStore {
 
         private final Queue<SlackDeliveryClaim> claims;
         private final List<Duration> retryDelays = new ArrayList<>();
@@ -243,9 +195,7 @@ class SlackDeliveryWorkerTest {
         private final List<SlackDeliveryFailureCategory> failedCategories = new ArrayList<>();
         private final List<String> sentMessageTimestamps = new ArrayList<>();
         private final List<Optional<String>> failedMessageTimestamps = new ArrayList<>();
-        private final Map<UUID, List<String>> parts = new HashMap<>();
         private final Set<PartKey> sentParts = new HashSet<>();
-        private int textSuppliersUsed;
         private boolean transactionActiveDuringPost;
         private boolean transitionsAccepted = true;
 
@@ -266,19 +216,10 @@ class SlackDeliveryWorkerTest {
         @Override
         public Optional<com.java.system.sessionagent.slack.domain.SlackDeliveryPart> nextPart(
                 SlackDeliveryClaim claim,
-                Supplier<List<String>> texts,
                 Duration leaseDuration) {
-            List<String> persisted = parts.computeIfAbsent(claim.deliveryId(), ignored -> {
-                textSuppliersUsed++;
-                return texts.get();
-            });
-            for (int index = 0; index < persisted.size(); index++) {
-                PartKey key = new PartKey(claim.deliveryId(), index);
-                if (!sentParts.contains(key)) {
-                    return Optional.of(new com.java.system.sessionagent.slack.domain.SlackDeliveryPart(index, persisted.get(index)));
-                }
-            }
-            return Optional.empty();
+            return sentParts.contains(new PartKey(claim.deliveryId(), 0)) ? Optional.empty()
+                    : Optional.of(new com.java.system.sessionagent.slack.domain.SlackDeliveryPart(0, claim.postRequest().text(),
+                            claim.postRequest().presentation(), Optional.empty()));
         }
 
         @Override
@@ -319,12 +260,6 @@ class SlackDeliveryWorkerTest {
             return List.of();
         }
 
-        private void persist(SlackDeliveryClaim claim, List<String> persistedParts, int sentCount) {
-            parts.put(claim.deliveryId(), persistedParts);
-            for (int index = 0; index < sentCount; index++) {
-                sentParts.add(new PartKey(claim.deliveryId(), index));
-            }
-        }
 
         private record PartKey(UUID deliveryId, int index) {
         }
@@ -334,24 +269,17 @@ class SlackDeliveryWorkerTest {
 
         private final List<SlackPostRequest> posts = new ArrayList<>();
         private final Queue<SlackPostFailure> failures = new ArrayDeque<>();
-        private final Map<Integer, SlackPostFailure> failuresByPost = new HashMap<>();
 
         private void failOnce(SlackPostFailure failure) {
             failures.add(failure);
         }
 
-        private void failOnPost(int postNumber, SlackPostFailure failure) {
-            failuresByPost.put(postNumber, failure);
-        }
 
         @Override
         public String post(SlackPostRequest request) {
             posts.add(request);
-            SlackPostFailure failure = failuresByPost.get(posts.size());
-            if (failure == null) { // cs-allow Map#get uses null for an absent failure schedule
-                failure = failures.poll();
-            }
-            if (failure != null) { // cs-allow Queue API uses null as the empty sentinel
+            SlackPostFailure failure = failures.poll();
+            if (java.util.Objects.nonNull(failure)) {
                 throw failure;
             }
             return "2.000001";

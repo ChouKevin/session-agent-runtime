@@ -98,8 +98,8 @@ final class MessageJobTestFixtures {
 
     static ToolCatalog catalog() {
         return () -> new ToolSnapshot(List.of(
-                new ToolBinding(new ToolDefinition(new ToolName("first"), "first", Map.of()), arguments -> new ToolOutput(false, Map.of("value", 1))),
-                new ToolBinding(new ToolDefinition(new ToolName("second"), "second", Map.of()), arguments -> new ToolOutput(true, Map.of("code", "TOOL_TIMEOUT")))));
+                new ToolBinding(new ToolDefinition(new ToolName("first"), "first", Map.of()), (context, arguments) -> new ToolOutput(false, Map.of("value", 1))),
+                new ToolBinding(new ToolDefinition(new ToolName("second"), "second", Map.of()), (context, arguments) -> new ToolOutput(true, Map.of("code", "TOOL_TIMEOUT")))));
     }
 
     static ModelCallResult result(ModelReply reply) {
@@ -107,7 +107,7 @@ final class MessageJobTestFixtures {
     }
 
     static ToolBinding binding(String name, Function<Map<String, Object>, ToolOutput> invocation) {
-        return new ToolBinding(new ToolDefinition(new ToolName(name), name, Map.of()), invocation::apply);
+        return new ToolBinding(new ToolDefinition(new ToolName(name), name, Map.of()), (context, arguments) -> invocation.apply(arguments));
     }
 
     static ToolRequest request(String id, String name) {
@@ -116,13 +116,13 @@ final class MessageJobTestFixtures {
 
     static MessageWorkClaim claim() {
         Instant claimedAt = Instant.parse("2026-09-01T00:00:00Z");
-        return new MessageWorkClaim(new MessageJobId("job-1"), new SessionId("session-1"),
+        return new MessageWorkClaim(new MessageJobId("00000000-0000-0000-0000-000000000001"), new SessionId("00000000-0000-0000-0000-000000000002"),
                 new com.java.system.sessionagent.conversation.domain.ModelSelection(TEST_ROUTE_ID.value(), "v1:test"), "worker", 1, claimedAt,
                 claimedAt.plusSeconds(30));
     }
 
     static UserMessage user() {
-        return new UserMessage(new SessionId("session-1"), new SessionSequence(1), Optional.of(new MessageJobId("job-1")), Instant.EPOCH,
+        return new UserMessage(new SessionId("00000000-0000-0000-0000-000000000002"), new SessionSequence(1), Optional.of(new MessageJobId("00000000-0000-0000-0000-000000000001")), Instant.EPOCH,
                 MessageRole.USER, "alice", "hello");
     }
 

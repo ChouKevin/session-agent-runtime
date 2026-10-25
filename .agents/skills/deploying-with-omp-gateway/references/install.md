@@ -82,6 +82,20 @@ PY
 
 `runtime.env` 是 systemd EnvironmentFile 與 Compose dotenv 的共同子集：一行一個 `NAME=value`；範例的 token/password 都使用不含空白、引號、`$` 或換行的值。不使用 `export`、命令替換，也不 `source` 這個檔案。若要使用含特殊字元的外部秘密，先分離各工具的編碼與 secret 注入方式，不能假設解析規則相同。
 
+若要交付 Markdown/CSV 附件或自動長回答 `answer.md`，先核准 app 的
+`files:write` scope 與 Slack 要求的 reinstall／重新授權，再另行核准 live 檢查。
+不把部署授權當成修改 scope/token 的授權；未核准就保留現況並回報 delivery
+限制，不用截斷／純文字 fallback 假裝成功。Native Markdown 的實際支援
+（含 workspace/platform feature 條件）必須在安裝 app 的環境另驗證。
+細節及 CSV 轉換／保留政策見 [configuration.md](configuration.md)。
+
+附件 bytes 與 upload capability 由 PostgreSQL 保存，不需要 public download
+目錄、額外檔案服務或放寬 filesystem 權限。更新前沿用
+[operations.md](operations.md) 的備份／migration 相容性流程，把 artifact、
+upload stages、對話及備份視為同一敏感資料邊界；本功能不新增自動刪除。
+尚有 `FINALIZING`／`UNCONFIRMED` 證據時，不用重置 stage 或重送問題修復；
+保留原 file/job ID 供操作者核對，避免一次性 finalize 被重播。
+
 若明確啟用 Runtime skills，另備操作者管理的內容目錄，依
 [configuration.md](configuration.md) 設定 roots 與 `SKILL.md`。Runtime service
 帳號只需 read/traverse，不應持有寫入權限；同帳號部署的 Unix owner mode 不能

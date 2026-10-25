@@ -52,6 +52,8 @@ import com.java.system.sessionagent.slack.port.out.SlackProgressStore;
 import com.java.system.sessionagent.slack.port.out.SlackSocketClient;
 import com.java.system.sessionagent.slack.port.out.SlackWebApi;
 import com.java.system.sessionagent.tool.port.ToolCatalog;
+import com.java.system.sessionagent.artifact.port.ArtifactStore;
+import com.java.system.sessionagent.storage.adapter.postgres.PostgresArtifactStore;
 import com.java.system.sessionagent.skill.port.SkillLibrary;
 import com.java.system.sessionagent.worker.application.MessageJobWorker;
 import com.java.system.sessionagent.worker.configuration.WorkerProperties;
@@ -376,6 +378,11 @@ public class RuntimeConfiguration {
             ObjectMapper objectMapper,
             PostgresIntakeCapacity intakeCapacity) {
         return new PostgresConversationStore(mapper, dataSource, runtimeClock, objectMapper, intakeCapacity);
+    }
+
+    @Bean
+    ArtifactStore artifactStore(DataSource dataSource, ObjectMapper objectMapper) {
+        return new PostgresArtifactStore(dataSource, objectMapper);
     }
 
     @Bean

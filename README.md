@@ -59,6 +59,30 @@ needed for understanding; relevant uncertainty and version limitations remain
 explicit. This is presentation guidance only: exact tool identifiers, required
 source/version verification, opaque MCP data, and complete audit history are unchanged.
 
+### Durable Markdown reports and CSV exports
+
+On normal jobs with a configured supported attachment route, `createMarkdownReport(title, content)`
+and `createCsv(title, columns, rows)` save durable PostgreSQL artifacts. They do not upload files or
+claim delivery; their result is `SAVED_PENDING_DELIVERY`. The first route adapter recognizes
+accepted Slack jobs with an original persisted thread binding while Slack is configured.
+HTTP jobs without that route do not expose the creation tools. Compaction requests have no tools.
+
+Markdown bytes are exact UTF-8, without parsing. CSV accepts string headers and rectangular string
+rows, writes a UTF-8 BOM, CRLF, quotes every field, and doubles embedded quotes. Cells whose first
+non-whitespace character is `=`, `+`, `-`, or `@`, or which begin with tab/CR/LF, receive an apostrophe
+prefix. Results disclose this spreadsheet-safe transformation; it is not a universal guarantee for
+all import behaviors. Original input remains in the tool-call audit.
+
+Limits are 1 MiB serialized bytes per generated file, 10 files / 5 MiB per job, 100 CSV columns,
+10,000 CSV data rows, and 120 Unicode code points per title. Filenames are immutable UUIDs with
+`.md` or `.csv`; titles never select paths. Stable invocation replay returns the same artifact;
+changed input for that identity is rejected. Only artifacts tied to their exact successful
+tool observation in the atomic assistant/tool batch can be released, and release requires a
+successful final assistant answer. Staged orphans and cancelled/failed jobs remain unpublishable.
+Artifacts inherit conversation retention; this feature adds neither public UUID downloads nor
+automatic deletion. Attachment upload/delivery is a separate adapter responsibility.
+
+
 ## Durable history and HTTP API
 
 Submit a message, poll its job, then read the complete session history:
@@ -452,7 +476,11 @@ Receipt means queued, not running. Active preparation, model waiting and tool
 lookup require a current processing lease. Status also distinguishes retry,
 stopping, interrupted ownership, preparing answer delivery, completed, cancelled,
 job failure and answer-delivery failure. `DONE` alone is not delivery success:
-completed appears only after every final-answer part is confirmed `SENT`. The final
+completed appears only after the full item set is prepared and the final text and
+every required attachment are confirmed `SENT`. A sent text item while a file is
+pending remains `DELIVERING`; a failed or `UNCONFIRMED` upload yields
+`DELIVERY_FAILED`. Existing cancellation/processing-failure precedence is unchanged,
+and recovery does not reopen historical fully delivered questions. The final
 answer remains separate from the mutable notice.
 
 `session-agent.slack.progress` defaults to `poll-delay: 2s`,
@@ -515,15 +543,53 @@ top-level nor unbound commands create a session or job. Commands use ordinary
 messages only, with no buttons, shortcuts, or slash commands. `STOP` notices use
 the existing durable delivery/retry mechanism and are queryable by Slack source.
 
-Terminal answers are persisted and delivered in parts of at most 4,000 UTF-16
-code units; retries continue with unsent parts and do not rerun the model.
-Splitting is presentation only: user text, model text, and raw database history
-remain unchanged. The splitter prefers line breaks and safe character boundaries,
-preserves whitespace inside code fences, may omit whitespace-only parts outside
-fences, and adds synthetic closing or reopening fences as needed for presentation,
-including closing an unclosed final fence. This is fence-aware presentation, not a
-full Markdown or JSON parser, so parts are not guaranteed to be independently valid
-Markdown or JSON.
+Ordinary assistant answers are one native Slack `markdown` block with a fixed
+accessible top-level notification. Markdown is never parsed, split, repaired, or
+truncated. Answers at or below both 10,000 Unicode code points and 10,000 UTF-16
+units stay inline; exceeding either bound attaches the exact UTF-8 answer as
+`answer.md` with a fixed explanatory notice and no extra model call. Runtime
+notices (including queue, cancellation, and terminal runtime errors) stay plain text.
+Unsupported native Markdown or attachments fail delivery visibly; Runtime does not
+silently fall back to plain text, strip tables/fences, truncate, or generate a new
+summary. Native Slack support (including workspace/platform feature availability)
+must be checked separately from preserving the original Markdown value.
+
+
+Delivery snapshots every required text/file item and all released tool artifacts
+in PostgreSQL before acknowledging any item. The parent cannot become `SENT`
+until every required item is confirmed. Auto-created `answer.md` has a deterministic
+job identity separate from tool artifacts. Attachment failure never regenerates
+the answer or reruns the model.
+V10 retains already-persisted V9 delivery parts as a complete prepared set of
+plain items, preserving their identities and sent acknowledgements. Such in-flight
+deliveries resume only their unsent items; they are not regenerated or re-split
+into the new whole-answer presentation.
+
+The upload protocol persists `PREPARED` → `ALLOCATED` → `UPLOADED` → `FINALIZING`
+→ `SENT`, releasing ownership between bounded operations. Known safe rejections
+honor `Retry-After` only with positive documented rate-limit rejection; a timing
+header on an ambiguous completion error does not authorize replay.
+Permission/type/expired-capability failures terminate delivery.
+Finalization intent is committed before the one-time Slack sharing call. A lost
+response, failed acknowledgement commit, or expired owner around finalization
+becomes `UNCONFIRMED` (parent `FAILED`), never a blind second finalize or new file.
+This is not an exactly-once Slack guarantee; operator reconciliation may be needed.
+The existing initial-message-post ambiguity is unchanged.
+
+File sharing requires the installed app's `files:write` permission. Scope changes
+and any required app reinstall/reauthorization need explicit operator approval;
+upgrading Runtime does not grant permission or authorize changing the app/token.
+Runtime does not request `files:read` or automatically reconcile uncertain files.
+Upload capabilities are sensitive, persisted only for staged transport, accepted
+only at HTTPS `files.slack.com/upload/`, and excluded from diagnostic rendering.
+The byte-upload client has no bot credentials and never follows redirects.
+Generated files, accepted long-answer bytes, upload evidence/capabilities, and
+conversation history inherit database access, backup security, and retention;
+there is no automatic artifact expiration/deletion or public UUID download URL.
+Do not reset `FINALIZING`/`UNCONFIRMED` to retry or resubmit the question to repair
+delivery: preserve evidence for operator reconciliation, without assuming Slack did
+or did not share the file. Native Markdown rendering and actual workspace file
+permissions still require an explicitly authorized live Slack check.
 
 ## Verification
 

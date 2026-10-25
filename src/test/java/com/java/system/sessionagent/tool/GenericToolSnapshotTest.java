@@ -1,5 +1,6 @@
 package com.java.system.sessionagent.tool;
 
+import static com.java.system.sessionagent.tool.TestToolInvocation.invocation;
 import com.java.system.sessionagent.tool.domain.ToolName;
 import com.java.system.sessionagent.tool.port.ToolBinding;
 import com.java.system.sessionagent.tool.port.ToolDefinition;
@@ -34,17 +35,17 @@ class GenericToolSnapshotTest {
         AtomicReference<Map<String, Object>> received = new AtomicReference<>();
         ToolBinding binding = new ToolBinding(
                 new ToolDefinition(new ToolName("semantic_search_code"), "Search indexed code", SCHEMA),
-                supplied -> {
+                (context, supplied) -> {
                     received.set(supplied);
                     return new ToolOutput(false, Map.of("items", List.of()));
                 });
         try (ToolSnapshot snapshot = new ToolSnapshot(List.of(binding))) {
-            ToolOutput output = snapshot.invoke(new ToolName("semantic_search_code"), arguments);
+            ToolOutput output = snapshot.invoke(invocation(), new ToolName("semantic_search_code"), arguments);
 
             assertFalse(output.isError());
             assertSame(arguments, received.get());
             assertThrows(IllegalArgumentException.class,
-                    () -> snapshot.invoke(new ToolName("semantic_search_code"), null));
+                    () -> snapshot.invoke(invocation(), new ToolName("semantic_search_code"), null));
         }
     }
 
@@ -73,7 +74,7 @@ class GenericToolSnapshotTest {
         snapshot.close();
 
         assertEquals(1, releases.get());
-        assertFalse(snapshot.invoke(new ToolName("first"), Map.of()).isError());
+        assertFalse(snapshot.invoke(invocation(), new ToolName("first"), Map.of()).isError());
     }
 
     @Test
@@ -85,7 +86,7 @@ class GenericToolSnapshotTest {
     @Test
     void returns_not_available_output_for_unknown_names() {
         try (ToolSnapshot snapshot = new ToolSnapshot(List.of())) {
-            ToolOutput output = snapshot.invoke(new ToolName("unknown"), Map.of());
+            ToolOutput output = snapshot.invoke(invocation(), new ToolName("unknown"), Map.of());
 
             assertTrue(output.isError());
             assertTrue(output.asStructuredValue().get("result") instanceof Map<?, ?>);
@@ -160,7 +161,7 @@ class GenericToolSnapshotTest {
     private static ToolBinding binding(String name) {
         return new ToolBinding(
                 new ToolDefinition(new ToolName(name), name, SCHEMA),
-                arguments -> new ToolOutput(false, arguments));
+                (context, arguments) -> new ToolOutput(false, arguments));
     }
 
     private static Stream<String> runtimeFailureCodes() {

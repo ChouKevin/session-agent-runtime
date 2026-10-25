@@ -127,7 +127,8 @@ Slack Java SDK 執行；外部 HTTP 指向 loopback fake，Socket intake 用既�
    Lookup 與 update 分不同 claim／poll，避免兩次 HTTP 共用一個 lease。
 3. 注入 update 503／429（含 `Retry-After`），確認 progress 延後但獨立 answer
    worker 仍送回答；永久刪除／權限錯誤停止該 target，不產生 replacement spam。
-   Multipart 未全數 `SENT` 前只能是準備傳送或傳送失敗，不能因 job `DONE` 宣稱完成。
+   最終文字及所有必要附件未全數 `SENT` 前只能是 `DELIVERING` 或 delivery failure，
+   不能因 job `DONE` 或文字已送達宣稱完成；`UNCONFIRMED` 也不是成功。
 4. 經既有 HTTP cancel／Slack stop adapter 路徑觀察 queued cancellation、
    active stopping → cancelled；停止 worker renewal 後等真實 lease 到期，應顯示
    interrupted 而非 running。重啟同一隔離資料庫並重播 source，應重用 notice ts
@@ -153,6 +154,44 @@ window 的 reconciliation（預設 30s > call timeout 25s），但 Slack 沒有 
 token 冒充真人。官方契約：
 [`chat.update`](https://docs.slack.dev/reference/methods/chat.update/)、
 [`chat.getPermalink`](https://docs.slack.dev/reference/methods/chat.getPermalink/)。
+
+## Markdown／附件驗收（本地 HTTP 與 installed app 分開）
+
+沿用隔離 PostgreSQL、實際 Runtime components／configured OpenAI HTTP adapter、
+`MessageHandler`、`JobProcessor`、delivery/progress workers 與 real Slack SDK，
+外部模型／Slack／raw upload 全指向 loopback fake HTTP。可用明確的本地 Spring
+composition 與 manual polls 控制 stage gates；這不等於 production Socket Mode、
+完整背景排程或 Slack UI 已驗證。不要載入私有部署 env，host probe 要在 Boot
+初始化前選 console/host logging，不為 `/app/logs` 放寬權限。
+
+1. 混合 Markdown／表格／code／Unicode 的 inline 回覆保留單一原文 block，
+   不配置檔案；超過 10,000 UTF-16 units／code points 的回答為固定通知及完整
+   UTF-8 `answer.md`，對照 assistant history／HTTP bytes，不增加摘要 model call。
+2. 讓 fake 模型真的收到 `createMarkdownReport`／`createCsv` 描述、呼叫兩工具、
+   讀到 committed observations 後完成回答。檢查 sequential atomic audit、
+   saved/pending 而非 delivered、工具結果無完整檔案內容及 channel/path 參數；
+   逐 bytes 核對 Markdown 與 CSV BOM／CRLF／quotes／formula-prefix disclosure。
+3. 同 thread 兩題與另一 session 分開對照 job/file IDs、原 channel/root thread；
+   source replay 不產生新 artifact/model request，historical completed 不重開。
+4. 在 ALLOCATED 與 UPLOADED 持久化後關閉／重建 context，使用原資料庫／ticket
+   繼續。真實 HTTP 429 的 Retry-After 必須持久化並阻止提前 poll；測試可在先
+   斷言 delay 後顯式推進 due gate，不能把這當成已等過真實時長。
+5. Finalize fake 收完整 body 後斷線，必須留下 UNCONFIRMED／DELIVERY_FAILED，
+   重啟不再次 finalize／allocation／model request；missing_scope／永久錯誤須
+   可見 failure 且原文 bytes 完整保留。文字已 SENT、附件未完仍是 DELIVERING。
+6. 保存每個 check、實際 HTTP/model counts、byte length/hash、history/progress
+   與 stage 證據；log/capture 僅合成資料、owner-only、Git 外。本地 source、
+   classpath、compiled classes、launcher/logging scaffolds 觀察成功後移除，
+   只清理 probe 自己的 container/volume，保留安全證據。
+
+另取得明確 live 授權後，才核對 installed app `files:write` 與必要
+reinstall/reauthorization、native Markdown 真正渲染／feature 限制、附件原 thread
+可見性。無授權或 app 不支援時回報未驗證／限制，不改 scopes/token、
+不 fallback／截斷，也不申請 `files:read` 假裝已可自動 reconciliation。
+CSV transformation 不保證所有 spreadsheet importer 安全；artifact、長回答、
+capabilities 及備份繼承對話保留／安全政策，無 TTL／public UUID download。
+UNCONFIRMED 不證明遠端已分享或未分享，保留證據人工核對，不強制 retry 或
+重跑模型；此流程不宣稱 exactly-once。
 
 ## Runtime skills 驗收（與 Gateway／真人 Slack 分開）
 

@@ -1,4 +1,10 @@
 package com.java.system.sessionagent.conversation;
+import com.java.system.sessionagent.tool.port.ArtifactReceipt;
+import com.java.system.sessionagent.tool.port.ToolBinding;
+import com.java.system.sessionagent.tool.port.ToolDefinition;
+import com.java.system.sessionagent.tool.port.ToolExecutionAuthority;
+import com.java.system.sessionagent.tool.port.ToolInvocation;
+import java.util.UUID;
 
 import com.java.system.sessionagent.conversation.domain.AssistantToolCallsMessage;
 import com.java.system.sessionagent.conversation.domain.MessageJobId;
@@ -45,6 +51,46 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class MessageJobToolExecutionTest {
+
+    @Test
+    void supplies_counted_call_and_ordered_tool_identity_and_preserves_internal_success_association() {
+        ConversationStore store = mockStore();
+        MessageWorkClaim claim = claim();
+        when(store.loadContextHistory(claim.sessionId())).thenReturn(contextHistory(List.of(user())));
+        when(store.reserveModelCall(eq(claim), eq(3), any(Instant.class))).thenReturn(OptionalInt.of(2), OptionalInt.of(3));
+        List<ToolInvocation> invoked = new ArrayList<>();
+        List<ArtifactReceipt> receipts = new ArrayList<>();
+        ToolBinding binding = new ToolBinding(
+                ToolDefinition.fromExposedName("export", "Export", Map.of()),
+                (invocation, arguments) -> {
+                    invoked.add(invocation);
+                    ArtifactReceipt receipt =
+                            new ArtifactReceipt(
+                                    UUID.randomUUID(), UUID.randomUUID(), invocation.context());
+                    receipts.add(receipt);
+                    return new ToolOutput(false, Map.of("status", "SAVED_PENDING_DELIVERY"), Optional.of(receipt));
+                });
+        AtomicInteger modelCalls = new AtomicInteger();
+        ConversationModel model = model(TEST_ROUTE_ID, (request, reservation, usage) -> {
+            int counted = reservation.reserve();
+            if (modelCalls.getAndIncrement() == 0) {
+                assertThat(counted).isEqualTo(2);
+                return result(new ModelReply.UseTools(Optional.of("Saving"), List.of(request("a", "export"), request("b", "export"))));
+            }
+            return result(new ModelReply.Text("unchanged final reply"));
+        });
+        service(store, model, () -> new ToolSnapshot(List.of(binding)), 3).process(claim, () -> true);
+        assertThat(invoked).extracting(invocation -> invocation.context().modelCallNumber()).containsExactly(2L, 2L);
+        assertThat(invoked).extracting(invocation -> invocation.context().toolOrdinal()).containsExactly(0, 1);
+        assertThat(invoked).allSatisfy(invocation -> assertThat(invocation.authority())
+                .isEqualTo(new ToolExecutionAuthority(claim.workerId(), claim.claimNumber())));
+        ArgumentCaptor<ConversationStore.MessageBatch> batches = ArgumentCaptor.forClass(ConversationStore.MessageBatch.class);
+        Mockito.verify(store, Mockito.times(2)).append(eq(claim), batches.capture(), any());
+        assertThat(batches.getAllValues().getFirst().messages().subList(1, 3))
+                .extracting(message -> ((ConversationStore.ToolObservationData) message).artifactReceipt().orElseThrow())
+                .containsExactlyElementsOf(receipts);
+        assertThat(batches.getAllValues().getLast().messages()).containsExactly(new ConversationStore.AssistantData("unchanged final reply"));
+    }
 
     @Test
     void completes_an_unrestricted_text_reply_without_tool_execution() {
@@ -351,10 +397,10 @@ class MessageJobToolExecutionTest {
 
     private static List<SessionMessage> nativeHistory() {
         return List.of(user(), new AssistantToolCallsMessage(
-                new SessionId("session-1"), new SessionSequence(2), Optional.of(new MessageJobId("job-1")), Instant.EPOCH,
+                claim().sessionId(), new SessionSequence(2), Optional.of(claim().messageJobId()), Instant.EPOCH,
                 MessageRole.ASSISTANT_TOOL_CALLS, Optional.of("Checking."), List.of(request("call-1", "first"))),
-                new ToolObservation(new SessionId("session-1"), new SessionSequence(3),
-                        Optional.of(new MessageJobId("job-1")), Instant.EPOCH, MessageRole.TOOL, new ToolCallId("call-1"), "first",
+                new ToolObservation(claim().sessionId(), new SessionSequence(3),
+                        Optional.of(claim().messageJobId()), Instant.EPOCH, MessageRole.TOOL, new ToolCallId("call-1"), "first",
                         Map.of("isError", false, "result", Map.of("snapshot", "first"))));
     }
 }

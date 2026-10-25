@@ -68,7 +68,7 @@ public final class McpToolCatalog implements ToolCatalog {
     private ToolBinding binding(Route route) {
         ToolDefinition definition = ToolDefinition.fromExposedName(
                 route.exposedName(), route.description(), route.inputSchema());
-        return new ToolBinding(definition, arguments -> invoke(route, arguments));
+        return new ToolBinding(definition, (invocation, arguments) -> invoke(route, arguments));
     }
 
     private ToolOutput invoke(Route route, Map<String, Object> arguments) {

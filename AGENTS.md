@@ -48,6 +48,7 @@ that directory.
 - `mcp/adapter/sdk`: MCP SDK clients, connection lifecycle, discovery, tool routing, and result mapping.
 - `mcp/adapter/actuator`: safe MCP connection diagnostics endpoint.
 - `tool/domain` and `tool/port`: generic provider-neutral tool names, definitions, calls, snapshots, and observations.
+- `artifact/application` and `artifact/port`: bounded Markdown/CSV exports, route-gated first-party creation tools, and durable artifact store contracts; generic MCP data remains opaque.
 - `storage/adapter/postgres`: PostgreSQL conversation adapters, MyBatis mappers, and UUID mapping; Flyway migrations remain under `src/main/resources/db/migration`.
 - `web/adapter/http`: message, job, session-history, and HTTP error endpoints; MCP actuator diagnostics remain in `mcp/adapter/actuator`.
 - `worker/application` and `worker/configuration`: queued job claim, renewal, processing, retry, limit, recovery coordination, and worker properties.

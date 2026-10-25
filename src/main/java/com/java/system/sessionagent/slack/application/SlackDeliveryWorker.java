@@ -6,7 +6,9 @@ import com.java.system.sessionagent.slack.domain.SlackDeliveryFailureCategory;
 import com.java.system.sessionagent.slack.domain.SlackDeliveryPart;
 import com.java.system.sessionagent.slack.domain.SlackPostFailure;
 import com.java.system.sessionagent.slack.domain.SlackPostRequest;
-import com.java.system.sessionagent.slack.domain.SlackTextParts;
+import com.java.system.sessionagent.slack.domain.SlackFileUpload;
+import com.java.system.sessionagent.slack.domain.SlackUploadTicket;
+import com.java.system.sessionagent.slack.domain.SlackUploadState;
 import com.java.system.sessionagent.slack.port.out.SlackDeliveryStore;
 import com.java.system.sessionagent.slack.port.out.SlackWebApi;
 
@@ -56,24 +58,28 @@ public final class SlackDeliveryWorker {
     private void deliverParts(SlackDeliveryClaim claim) {
         Optional<SlackDeliveryPart> nextPart;
         try {
-            nextPart = deliveryStore.nextPart(claim, () -> SlackTextParts.split(claim.postRequest().text()), properties.leaseDuration());
+            nextPart = deliveryStore.nextPart(claim, properties.leaseDuration());
         } catch (RuntimeException exception) {
-            logDelivery("slack_delivery_ownership_lost", claim, "PARTS_NOT_PREPARED", Optional.empty());
+            logDelivery("slack_delivery_ownership_lost", claim, "ITEMS_NOT_PREPARED", Optional.empty());
             return;
         }
         while (nextPart.isPresent()) {
             SlackDeliveryPart part = nextPart.orElseThrow();
-            SlackPostRequest request = new SlackPostRequest(claim.postRequest().channelId(), claim.postRequest().rootThreadTs(), part.text());
+            if (part.file().isPresent()) {
+                deliverFileStage(claim, part);
+                return;
+            }
+            SlackPostRequest request = new SlackPostRequest(claim.postRequest().channelId(), claim.postRequest().rootThreadTs(),
+                    part.text(), part.presentation());
             try {
                 String slackMessageTs = slackWebApi.post(request);
                 boolean sentCommitted = deliveryStore.markPartSent(claim, part, slackMessageTs);
-                logDelivery(sentCommitted ? "slack_delivery_sent" : "slack_delivery_ambiguous", claim,
-                        sentCommitted ? "SENT" : "POSTED_STATE_NOT_COMMITTED", Optional.empty());
+                logDelivery(sentCommitted ? "slack_delivery_item_sent" : "slack_delivery_ambiguous", claim,
+                        sentCommitted ? "ITEM_SENT" : "POSTED_STATE_NOT_COMMITTED", Optional.empty());
                 if (!sentCommitted) {
                     return;
                 }
-                nextPart = deliveryStore.nextPart(claim, () -> SlackTextParts.split(claim.postRequest().text()),
-                        properties.leaseDuration());
+                nextPart = deliveryStore.nextPart(claim, properties.leaseDuration());
             } catch (SlackPostFailure failure) {
                 recordFailure(claim, part, failure.category(), failure.retryAfter(), failure.slackMessageTs());
                 return;
@@ -82,6 +88,82 @@ public final class SlackDeliveryWorker {
                 return;
             }
         }
+    }
+
+    private void deliverFileStage(SlackDeliveryClaim claim, SlackDeliveryPart part) {
+        SlackFileUpload file = part.file().orElseThrow();
+        if (file.state() == SlackUploadState.UPLOADED) {
+            try {
+                finalizeFile(claim, part, file);
+            } catch (RuntimeException exception) {
+                logDelivery("slack_delivery_ambiguous", claim, "FINALIZATION_NOT_COMMITTED", Optional.empty());
+            }
+            return;
+        }
+        try {
+            switch (file.state()) {
+                case PREPARED -> {
+                    SlackUploadTicket ticket = slackWebApi.allocateUpload(file.filename(), file.byteLength());
+                    if (deliveryStore.allocated(claim, part, ticket)) {
+                        deliveryStore.releaseStage(claim);
+                    }
+                }
+                case ALLOCATED -> {
+                    slackWebApi.uploadBytes(file.ticket().orElseThrow(), file.uploadContent().orElseThrow());
+                    if (deliveryStore.uploaded(claim, part)) {
+                        deliveryStore.releaseStage(claim);
+                    }
+                }
+                case UPLOADED -> throw new IllegalStateException("Finalization uses its own uncertainty boundary");
+                case FINALIZING, UNCONFIRMED, FAILED, SENT ->
+                        logDelivery("slack_delivery_ownership_lost", claim, "ITEM_NOT_SENDABLE", Optional.empty());
+            }
+        } catch (SlackPostFailure failure) {
+            recordFailure(claim, part, failure.category(), failure.retryAfter(), Optional.empty());
+        } catch (RuntimeException exception) {
+            recordFailure(claim, part, SlackDeliveryFailureCategory.TRANSIENT, Optional.empty(), Optional.empty());
+        }
+    }
+
+    private void finalizeFile(SlackDeliveryClaim claim, SlackDeliveryPart part, SlackFileUpload file) {
+        if (!deliveryStore.beginFinalization(claim, part, properties.leaseDuration())) {
+            return;
+        }
+        // No exception after intent may escape into the ordinary safely-retryable stage handler.
+        try {
+            slackWebApi.finalizeUpload(file.ticket().orElseThrow(), file.title(), claim.postRequest().channelId(),
+                    claim.postRequest().rootThreadTs());
+        } catch (SlackPostFailure failure) {
+            if (failure.category() == SlackDeliveryFailureCategory.RATE_LIMIT) {
+                if (deliveryStore.rejectFinalization(claim, part)) {
+                    recordFailure(claim, part, failure.category(), failure.retryAfter(), Optional.empty());
+                }
+            } else if (failure.category() == SlackDeliveryFailureCategory.PERMANENT) {
+                recordFailure(claim, part, failure.category(), Optional.empty(), Optional.empty());
+            } else {
+                recordUnconfirmed(claim, part);
+            }
+            return;
+        } catch (RuntimeException exception) {
+            recordUnconfirmed(claim, part);
+            return;
+        }
+        try {
+            boolean acknowledged = deliveryStore.markPartSent(claim, part, file.ticket().orElseThrow().fileId());
+            logDelivery(acknowledged ? "slack_delivery_item_sent" : "slack_delivery_ambiguous", claim,
+                    acknowledged ? "FILE_SENT" : "FINALIZATION_NOT_COMMITTED", Optional.empty());
+            if (acknowledged) {
+                deliveryStore.releaseStage(claim);
+            }
+        } catch (RuntimeException exception) {
+            // Persisted FINALIZING remains evidence for recovery; never schedule another finalization.
+            logDelivery("slack_delivery_ambiguous", claim, "FINALIZATION_NOT_COMMITTED", Optional.empty());
+        }
+    }
+
+    private void recordUnconfirmed(SlackDeliveryClaim claim, SlackDeliveryPart part) {
+        boolean committed = deliveryStore.unconfirmed(claim, part);
+        logDelivery("slack_delivery_ambiguous", claim, committed ? "UNCONFIRMED" : "FINALIZATION_NOT_COMMITTED", Optional.empty());
     }
 
     private void recordFailure(

@@ -155,33 +155,6 @@ public interface SlackDatabaseMapper extends BaseMapper<SlackDatabaseMapper.Deli
             @Param("claimNumber") long claimNumber,
             @Param("leaseMilliseconds") long leaseMilliseconds);
 
-    @Select("select count(*) from slack_delivery_part where delivery_id = #{deliveryId}")
-    int countParts(@Param("deliveryId") UUID deliveryId);
-
-    @Insert("""
-            <script>
-            insert into slack_delivery_part(delivery_id, part_index, part_text, status)
-            values <foreach collection="texts" item="text" index="index" separator=",">
-                (#{deliveryId}, #{index}, #{text}, 'PENDING')
-            </foreach>
-            on conflict (delivery_id, part_index) do nothing
-            </script>
-            """)
-    int insertParts(@Param("deliveryId") UUID deliveryId, @Param("texts") List<String> texts);
-
-    @Select("""
-            select part.part_index, part.part_text
-            from slack_delivery_part part join slack_delivery delivery on delivery.delivery_id = part.delivery_id
-            where part.delivery_id = #{deliveryId} and part.status = 'PENDING'
-                and delivery.status = 'WORKING' and delivery.worker_id = #{workerId}
-                and delivery.claim_number = #{claimNumber} and delivery.locked_until > clock_timestamp()
-            order by part.part_index limit 1
-            """)
-    @Options(flushCache = Options.FlushCachePolicy.FALSE, useCache = false)
-    List<DeliveryPartRow> findNextPart(
-            @Param("deliveryId") UUID deliveryId,
-            @Param("workerId") String workerId,
-            @Param("claimNumber") long claimNumber);
 
     @Select("""
             select delivery_id from slack_delivery
@@ -201,6 +174,11 @@ public interface SlackDatabaseMapper extends BaseMapper<SlackDatabaseMapper.Deli
                 and delivery.delivery_id = part.delivery_id and delivery.status = 'WORKING'
                 and delivery.worker_id = #{workerId} and delivery.claim_number = #{claimNumber}
                 and delivery.locked_until > clock_timestamp()
+                and delivery.items_prepared
+                and (part.presentation <> 'FILE' or exists (
+                    select 1 from slack_delivery_upload upload where upload.delivery_id=part.delivery_id
+                        and upload.part_index=part.part_index and upload.state='SENT'
+                        and upload.finalization_claim=#{claimNumber}))
             """)
     int markPartSent(
             @Param("slackMessageTs") String slackMessageTs,
@@ -217,6 +195,11 @@ public interface SlackDatabaseMapper extends BaseMapper<SlackDatabaseMapper.Deli
                 worker_id = null, locked_until = null
             where delivery_id = #{deliveryId} and status = 'WORKING' and worker_id = #{workerId} and claim_number = #{claimNumber}
                 and locked_until > clock_timestamp()
+                and items_prepared
+                and not exists (select 1 from slack_delivery_part part where part.delivery_id=slack_delivery.delivery_id
+                    and part.status <> 'SENT')
+                and not exists (select 1 from slack_delivery_upload upload where upload.delivery_id=slack_delivery.delivery_id
+                    and upload.state <> 'SENT')
             """)
     int markDeliverySent(
             @Param("slackMessageTs") String slackMessageTs,
@@ -264,6 +247,8 @@ public interface SlackDatabaseMapper extends BaseMapper<SlackDatabaseMapper.Deli
                 next_attempt_at = clock_timestamp() + (#{delayMilliseconds} * interval '1 millisecond'), worker_id = null, locked_until = null
             where delivery_id = #{deliveryId} and status = 'WORKING' and worker_id = #{workerId} and claim_number = #{claimNumber}
                 and locked_until > clock_timestamp()
+                and not exists (select 1 from slack_delivery_upload upload
+                    where upload.delivery_id=slack_delivery.delivery_id and upload.state='FINALIZING')
             """)
     int scheduleRetry(
             @Param("category") String category,
@@ -574,8 +559,6 @@ public interface SlackDatabaseMapper extends BaseMapper<SlackDatabaseMapper.Deli
             int sentParts) {
     }
 
-    record DeliveryPartRow(int partIndex, String partText) {
-    }
 
     record NewDeliveryRow(
             UUID messageJobId,

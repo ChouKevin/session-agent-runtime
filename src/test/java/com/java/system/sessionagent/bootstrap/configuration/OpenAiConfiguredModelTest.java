@@ -288,7 +288,7 @@ class OpenAiConfiguredModelTest {
         Map<String, Object> schema = Map.of("type", "object", "properties", Map.of("query", Map.of("type", "string")),
                 "required", List.of("query"), "additionalProperties", false);
         ToolBinding tool = new ToolBinding(ToolDefinition.fromExposedName("lookup", "Look up a fee", schema),
-                arguments -> new com.java.system.sessionagent.tool.port.ToolOutput(false, Map.of()));
+                (context, arguments) -> new com.java.system.sessionagent.tool.port.ToolOutput(false, Map.of()));
         try (ConfiguredModels models = configuredModels(server)) {
             ModelCallResult result = models.defaultConversationModel().respond(
                     new ModelRequest(List.of(), new ToolSnapshot(List.of(tool))), () -> 1);

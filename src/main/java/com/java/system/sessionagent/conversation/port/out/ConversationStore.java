@@ -21,6 +21,7 @@ import com.java.system.sessionagent.conversation.domain.SessionMessage;
 import com.java.system.sessionagent.conversation.domain.SessionSequence;
 import com.java.system.sessionagent.conversation.domain.ToolCallId;
 import com.java.system.sessionagent.conversation.domain.ToolRequest;
+import com.java.system.sessionagent.tool.port.ArtifactReceipt;
 import org.springframework.util.Assert;
 
 import java.time.Duration;
@@ -190,12 +191,18 @@ public interface ConversationStore {
     record ToolObservationData(
             ToolCallId toolCallId,
             String toolName,
-            Object output) implements MessageData {
+            Object output,
+            Optional<ArtifactReceipt> artifactReceipt) implements MessageData {
+
+        public ToolObservationData(ToolCallId toolCallId, String toolName, Object output) {
+            this(toolCallId, toolName, output, Optional.empty());
+        }
 
         public ToolObservationData {
             Assert.notNull(toolCallId, "Tool call ID must not be null");
             Assert.hasText(toolName, "Tool name must not be blank");
             Assert.notNull(output, "Tool output must not be null");
+            Assert.notNull(artifactReceipt, "Artifact receipt must not be null");
         }
     }
 

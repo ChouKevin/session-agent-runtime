@@ -9,6 +9,7 @@ import com.java.system.sessionagent.slack.domain.SlackProgressUpdate;
 import com.java.system.sessionagent.slack.domain.SlackUpdateRequest;
 import com.java.system.sessionagent.slack.port.out.SlackProgressStore;
 import com.java.system.sessionagent.slack.port.out.SlackWebApi;
+import com.java.system.sessionagent.slack.TextSlackWebApi;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -168,7 +169,7 @@ class SlackProgressWorkerTest {
     }
 
     private static SlackWebApi api(java.util.function.Consumer<SlackUpdateRequest> update) {
-        return new SlackWebApi() {
+        return new TextSlackWebApi() {
             @Override
             public String post(SlackPostRequest request) { throw new AssertionError("Progress must never post"); }
             @Override

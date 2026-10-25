@@ -17,6 +17,31 @@ import com.java.system.sessionagent.slack.domain.SlackPostFailure;
 import com.java.system.sessionagent.slack.domain.SlackPostRequest;
 import com.java.system.sessionagent.slack.PostingSlackWebApi;
 import com.java.system.sessionagent.slack.configuration.SlackDeliveryProperties;
+import com.java.system.sessionagent.slack.domain.SlackUploadTicket;
+import com.java.system.sessionagent.slack.domain.SlackUploadState;
+import com.java.system.sessionagent.slack.domain.SlackPresentation;
+import com.java.system.sessionagent.artifact.application.ArtifactEncoder;
+import com.java.system.sessionagent.artifact.port.ArtifactStore;
+import com.java.system.sessionagent.storage.adapter.postgres.PostgresArtifactStore;
+import com.java.system.sessionagent.tool.TestToolInvocation;
+import com.java.system.sessionagent.tool.port.ToolOutput;
+import com.java.system.sessionagent.artifact.application.ArtifactToolCatalog;
+import com.java.system.sessionagent.tool.domain.ToolName;
+import java.util.LinkedHashMap;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+import java.nio.charset.StandardCharsets;
+import com.java.system.sessionagent.slack.adapter.sdk.SlackSdkWebApi;
+import com.java.system.sessionagent.slack.configuration.SlackProperties;
+import com.slack.api.Slack;
+import com.slack.api.SlackConfig;
+import com.slack.api.util.http.SlackHttpClient;
+import com.sun.net.httpserver.HttpServer;
+import java.net.InetSocketAddress;
+import java.io.OutputStream;
+import java.util.concurrent.CopyOnWriteArrayList;
+import org.mockito.MockedStatic;
+import org.mockito.Mockito;
 
 import ch.qos.logback.classic.Logger;
 import ch.qos.logback.classic.spi.ILoggingEvent;
@@ -66,7 +91,6 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
 
 import java.sql.Connection;
 import java.sql.PreparedStatement;
-import java.sql.Timestamp;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -111,6 +135,476 @@ class SlackDeliveryPostgresIT {
     @AfterEach
     void clean() {
         flyway().clean();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"", " \t\n"})
+    void delivers_committed_markdown_and_csv_with_blank_titles_without_changing_metadata_or_bytes(String title) {
+        PostgresConversationStore conversations = new PostgresConversationStore(dataSource(), Clock.fixed(NOW, ZoneOffset.UTC),
+                new ObjectMapper(), intakeCapacity);
+        MessageIntakePort messages = new MessageService(conversations, TestConfiguredModels.withDefault("test"),
+                new NoOpConversationTelemetry());
+        PostgresMessageSubmission intake = new PostgresMessageSubmission(dataSource(), messages,
+                new JobCancellationService(conversations), Clock.fixed(NOW, ZoneOffset.UTC), intakeCapacity);
+        IncomingMessage message = new IncomingMessage(IncomingMessageSource.SLACK, "slack:T1:C1:1.000001", "U1", "1.000001", "Export reports");
+        assertThat(intake.receive(new MessageSubmission("blank-title", "T1", "C1", "1.000001", "1.000001",
+                SlackIntakeClassification.ACCEPTED, Optional.of(message))).outcome()).isEqualTo(SlackEventOutcome.ACCEPTED);
+        MessageReceipt receipt = conversations.receive(message, TestConfiguredModels.withDefault("test").defaultSelection(),
+                TestConfiguredModels.withDefault("test"));
+        MessageWorkClaim claim = conversations.claimNext("blank-title-tools", Duration.ofMinutes(1)).orElseThrow();
+        assertThat(conversations.reserveModelCall(claim, 2, NOW)).hasValue(1);
+        PostgresArtifactStore artifacts = new PostgresArtifactStore(dataSource(), new ObjectMapper());
+        SlackProperties configured = new SlackProperties("xapp-test", "xoxb-test", "UBOT", Duration.ofSeconds(1), Duration.ofSeconds(1));
+        ArtifactToolCatalog catalog = new ArtifactToolCatalog(emptyToolCatalog(), artifacts, new SlackAttachmentRoute(dataSource(), configured));
+        String markdown = "# Exact report\n\n```text\n中😀\n```\n";
+        Map<String, Object> markdownArguments = Map.of("title", title, "content", markdown);
+        Map<String, Object> csvArguments = Map.of("title", title, "columns", List.of("name", "value"),
+                "rows", List.of(List.of("中😀", "=1")));
+        ToolOutput markdownOutput;
+        ToolOutput csvOutput;
+        try (ToolSnapshot tools = catalog.snapshot(receipt.sessionId().value(), receipt.messageJobId().value())) {
+            markdownOutput = tools.invoke(TestToolInvocation.of(claim, 1, 0), new ToolName("createMarkdownReport"), markdownArguments);
+            csvOutput = tools.invoke(TestToolInvocation.of(claim, 1, 1), new ToolName("createCsv"), csvArguments);
+        }
+        assertThat(markdownOutput.isError()).isFalse();
+        assertThat(csvOutput.isError()).isFalse();
+        ToolCallId markdownCall = new ToolCallId("blank-title-markdown");
+        ToolCallId csvCall = new ToolCallId("blank-title-csv");
+        conversations.append(claim, new ConversationStore.MessageBatch(List.of(
+                new ConversationStore.AssistantToolCallsData(Optional.empty(), List.of(
+                        new ConversationStore.ToolCallData(markdownCall, "createMarkdownReport", markdownArguments),
+                        new ConversationStore.ToolCallData(csvCall, "createCsv", csvArguments))),
+                new ConversationStore.ToolObservationData(markdownCall, "createMarkdownReport", markdownOutput.asStructuredValue(),
+                        markdownOutput.artifactReceipt()),
+                new ConversationStore.ToolObservationData(csvCall, "createCsv", csvOutput.asStructuredValue(), csvOutput.artifactReceipt())),
+                ConversationStore.JobUpdate.KEEP_WORKING), NOW);
+        UUID sessionId = UUID.fromString(receipt.sessionId().value());
+        UUID jobId = UUID.fromString(receipt.messageJobId().value());
+        assertThat(artifacts.released(sessionId, jobId)).isEmpty();
+        assertThat(jdbcTemplate.queryForObject("""
+                select count(*) from generated_artifact where message_job_id=? and observation_sequence is not null
+                """, Integer.class, jobId)).isEqualTo(2);
+        conversations.append(claim, new ConversationStore.MessageBatch(List.of(new ConversationStore.AssistantData("Both reports are ready.")),
+                ConversationStore.JobUpdate.COMPLETE), NOW);
+        List<ArtifactStore.Artifact> released = artifacts.released(sessionId, jobId);
+        assertThat(released).hasSize(2).allSatisfy(file -> assertThat(file.title()).isEqualTo(title));
+        assertThat(released.get(0).content()).isEqualTo(markdown.getBytes(StandardCharsets.UTF_8));
+        assertThat(released.get(1).content()).isEqualTo("\uFEFF\"name\",\"value\"\r\n\"中😀\",\"'=1\"\r\n".getBytes(StandardCharsets.UTF_8));
+        markQueuedNoticeSent();
+        List<SlackPostRequest> posts = new ArrayList<>();
+        Map<String, ArtifactStore.Artifact> allocated = new LinkedHashMap<>();
+        Map<String, byte[]> uploaded = new LinkedHashMap<>();
+        Map<String, String> finalizedTitles = new LinkedHashMap<>();
+        PostingSlackWebApi api = new PostingSlackWebApi() {
+            @Override public String post(SlackPostRequest request) {
+                posts.add(request);
+                return "2.000001";
+            }
+            @Override public SlackUploadTicket allocateUpload(String filename, int byteLength) {
+                ArtifactStore.Artifact file = released.stream().filter(candidate -> candidate.filename().equals(filename)).findFirst().orElseThrow();
+                assertThat(byteLength).isEqualTo(file.content().length);
+                String fileId = "F" + allocated.size();
+                allocated.put(fileId, file);
+                return new SlackUploadTicket(fileId, "https://files.slack.com/upload/v1/" + fileId);
+            }
+            @Override public void uploadBytes(SlackUploadTicket ticket, byte[] content) {
+                ArtifactStore.Artifact file = allocated.get(ticket.fileId());
+                assertThat(content).isEqualTo(file.content());
+                uploaded.put(file.filename(), content);
+            }
+            @Override public void finalizeUpload(SlackUploadTicket ticket, String fileTitle, String channelId, String rootThreadTs) {
+                assertThat(channelId).isEqualTo("C1");
+                assertThat(rootThreadTs).isEqualTo("1.000001");
+                assertThat(fileTitle).isEqualTo(title);
+                finalizedTitles.put(allocated.get(ticket.fileId()).filename(), fileTitle);
+            }
+        };
+        SlackPostgresDeliveryStore deliveries = new SlackPostgresDeliveryStore(dataSource());
+        SlackDeliveryWorker worker = new SlackDeliveryWorker(deliveries, api, new SlackDeliveryProperties(), "blank-title-delivery");
+        assertThat(worker.poll()).isTrue();
+        assertThat(allocated).as("Accepted title metadata must not prevent preparing and allocating the first required file").hasSize(1);
+        for (int stage = 1; stage < 6; stage++) { assertThat(worker.poll()).isTrue(); }
+        assertThat(worker.poll()).isFalse();
+        assertThat(posts).containsExactly(new SlackPostRequest("C1", "1.000001", "Both reports are ready.", SlackPresentation.MARKDOWN));
+        assertThat(uploaded).hasSize(2);
+        assertThat(finalizedTitles).hasSize(2).allSatisfy((filename, fileTitle) -> assertThat(fileTitle).isEqualTo(title));
+        assertThat(artifacts.released(sessionId, jobId)).allSatisfy(file -> {
+            assertThat(file.title()).isEqualTo(title);
+            assertThat(uploaded.get(file.filename())).isEqualTo(file.content());
+        });
+        assertThat(jdbcTemplate.queryForList("select title from slack_delivery_upload where delivery_id=? order by part_index",
+                String.class, answerDeliveryId())).containsExactly(title, title);
+        assertThat(jdbcTemplate.queryForList("select state from slack_delivery_upload where delivery_id=? order by part_index",
+                String.class, answerDeliveryId())).containsExactly("SENT", "SENT");
+        assertThat(deliveries.read(answerDeliveryId())).hasValueSatisfying(view -> {
+            assertThat(view.status()).isEqualTo(SlackDeliveryStatus.SENT);
+            assertThat(view.totalParts()).contains(3);
+            assertThat(view.sentParts()).isEqualTo(3);
+        });
+    }
+
+    @Test
+    void prepares_exact_long_answer_and_released_artifacts_atomically_before_any_parent_completion() {
+        String text = "# Exact 中😀\n" + "x".repeat(10_001);
+        MessageReceipt receipt = completeSlackAssistantJob(text, true);
+        markQueuedNoticeSent();
+        SlackPostgresDeliveryStore store = new SlackPostgresDeliveryStore(dataSource());
+        store.discover();
+        SlackDeliveryClaim claim = store.claimNext("prepare", Duration.ofSeconds(30), 5).orElseThrow();
+        jdbcTemplate.execute("""
+                create function reject_tool_upload() returns trigger language plpgsql as $$
+                begin if new.part_index=2 then raise exception 'injected preparation rollback'; end if; return new; end $$;
+                create trigger reject_tool_upload before insert on slack_delivery_upload
+                for each row execute function reject_tool_upload()
+                """);
+        assertThatThrownBy(() -> store.nextPart(claim, Duration.ofSeconds(30))).isInstanceOf(RuntimeException.class);
+        assertThat(jdbcTemplate.queryForObject("select count(*) from slack_delivery_part where delivery_id=?", Integer.class,
+                claim.deliveryId())).isZero();
+        assertThat(jdbcTemplate.queryForObject("select items_prepared from slack_delivery where delivery_id=?", Boolean.class,
+                claim.deliveryId())).isFalse();
+        assertThat(store.markPartSent(claim, new SlackDeliveryPart(0, "invented"), "2.0")).isFalse();
+        jdbcTemplate.execute("drop trigger reject_tool_upload on slack_delivery_upload; drop function reject_tool_upload()");
+        SlackDeliveryPart notification = store.nextPart(claim, Duration.ofSeconds(30)).orElseThrow();
+        assertThat(notification.presentation()).isEqualTo(SlackPresentation.PLAIN);
+        assertThat(jdbcTemplate.queryForList("select filename from slack_delivery_upload where delivery_id=? order by part_index",
+                String.class, claim.deliveryId())).hasSize(2).first().isEqualTo("answer.md");
+        assertThat(jdbcTemplate.queryForObject("select content from slack_delivery_upload where delivery_id=? and part_index=1",
+                byte[].class, claim.deliveryId())).isEqualTo(text.getBytes(StandardCharsets.UTF_8));
+        assertThat(jdbcTemplate.queryForObject("""
+                select count(distinct identity) from slack_delivery_upload where delivery_id=?
+                """, Integer.class, claim.deliveryId())).isEqualTo(2);
+        assertThat(jdbcTemplate.queryForObject("select identity from slack_delivery_upload where delivery_id=? and part_index=1",
+                UUID.class, claim.deliveryId())).isEqualTo(UUID.nameUUIDFromBytes(
+                        ("slack-answer:" + receipt.messageJobId().value()).getBytes(StandardCharsets.UTF_8)));
+        assertThat(store.markPartSent(claim, notification, "2.000001")).isTrue();
+        assertThat(store.read(claim.deliveryId())).hasValueSatisfying(view -> {
+            assertThat(view.status()).isEqualTo(SlackDeliveryStatus.WORKING);
+            assertThat(view.totalParts()).contains(3);
+            assertThat(view.sentParts()).isOne();
+        });
+        assertThat(jdbcTemplate.queryForObject("select status from message_job where message_job_id=?", String.class,
+                UUID.fromString(receipt.messageJobId().value()))).isEqualTo("DONE");
+    }
+
+    @Test
+    void parent_waits_for_both_answer_file_and_tool_file_across_fresh_worker_instances() {
+        String answer = "x".repeat(10_001);
+        completeSlackAssistantJob(answer, true);
+        markQueuedNoticeSent();
+        UploadApi api = new UploadApi();
+        for (int stage = 0; stage < 5; stage++) {
+            assertThat(uploadWorker(api).poll()).isTrue();
+            assertThat(new SlackPostgresDeliveryStore(dataSource()).read(answerDeliveryId())).hasValueSatisfying(view ->
+                    assertThat(view.status()).isNotEqualTo(SlackDeliveryStatus.SENT));
+        }
+        assertThat(uploadWorker(api).poll()).isTrue();
+        assertThat(api.allocations).isEqualTo(2);
+        assertThat(api.uploads).isEqualTo(2);
+        assertThat(api.finalizations).isEqualTo(2);
+        assertThat(api.uploadedContents).hasSize(2);
+        assertThat(api.uploadedContents.get(0)).isEqualTo(answer.getBytes(StandardCharsets.UTF_8));
+        assertThat(api.uploadedContents.get(1)).isEqualTo("# Tool report\nExact 中😀".getBytes(StandardCharsets.UTF_8));
+        assertThat(new SlackPostgresDeliveryStore(dataSource()).read(answerDeliveryId())).hasValueSatisfying(view -> {
+            assertThat(view.status()).isEqualTo(SlackDeliveryStatus.SENT);
+            assertThat(view.sentParts()).isEqualTo(3);
+            assertThat(view.slackMessageTs()).contains("2.000001");
+        });
+    }
+
+    @Test
+    void overlapping_acknowledgement_cannot_complete_parent_while_items_are_still_being_prepared() throws Exception {
+        completeSlackAssistantJob("x".repeat(10_001), true);
+        markQueuedNoticeSent();
+        SlackPostgresDeliveryStore store = new SlackPostgresDeliveryStore(dataSource());
+        store.discover();
+        SlackDeliveryClaim claim = store.claimNext("preparer", Duration.ofSeconds(30), 5).orElseThrow();
+        jdbcTemplate.execute("""
+                create function pause_upload_preparation() returns trigger language plpgsql as $$
+                begin perform pg_advisory_xact_lock(424242); return new; end $$;
+                create trigger pause_upload_preparation before insert on slack_delivery_upload
+                for each row execute function pause_upload_preparation()
+                """);
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try (Connection gate = dataSource().getConnection()) {
+            try (PreparedStatement lock = gate.prepareStatement("select pg_advisory_lock(424242)")) { lock.execute(); }
+            Future<Optional<SlackDeliveryPart>> preparing = executor.submit(() -> store.nextPart(claim, Duration.ofSeconds(30)));
+            awaitDatabaseLockWaiter("insert into slack_delivery_upload");
+            Future<Boolean> acknowledgement = executor.submit(() -> store.markPartSent(claim, new SlackDeliveryPart(0, "notification"), "2.0"));
+            awaitDatabaseLockWaiter("select delivery_id from slack_delivery");
+            assertThat(acknowledgement.isDone()).isFalse();
+            try (PreparedStatement unlock = gate.prepareStatement("select pg_advisory_unlock(424242)")) { unlock.execute(); }
+            assertThat(preparing.get(5, TimeUnit.SECONDS)).isPresent();
+            assertThat(acknowledgement.get(5, TimeUnit.SECONDS)).isTrue();
+        } finally {
+            executor.shutdownNow();
+        }
+        assertThat(store.read(claim.deliveryId())).hasValueSatisfying(view -> {
+            assertThat(view.status()).isEqualTo(SlackDeliveryStatus.WORKING);
+            assertThat(view.totalParts()).contains(3);
+            assertThat(view.sentParts()).isOne();
+        });
+    }
+
+    @Test
+    void crash_after_byte_acceptance_reuses_the_persisted_ticket_without_fresh_allocation() {
+        completeSlackAssistantJob("x".repeat(10_001), false);
+        markQueuedNoticeSent();
+        UploadApi api = new UploadApi();
+        assertThat(uploadWorker(api).poll()).isTrue();
+        api.expireDuringUpload = true;
+        assertThat(uploadWorker(api).poll()).isTrue();
+        assertThat(uploadState()).isEqualTo("ALLOCATED");
+        api.expireDuringUpload = false;
+        assertThat(uploadWorker(api).poll()).isTrue();
+        assertThat(uploadState()).isEqualTo("UPLOADED");
+        assertThat(api.allocations).isOne();
+        assertThat(api.uploads).isEqualTo(2);
+        assertThat(uploadWorker(api).poll()).isTrue();
+        assertThat(api.finalizations).isOne();
+    }
+
+    @Test
+    void restarts_after_allocation_and_byte_upload_without_reallocation_and_fences_stale_acknowledgements() {
+        completeSlackAssistantJob("😀".repeat(5_001), false);
+        markQueuedNoticeSent();
+        UploadApi api = new UploadApi();
+        assertThat(uploadWorker(api).poll()).isTrue(); // notification + allocation; stage ownership released
+        assertThat(api.allocations).isOne();
+        assertThat(uploadState()).isEqualTo("ALLOCATED");
+        SlackPostgresDeliveryStore oldStore = new SlackPostgresDeliveryStore(dataSource());
+        SlackDeliveryClaim oldClaim = oldStore.claimNext("old-byte-worker", Duration.ofSeconds(30), 5).orElseThrow();
+        SlackDeliveryPart oldPart = oldStore.nextPart(oldClaim, Duration.ofSeconds(30)).orElseThrow();
+        expireUploadLease();
+        SlackPostgresDeliveryStore restarted = new SlackPostgresDeliveryStore(dataSource());
+        SlackDeliveryClaim newClaim = restarted.claimNext("new-byte-worker", Duration.ofSeconds(30), 5).orElseThrow();
+        SlackDeliveryPart newPart = restarted.nextPart(newClaim, Duration.ofSeconds(30)).orElseThrow();
+        assertThat(newPart.file().orElseThrow().ticket()).contains(new SlackUploadTicket("F1", "https://files.slack.com/upload/v1/private"));
+        assertThat(oldStore.uploaded(oldClaim, oldPart)).isFalse();
+        api.uploadBytes(newPart.file().orElseThrow().ticket().orElseThrow(), newPart.file().orElseThrow().uploadContent().orElseThrow());
+        assertThat(restarted.uploaded(newClaim, newPart)).isTrue();
+        expireUploadLease(); // crash after persisted bytes, before finalization intent
+        SlackPostgresDeliveryStore beforeIntent = new SlackPostgresDeliveryStore(dataSource());
+        SlackDeliveryClaim finalClaim = beforeIntent.claimNext("finalizer", Duration.ofSeconds(30), 5).orElseThrow();
+        SlackDeliveryPart finalPart = beforeIntent.nextPart(finalClaim, Duration.ofSeconds(30)).orElseThrow();
+        assertThat(finalPart.file().orElseThrow().state()).isEqualTo(SlackUploadState.UPLOADED);
+        assertThat(beforeIntent.beginFinalization(finalClaim, finalPart, Duration.ofSeconds(30))).isTrue();
+        assertThat(new SlackPostgresDeliveryStore(dataSource()).claimNext("competitor", Duration.ofSeconds(30), 5)).isEmpty();
+        assertThat(beforeIntent.scheduleRetry(finalClaim, SlackDeliveryFailureCategory.TRANSIENT, Duration.ZERO)).isFalse();
+        expireUploadLease(); // crash after intent, even if no remote call can be proved
+        SlackPostgresDeliveryStore recovered = new SlackPostgresDeliveryStore(dataSource());
+        assertThat(recovered.claimNext("recovery", Duration.ofSeconds(30), 5)).isEmpty();
+        assertThat(uploadState()).isEqualTo("UNCONFIRMED");
+        assertThat(beforeIntent.markPartSent(finalClaim, finalPart, "F1")).isFalse();
+        assertThat(recovered.read(answerDeliveryId())).hasValueSatisfying(view -> {
+            assertThat(view.status()).isEqualTo(SlackDeliveryStatus.FAILED);
+            assertThat(view.failureCategory()).contains(SlackDeliveryFailureCategory.UNCONFIRMED);
+        });
+        assertThat(api.allocations).isOne();
+        assertThat(api.uploads).isOne();
+        assertThat(api.finalizations).isZero();
+    }
+
+    @Test
+    void accepted_but_response_lost_finalization_is_unconfirmed_once_without_new_upload_or_model_retry() {
+        MessageReceipt receipt = completeSlackAssistantJob("x".repeat(10_001), false);
+        markQueuedNoticeSent();
+        UploadApi api = new UploadApi();
+        api.failStage = "finalize";
+        api.failure = Optional.of(new SlackPostFailure(SlackDeliveryFailureCategory.TRANSIENT, Optional.empty()));
+        assertThat(uploadWorker(api).poll()).isTrue();
+        assertThat(uploadWorker(api).poll()).isTrue();
+        assertThat(uploadWorker(api).poll()).isTrue();
+        assertThat(uploadWorker(api).poll()).isFalse();
+        assertThat(api.allocations).isOne();
+        assertThat(api.uploads).isOne();
+        assertThat(api.finalizations).isOne();
+        assertThat(uploadState()).isEqualTo("UNCONFIRMED");
+        assertThat(new SlackPostgresDeliveryStore(dataSource()).read(answerDeliveryId())).hasValueSatisfying(view -> {
+            assertThat(view.status()).isEqualTo(SlackDeliveryStatus.FAILED);
+            assertThat(view.failureCategory()).contains(SlackDeliveryFailureCategory.UNCONFIRMED);
+            assertThat(view.sentParts()).isOne();
+        });
+        assertThat(jdbcTemplate.queryForObject("select status from message_job where message_job_id=?", String.class,
+                UUID.fromString(receipt.messageJobId().value()))).isEqualTo("DONE");
+        assertThat(jdbcTemplate.queryForObject("select model_calls from message_job where message_job_id=?", Integer.class,
+                UUID.fromString(receipt.messageJobId().value()))).isOne();
+        assertThat(jdbcTemplate.queryForObject("select count(*) from slack_delivery_upload", Integer.class)).isOne();
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {200, 503, 429})
+    void ambiguous_sdk_finalization_with_retry_after_is_not_replayed_or_reallocated(int status) throws Exception {
+        MessageReceipt receipt = completeSlackAssistantJob("x".repeat(10_001), false);
+        markQueuedNoticeSent();
+        UploadApi stages = new UploadApi();
+        assertThat(uploadWorker(stages).poll()).isTrue();
+        assertThat(uploadWorker(stages).poll()).isTrue();
+        assertThat(uploadState()).isEqualTo("UPLOADED");
+        List<String> paths = new CopyOnWriteArrayList<>();
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/", exchange -> {
+            paths.add(exchange.getRequestURI().getPath());
+            exchange.getRequestBody().readAllBytes();
+            exchange.getResponseHeaders().set("Retry-After", "7");
+            byte[] response = "{\"ok\":false,\"error\":\"internal_error\"}".getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(status, response.length);
+            try (OutputStream body = exchange.getResponseBody()) { body.write(response); }
+        });
+        server.start();
+        try (MockedStatic<Slack> factory = Mockito.mockStatic(Slack.class, Mockito.CALLS_REAL_METHODS)) {
+            factory.when(() -> Slack.getInstance(Mockito.any(SlackConfig.class), Mockito.any(SlackHttpClient.class)))
+                    .thenAnswer(invocation -> {
+                        SlackConfig config = invocation.getArgument(0);
+                        config.setMethodsEndpointUrlPrefix("http://127.0.0.1:" + server.getAddress().getPort() + "/");
+                        return invocation.callRealMethod();
+                    });
+            SlackProperties properties = new SlackProperties("xapp-test", "xoxb-test", "UBOT", Duration.ofSeconds(1), Duration.ofSeconds(1));
+            try (SlackSdkWebApi api = new SlackSdkWebApi(properties)) {
+                SlackDeliveryWorker worker = new SlackDeliveryWorker(new SlackPostgresDeliveryStore(dataSource()), api,
+                        new SlackDeliveryProperties(), "sdk-finalizer");
+                assertThat(worker.poll()).isTrue();
+                assertThat(worker.poll()).isFalse();
+            }
+        } finally { server.stop(0); }
+        assertThat(paths).containsExactly("/files.completeUploadExternal");
+        assertThat(stages.allocations).isOne();
+        assertThat(stages.uploads).isOne();
+        assertThat(uploadState()).isEqualTo("UNCONFIRMED");
+        assertThat(new SlackPostgresDeliveryStore(dataSource()).read(answerDeliveryId())).hasValueSatisfying(view -> {
+            assertThat(view.status()).isEqualTo(SlackDeliveryStatus.FAILED);
+            assertThat(view.failureCategory()).contains(SlackDeliveryFailureCategory.UNCONFIRMED);
+        });
+        assertThat(jdbcTemplate.queryForObject("select count(*) from slack_delivery_upload", Integer.class)).isOne();
+        assertThat(jdbcTemplate.queryForObject("select model_calls from message_job where message_job_id=?", Integer.class,
+                UUID.fromString(receipt.messageJobId().value()))).isOne();
+    }
+
+    @Test
+    void crash_after_remote_acceptance_before_ack_commit_never_finalizes_twice() {
+        completeSlackAssistantJob("x".repeat(10_001), false);
+        markQueuedNoticeSent();
+        UploadApi api = new UploadApi();
+        assertThat(uploadWorker(api).poll()).isTrue();
+        assertThat(uploadWorker(api).poll()).isTrue();
+        api.expireDuringFinalize = true;
+        assertThat(uploadWorker(api).poll()).isTrue();
+        assertThat(uploadState()).isEqualTo("FINALIZING");
+        assertThat(uploadWorker(api).poll()).isFalse();
+        assertThat(uploadState()).isEqualTo("UNCONFIRMED");
+        assertThat(api.finalizations).isOne();
+        assertThat(api.allocations).isOne();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"allocate", "upload", "finalize"})
+    void safely_rejected_rate_limits_keep_the_ticket_and_honor_retry_after(String stage) {
+        completeSlackAssistantJob("x".repeat(10_001), false);
+        markQueuedNoticeSent();
+        UploadApi api = new UploadApi();
+        api.failStage = stage;
+        api.failure = Optional.of(new SlackPostFailure(SlackDeliveryFailureCategory.RATE_LIMIT, Optional.of(Duration.ofSeconds(7))));
+        for (int index = 0; index < 3; index++) {
+            assertThat(uploadWorker(api).poll()).isTrue();
+            if (api.failure.isEmpty()) { break; }
+        }
+        assertThat(jdbcTemplate.queryForObject("""
+                select next_attempt_at>clock_timestamp()+interval '5 seconds' from slack_delivery where kind='ANSWER'
+                """, Boolean.class)).isTrue();
+        assertThat(uploadWorker(api).poll()).isFalse();
+        jdbcTemplate.update("update slack_delivery set next_attempt_at=clock_timestamp() where kind='ANSWER'");
+        for (int index = 0; index < 3; index++) { uploadWorker(api).poll(); }
+        assertThat(uploadState()).isEqualTo("SENT");
+        assertThat(api.allocations).isEqualTo(stage.equals("allocate") ? 2 : 1);
+        assertThat(api.uploads).isEqualTo(stage.equals("upload") ? 2 : 1);
+        assertThat(api.finalizations).isEqualTo(stage.equals("finalize") ? 2 : 1);
+        assertThat(new SlackPostgresDeliveryStore(dataSource()).read(answerDeliveryId())).hasValueSatisfying(view -> {
+            assertThat(view.status()).isEqualTo(SlackDeliveryStatus.SENT);
+            assertThat(view.slackMessageTs()).contains("2.000001");
+        });
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"allocate", "upload", "finalize"})
+    void permission_type_or_expired_capability_errors_terminate_without_regeneration(String stage) {
+        completeSlackAssistantJob("x".repeat(10_001), false);
+        markQueuedNoticeSent();
+        UploadApi api = new UploadApi();
+        api.failStage = stage;
+        api.failure = Optional.of(new SlackPostFailure(SlackDeliveryFailureCategory.PERMANENT, Optional.empty()));
+        for (int index = 0; index < 3; index++) { uploadWorker(api).poll(); }
+        assertThat(uploadWorker(api).poll()).isFalse();
+        assertThat(uploadState()).isEqualTo("FAILED");
+        assertThat(api.allocations).isOne();
+        assertThat(new SlackPostgresDeliveryStore(dataSource()).read(answerDeliveryId())).hasValueSatisfying(view ->
+                assertThat(view.status()).isEqualTo(SlackDeliveryStatus.FAILED));
+    }
+
+    private SlackDeliveryWorker uploadWorker(UploadApi api) {
+        return new SlackDeliveryWorker(new SlackPostgresDeliveryStore(dataSource()), api, new SlackDeliveryProperties(), "upload-worker");
+    }
+
+    private String uploadState() {
+        return jdbcTemplate.queryForObject("select state from slack_delivery_upload where delivery_id=? and part_index=1",
+                String.class, answerDeliveryId());
+    }
+
+    private void expireUploadLease() {
+        jdbcTemplate.update("update slack_delivery set locked_until=clock_timestamp()-interval '1 second' where kind='ANSWER'");
+    }
+
+    private final class UploadApi implements PostingSlackWebApi {
+        private int allocations;
+        private int uploads;
+        private int finalizations;
+        private String failStage = "";
+        private Optional<SlackPostFailure> failure = Optional.empty();
+        private boolean expireDuringFinalize;
+        private boolean expireDuringUpload;
+        private final List<byte[]> uploadedContents = new ArrayList<>();
+        @Override public String post(SlackPostRequest request) {
+            assertNetworkLease();
+            return "2.000001";
+        }
+        @Override public SlackUploadTicket allocateUpload(String filename, int byteLength) {
+            assertNetworkLease();
+            assertThat(filename).endsWith(".md");
+            assertThat(byteLength).isPositive();
+            allocations++;
+            fail("allocate");
+            return new SlackUploadTicket("F" + allocations, "https://files.slack.com/upload/v1/private");
+        }
+        @Override public void uploadBytes(SlackUploadTicket ticket, byte[] content) {
+            assertNetworkLease();
+            assertThat(ticket.fileId()).startsWith("F");
+            uploadedContents.add(content);
+            uploads++;
+            fail("upload");
+            if (expireDuringUpload) { expireUploadLease(); }
+        }
+        @Override public void finalizeUpload(SlackUploadTicket ticket, String title, String channelId, String rootThreadTs) {
+            assertNetworkLease();
+            assertThat(ticket.fileId()).startsWith("F");
+            assertThat(channelId).isEqualTo("C1");
+            assertThat(rootThreadTs).isEqualTo("1.000001");
+            assertThat(jdbcTemplate.queryForObject("select state from slack_delivery_upload where file_id=?",
+                    String.class, ticket.fileId())).isEqualTo("FINALIZING");
+            finalizations++; // models remote acceptance even when acknowledgement is then lost
+            fail("finalize");
+            if (expireDuringFinalize) { expireUploadLease(); }
+        }
+        private void fail(String stage) {
+            if (stage.equals(failStage) && failure.isPresent()) {
+                SlackPostFailure value = failure.orElseThrow();
+                failure = Optional.empty();
+                throw value;
+            }
+        }
+        private void assertNetworkLease() {
+            assertThat(org.springframework.transaction.support.TransactionSynchronizationManager.isActualTransactionActive()).isFalse();
+            assertThat(jdbcTemplate.queryForObject("""
+                    select status='WORKING' and locked_until>clock_timestamp() from slack_delivery where kind='ANSWER'
+                    """, Boolean.class)).isTrue();
+        }
     }
 
     @Test
@@ -431,54 +925,9 @@ class SlackDeliveryPostgresIT {
                 UUID.fromString(receipt.messageJobId().value()))).isEqualTo(1);
     }
 
-    @Test
-    void persists_fixed_parts_and_resumes_after_a_rate_limited_second_part_without_resending_the_prefix() {
-        completeSlackJobWithTerminalRuntime("1.000001", "x".repeat(4_001));
-        markQueuedNoticeSent();
-        SlackPostgresDeliveryStore deliveryStore = new SlackPostgresDeliveryStore(dataSource());
-        List<SlackPostRequest> posts = new ArrayList<>();
-        AtomicBoolean rateLimited = new AtomicBoolean();
-        PostingSlackWebApi slack = request -> {
-            posts.add(request);
-            if (posts.size() == 2 && rateLimited.compareAndSet(false, true)) {
-                throw new SlackPostFailure(SlackDeliveryFailureCategory.RATE_LIMIT, Optional.of(Duration.ofSeconds(1)));
-            }
-            return "2.00000" + posts.size();
-        };
-        SlackDeliveryWorker worker = new SlackDeliveryWorker(deliveryStore, slack, new SlackDeliveryProperties(), "delivery-worker");
-
-        assertThat(worker.poll()).isTrue();
-        UUID deliveryId = answerDeliveryId();
-        assertThat(deliveryStore.read(deliveryId)).hasValueSatisfying(delivery -> {
-            assertThat(delivery.status()).isEqualTo(SlackDeliveryStatus.RETRY);
-            assertThat(delivery.totalParts()).contains(2);
-            assertThat(delivery.sentParts()).isEqualTo(1);
-        });
-        jdbcTemplate.update("""
-                update slack_delivery set next_attempt_at = clock_timestamp(), terminal_text = 'changed splitter source'
-                where delivery_id = ?
-                """, deliveryId);
-        SlackPostgresDeliveryStore restartedStore = new SlackPostgresDeliveryStore(dataSource());
-        SlackDeliveryClaim restartedClaim = restartedStore.claimNext("restart-probe", Duration.ofSeconds(30), 5).orElseThrow();
-        assertThat(restartedStore.nextPart(restartedClaim, () -> {
-            throw new AssertionError("Persisted delivery parts must not invoke a changed splitter");
-        }, Duration.ofSeconds(30))).hasValueSatisfying(part -> assertThat(part.text()).isEqualTo("x"));
-        assertThat(restartedStore.scheduleRetry(restartedClaim, SlackDeliveryFailureCategory.TRANSIENT, Duration.ZERO)).isTrue();
-        SlackDeliveryWorker recoveredWorker = new SlackDeliveryWorker(new SlackPostgresDeliveryStore(dataSource()), slack,
-                new SlackDeliveryProperties(), "recovered-delivery-worker");
-
-        assertThat(recoveredWorker.poll()).isTrue();
-
-        assertThat(posts).extracting(SlackPostRequest::text).containsExactly("x".repeat(4_000), "x", "x");
-        assertThat(deliveryStore.read(deliveryId)).hasValueSatisfying(delivery -> {
-            assertThat(delivery.status()).isEqualTo(SlackDeliveryStatus.SENT);
-            assertThat(delivery.totalParts()).contains(2);
-            assertThat(delivery.sentParts()).isEqualTo(2);
-        });
-    }
 
     @Test
-    void omits_whitespace_only_delivery_parts_without_changing_the_committed_terminal_answer() {
+    void preserves_whitespace_and_the_complete_terminal_runtime_notice_as_plain_text() {
         String terminalText = "\n".repeat(4_000) + "  indented answer";
         MessageReceipt receipt = completeSlackJobWithTerminalRuntime("1.000001", terminalText);
         markQueuedNoticeSent();
@@ -493,7 +942,10 @@ class SlackDeliveryPostgresIT {
         assertThat(worker.poll()).isTrue();
 
         UUID deliveryId = answerDeliveryId();
-        assertThat(posts).extracting(SlackPostRequest::text).containsExactly("  indented answer");
+        assertThat(posts).singleElement().satisfies(post -> {
+            assertThat(post.text()).isEqualTo(terminalText);
+            assertThat(post.presentation()).isEqualTo(com.java.system.sessionagent.slack.domain.SlackPresentation.PLAIN);
+        });
         assertThat(deliveryStore.read(deliveryId)).hasValueSatisfying(delivery -> {
             assertThat(delivery.status()).isEqualTo(SlackDeliveryStatus.SENT);
             assertThat(delivery.totalParts()).contains(1);
@@ -504,7 +956,7 @@ class SlackDeliveryPostgresIT {
                 """, Integer.class, deliveryId)).containsExactly(0);
         assertThat(jdbcTemplate.queryForList("""
                 select part_text from slack_delivery_part where delivery_id = ? order by part_index
-                """, String.class, deliveryId)).containsExactly("  indented answer");
+                """, String.class, deliveryId)).containsExactly(terminalText);
         assertThat(jdbcTemplate.queryForObject("""
                 select runtime.message from runtime_message runtime
                 join session_message session on session.session_id = runtime.session_id and session.sequence = runtime.sequence
@@ -512,80 +964,15 @@ class SlackDeliveryPostgresIT {
                 """, String.class, UUID.fromString(receipt.messageJobId().value()))).isEqualTo(terminalText);
     }
 
-    @Test
-    void renews_the_parent_lease_between_parts_and_keeps_committed_progress_owned() throws Exception {
-        completeSlackJobWithTerminalRuntime("1.000001", "x".repeat(4_001));
-        markQueuedNoticeSent();
-        SlackPostgresDeliveryStore deliveryStore = new SlackPostgresDeliveryStore(dataSource());
-        List<SlackPostRequest> posts = new ArrayList<>();
-        CountDownLatch firstSendStarted = new CountDownLatch(1);
-        CountDownLatch allowFirstSendToFinish = new CountDownLatch(1);
-        CountDownLatch secondSendStarted = new CountDownLatch(1);
-        CountDownLatch allowSecondSendToFinish = new CountDownLatch(1);
-        PostingSlackWebApi controlledSlack = request -> {
-            posts.add(request);
-            if (posts.size() == 1) {
-                firstSendStarted.countDown();
-                await(allowFirstSendToFinish);
-            } else {
-                secondSendStarted.countDown();
-                await(allowSecondSendToFinish);
-            }
-            return "2.00000" + posts.size();
-        };
-        SlackDeliveryWorker worker = new SlackDeliveryWorker(deliveryStore, controlledSlack,
-                new SlackDeliveryProperties(Duration.ofMinutes(10), Duration.ofSeconds(1), Duration.ofSeconds(1), 5),
-                "delivery-worker");
-
-        ExecutorService executor = Executors.newSingleThreadExecutor();
-        try {
-            Future<Boolean> poll = executor.submit(worker::poll);
-            assertThat(firstSendStarted.await(5, TimeUnit.SECONDS)).isTrue();
-            UUID deliveryId = answerDeliveryId();
-            // Keep the lease live, but make the next renewal observably advance it without waiting for the clock.
-            assertThat(jdbcTemplate.update("""
-                    update slack_delivery set locked_until = clock_timestamp() + interval '5 minutes'
-                    where delivery_id = ?
-                    """, deliveryId)).isEqualTo(1);
-            Instant firstSendExpiry = jdbcTemplate.queryForObject(
-                    "select locked_until from slack_delivery where delivery_id = ?", Timestamp.class, deliveryId).toInstant();
-            allowFirstSendToFinish.countDown();
-            assertThat(secondSendStarted.await(5, TimeUnit.SECONDS)).isTrue();
-            Instant secondSendExpiry = jdbcTemplate.queryForObject(
-                    "select locked_until from slack_delivery where delivery_id = ?", Timestamp.class, deliveryId).toInstant();
-            assertThat(secondSendExpiry).isAfter(firstSendExpiry);
-            assertThat(deliveryStore.read(deliveryId)).hasValueSatisfying(delivery -> {
-                assertThat(delivery.status()).isEqualTo(SlackDeliveryStatus.WORKING);
-                assertThat(delivery.totalParts()).contains(2);
-                assertThat(delivery.sentParts()).isEqualTo(1);
-            });
-            SlackPostgresDeliveryStore competingStore = new SlackPostgresDeliveryStore(dataSource());
-            assertThat(competingStore.claimNext("competing-worker", Duration.ofMinutes(10), 5)).isEmpty();
-            allowSecondSendToFinish.countDown();
-            assertThat(poll.get(5, TimeUnit.SECONDS)).isTrue();
-        } finally {
-            allowFirstSendToFinish.countDown();
-            allowSecondSendToFinish.countDown();
-            executor.shutdownNow();
-        }
-
-        assertThat(posts).hasSize(2);
-        assertThat(deliveryStore.read(answerDeliveryId())).hasValueSatisfying(delivery -> {
-            assertThat(delivery.status()).isEqualTo(SlackDeliveryStatus.SENT);
-            assertThat(delivery.totalParts()).contains(2);
-            assertThat(delivery.sentParts()).isEqualTo(2);
-        });
-    }
 
     @Test
-    void serializes_nonfinal_progress_with_an_overlapping_reclaim() throws Exception {
-        completeSlackJobWithTerminalRuntime("1.000001", "x".repeat(4_001));
+    void serializes_nonfinal_item_acknowledgement_with_an_overlapping_reclaim() throws Exception {
+        completeSlackAssistantJob("x".repeat(10_001), false);
         markQueuedNoticeSent();
         SlackPostgresDeliveryStore deliveryStore = new SlackPostgresDeliveryStore(dataSource());
         deliveryStore.discover();
         SlackDeliveryClaim oldClaim = deliveryStore.claimNext("first-worker", Duration.ofSeconds(30), 5).orElseThrow();
-        SlackDeliveryPart firstPart = deliveryStore.nextPart(oldClaim,
-                () -> List.of("x".repeat(4_000), "x"), Duration.ofSeconds(30)).orElseThrow();
+        SlackDeliveryPart firstPart = deliveryStore.nextPart(oldClaim, Duration.ofSeconds(30)).orElseThrow();
         ExecutorService executor = Executors.newFixedThreadPool(2);
         try (Connection partLock = dataSource().getConnection()) {
             partLock.setAutoCommit(false);
@@ -721,6 +1108,66 @@ class SlackDeliveryPostgresIT {
         assertThat(deliveryStore.findBySource("T1", "C1", "1.000001"))
                 .extracting(delivery -> delivery.kind().name())
                 .containsExactly("QUEUED", "ANSWER");
+    }
+
+    @Test
+    void migrates_v9_prepared_plain_items_and_resumes_only_the_unacknowledged_suffix() {
+        flyway().clean();
+        Flyway.configure().dataSource(dataSource()).cleanDisabled(false).target("9").load().migrate();
+        MessageReceipt receipt = completeSlackJobWithTerminalRuntime();
+        markQueuedNoticeSent();
+        UUID sessionId = UUID.fromString(receipt.sessionId().value());
+        UUID jobId = UUID.fromString(receipt.messageJobId().value());
+        UUID deliveryId = UUID.randomUUID();
+        jdbcTemplate.update("""
+                insert into slack_delivery(delivery_id,kind,terminal_session_id,terminal_sequence,message_job_id,team_id,channel_id,
+                    root_thread_ts,message_ts,terminal_text,status,attempt_count,next_attempt_at,claim_number,created_at)
+                select ?,'ANSWER',session_id,sequence,message_job_id,'T1','C1','1.000001','1.000001',
+                    'Do not regenerate this full source','RETRY',2,clock_timestamp(),2,clock_timestamp()
+                from session_message where session_id=? and message_job_id=? and role='RUNTIME'
+                """, deliveryId, sessionId, jobId);
+        jdbcTemplate.update("""
+                insert into slack_delivery_part(delivery_id,part_index,part_text,status,slack_message_ts,sent_at)
+                values (?,0,'Already acknowledged prefix','SENT','2.000010',clock_timestamp()),
+                       (?,1,'Remaining exact suffix\n```text\nunchanged\n```','PENDING',null,null)
+                """, deliveryId, deliveryId);
+        Map<String, Object> prefix = jdbcTemplate.queryForMap("select * from slack_delivery_part where delivery_id=? and part_index=0", deliveryId);
+        // Compare only original V9 evidence; presentation is the new migration-owned column.
+        Map<String, Object> remaining = jdbcTemplate.queryForMap("""
+                select delivery_id,part_index,part_text,status,slack_message_ts,sent_at from slack_delivery_part
+                where delivery_id=? and part_index=1
+                """, deliveryId);
+        flyway().migrate();
+        assertThat(jdbcTemplate.queryForObject("select items_prepared from slack_delivery where delivery_id=?", Boolean.class, deliveryId)).isTrue();
+        assertThat(jdbcTemplate.queryForMap("""
+                select delivery_id,part_index,part_text,status,slack_message_ts,sent_at from slack_delivery_part
+                where delivery_id=? and part_index=0
+                """, deliveryId)).isEqualTo(prefix);
+        assertThat(jdbcTemplate.queryForMap("""
+                select delivery_id,part_index,part_text,status,slack_message_ts,sent_at from slack_delivery_part
+                where delivery_id=? and part_index=1
+                """, deliveryId)).isEqualTo(remaining);
+        List<SlackPostRequest> posts = new ArrayList<>();
+        SlackPostgresDeliveryStore store = new SlackPostgresDeliveryStore(dataSource());
+        SlackDeliveryWorker worker = new SlackDeliveryWorker(store, (PostingSlackWebApi) request -> {
+            posts.add(request);
+            return "2.000011";
+        }, new SlackDeliveryProperties(), "v10-resumer");
+        assertThat(worker.poll()).isTrue();
+        assertThat(worker.poll()).isFalse();
+        assertThat(posts).containsExactly(new SlackPostRequest("C1", "1.000001", "Remaining exact suffix\n```text\nunchanged\n```"));
+        assertThat(store.read(deliveryId)).hasValueSatisfying(view -> {
+            assertThat(view.status()).isEqualTo(SlackDeliveryStatus.SENT);
+            assertThat(view.totalParts()).contains(2);
+            assertThat(view.sentParts()).isEqualTo(2);
+        });
+        assertThat(jdbcTemplate.queryForMap("""
+                select delivery_id,part_index,part_text,status,slack_message_ts,sent_at from slack_delivery_part
+                where delivery_id=? and part_index=0
+                """, deliveryId)).isEqualTo(prefix);
+        assertThat(jdbcTemplate.queryForList("select presentation from slack_delivery_part where delivery_id=? order by part_index",
+                String.class, deliveryId)).containsExactly("PLAIN", "PLAIN");
+        assertThat(jdbcTemplate.queryForObject("select count(*) from slack_delivery_upload", Integer.class)).isZero();
     }
 
     @Test
@@ -941,10 +1388,10 @@ class SlackDeliveryPostgresIT {
                 .doesNotContainKey("sessionId");
         assertThat(lifecycleEvents(deliveryLogs, "slack_delivery_attempt").getLast())
                 .containsEntry("kind", "ANSWER").containsEntry("sessionId", sessionId).containsEntry("messageJobId", messageJobId);
-        assertThat(lifecycleEvents(deliveryLogs, "slack_delivery_sent")).hasSize(2);
+        assertThat(lifecycleEvents(deliveryLogs, "slack_delivery_item_sent")).hasSize(2);
         assertThat(posts).containsExactly(
                 new SlackPostRequest("C1", "1.000001", "已收到，正在排隊處理。"),
-                new SlackPostRequest("C1", "1.000001", "done"));
+                new SlackPostRequest("C1", "1.000001", "done", SlackPresentation.MARKDOWN));
     }
 
     private static ConversationModel successfulModel() {
@@ -1007,6 +1454,14 @@ class SlackDeliveryPostgresIT {
     }
 
     private MessageReceipt completeSlackJobWithTerminalRuntime(String messageTs, String terminalText) {
+        return completeSlackJob(messageTs, terminalText, false, false);
+    }
+
+    private MessageReceipt completeSlackAssistantJob(String terminalText, boolean artifact) {
+        return completeSlackJob("1.000001", terminalText, true, artifact);
+    }
+
+    private MessageReceipt completeSlackJob(String messageTs, String terminalText, boolean assistant, boolean artifact) {
         PostgresConversationStore conversationStore = new PostgresConversationStore(dataSource(), Clock.fixed(NOW, ZoneOffset.UTC),
                 new ObjectMapper(), intakeCapacity);
         MessageIntakePort messageIntake = new MessageService(conversationStore, TestConfiguredModels.withDefault("test"),
@@ -1021,7 +1476,28 @@ class SlackDeliveryPostgresIT {
         assertThat(slackIntake.receive(intake).outcome()).isEqualTo(SlackEventOutcome.ACCEPTED);
         MessageReceipt receipt = conversationStore.receive(message, TestConfiguredModels.withDefault("test").defaultSelection(),
                 TestConfiguredModels.withDefault("test"));
-        completeNextWithTerminalRuntime(conversationStore, terminalText);
+        if (assistant) {
+            MessageWorkClaim claim = conversationStore.claimNext("conversation-worker", Duration.ofSeconds(30)).orElseThrow();
+            conversationStore.reserveModelCall(claim, 2, NOW).orElseThrow();
+            if (artifact) {
+                Map<String, Object> arguments = Map.of("title", "Tool report", "content", "# Tool report\nExact 中😀");
+                ArtifactEncoder.Encoded encoded = ArtifactEncoder.markdown(arguments);
+                ArtifactStore.Saved saved = new PostgresArtifactStore(dataSource(), new ObjectMapper()).create(
+                        TestToolInvocation.of(claim, 1, 0), encoded.title(), encoded.extension(), encoded.mediaType(),
+                        encoded.content(), "createMarkdownReport", arguments, encoded.disclosures());
+                ToolOutput output = new ToolOutput(false, saved.result(), Optional.of(saved.receipt()));
+                ToolCallId call = new ToolCallId("export-call");
+                conversationStore.append(claim, new ConversationStore.MessageBatch(List.of(
+                        new ConversationStore.AssistantToolCallsData(Optional.empty(), List.of(
+                                new ConversationStore.ToolCallData(call, "createMarkdownReport", arguments))),
+                        new ConversationStore.ToolObservationData(call, "createMarkdownReport", output.asStructuredValue(), output.artifactReceipt())),
+                        ConversationStore.JobUpdate.KEEP_WORKING), NOW);
+            }
+            conversationStore.append(claim, new ConversationStore.MessageBatch(List.of(new ConversationStore.AssistantData(terminalText)),
+                    ConversationStore.JobUpdate.COMPLETE), NOW);
+        } else {
+            completeNextWithTerminalRuntime(conversationStore, terminalText);
+        }
         return receipt;
     }
 
@@ -1066,16 +1542,6 @@ class SlackDeliveryPostgresIT {
         throw new IllegalStateException("Expected PostgreSQL lock waiter was not observed");
     }
 
-    private static void await(CountDownLatch latch) {
-        try {
-            if (!latch.await(5, TimeUnit.SECONDS)) {
-                throw new IllegalStateException("Timed out waiting for controlled Slack response");
-            }
-        } catch (InterruptedException exception) {
-            Thread.currentThread().interrupt();
-            throw new IllegalStateException(exception);
-        }
-    }
 
     private void markQueuedNoticeSent() {
         jdbcTemplate.update("""

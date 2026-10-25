@@ -21,7 +21,7 @@ class SpringAiToolCallbackFactoryTest {
         ObjectMapper objectMapper = new ObjectMapper();
         try (ToolSnapshot snapshot = new ToolSnapshot(List.of(new ToolBinding(
                 new com.java.system.sessionagent.tool.port.ToolDefinition(new ToolName("portable_lookup"), "Lookup", schema),
-                arguments -> {
+                (context, arguments) -> {
                     throw new AssertionError("Spring AI must not execute the runtime tool");
                 })))) {
             List<ToolCallback> callbacks = new SpringAiToolCallbackFactory(objectMapper).create(snapshot);

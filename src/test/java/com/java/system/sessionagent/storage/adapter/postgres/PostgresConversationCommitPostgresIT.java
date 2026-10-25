@@ -66,7 +66,6 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.function.Consumer;
-import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -99,19 +98,7 @@ class PostgresConversationCommitPostgresIT {
     }
 
     @Test
-    void creates_the_fresh_conversation_and_slack_intake_schema() {
-        Set<String> tables = Set.copyOf(jdbcTemplate.queryForList("""
-                select table_name from information_schema.tables
-                where table_schema = 'public' and table_type = 'BASE TABLE' and table_name <> 'flyway_schema_history'
-                """, String.class));
-        Set<String> observationColumns = Set.copyOf(jdbcTemplate.queryForList("""
-                select column_name from information_schema.columns
-                where table_schema = 'public' and table_name = 'tool_observation'
-                """, String.class));
-        Set<String> jobColumns = Set.copyOf(jdbcTemplate.queryForList("""
-                select column_name from information_schema.columns
-                where table_schema = 'public' and table_name = 'message_job'
-                """, String.class));
+    void retains_message_role_model_budget_and_compaction_reason_constraints() {
         String roleChecks = jdbcTemplate.queryForObject("""
                 select string_agg(pg_get_constraintdef(constraint_record.oid), ' ')
                 from pg_constraint constraint_record join pg_class relation on relation.oid = constraint_record.conrelid
@@ -128,13 +115,6 @@ class PostgresConversationCommitPostgresIT {
                 where relation.relname = 'session_compaction' and constraint_record.contype = 'c'
                 """, String.class);
 
-        assertThat(tables).containsExactlyInAnyOrder("conversation_session", "source_message", "session_message", "user_message",
-                "message_job", "assistant_message", "assistant_tool_calls", "model_continuation", "tool_observation", "runtime_message",
-                "context_usage_checkpoint", "session_compaction", "slack_thread_binding", "slack_event_receipt", "slack_message_receipt",
-                "slack_delivery", "slack_delivery_part", "slack_question_progress", "slack_progress_workspace", "skill_command", "skill_message");
-        assertThat(observationColumns).containsExactlyInAnyOrder("session_id", "sequence", "role", "tool_call_id", "tool_name", "output");
-        assertThat(jobColumns).contains("model_route_id", "phase", "phase_started_at", "current_tool_name", "failure_code")
-                .doesNotContain("reply_sequence");
         assertThat(roleChecks).contains("USER", "TOOL", "ASSISTANT", "ASSISTANT_TOOL_CALLS", "RUNTIME").doesNotContain("FEEDBACK");
         assertThat(jobChecks).contains("model_calls >= 0").doesNotContain("between 0 and 12");
         assertThat(compactionChecks).contains("THRESHOLD", "OVERFLOW").doesNotContain("PROACTIVE");

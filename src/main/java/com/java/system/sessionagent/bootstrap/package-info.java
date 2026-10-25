@@ -1,5 +1,6 @@
 @org.springframework.modulith.ApplicationModule(allowedDependencies = {
         "tool :: port",
+        "artifact :: application", "artifact :: port",
         "skill :: port", "skill :: configuration", "skill :: adapter.filesystem", "skill :: adapter.tool",
         "mcp :: configuration", "mcp :: adapter.sdk", "mcp :: adapter.actuator",
         "conversation :: application", "conversation :: domain", "conversation :: port.in", "conversation :: port.out",

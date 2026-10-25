@@ -1,5 +1,6 @@
 package com.java.system.sessionagent.mcp.adapter.sdk;
 
+import static com.java.system.sessionagent.tool.TestToolInvocation.invocation;
 import com.java.system.sessionagent.mcp.configuration.McpConnectionProperties;
 import com.java.system.sessionagent.mcp.domain.McpConnectionState;
 import com.java.system.sessionagent.tool.domain.ToolName;
@@ -31,7 +32,7 @@ class McpToolCatalogTest {
         manager.publish("semantic", client, List.of(tool("search_code", "Search code")));
 
         ToolSnapshot snapshot = catalog.snapshot();
-        snapshot.invoke(new ToolName("semantic_search_code"), Map.of("query", "fees"));
+        snapshot.invoke(invocation(), new ToolName("semantic_search_code"), Map.of("query", "fees"));
 
         assertThat(client.lastRequest().name()).isEqualTo("search_code");
         assertThat(client.lastRequest().arguments()).containsEntry("query", "fees");
@@ -54,8 +55,8 @@ class McpToolCatalogTest {
         ToolSnapshot originalSnapshot = new CompositeToolCatalog(List.of(catalog)).snapshot();
         manager.publish("semantic", replacementClient, List.of(tool("search_code", "Search code")));
 
-        originalSnapshot.invoke(new ToolName("semantic_search_code"), Map.of("query", "first"));
-        catalog.snapshot().invoke(new ToolName("semantic_search_code"), Map.of("query", "second"));
+        originalSnapshot.invoke(invocation(), new ToolName("semantic_search_code"), Map.of("query", "first"));
+        catalog.snapshot().invoke(invocation(), new ToolName("semantic_search_code"), Map.of("query", "second"));
 
         assertThat(originalClient.lastRequest().arguments()).containsEntry("query", "first");
         assertThat(replacementClient.lastRequest().arguments()).containsEntry("query", "second");
@@ -229,7 +230,7 @@ class McpToolCatalogTest {
         McpToolCatalog catalog = new McpToolCatalog(manager, OBJECT_MAPPER);
         manager.publish("semantic", client, List.of(tool("search_code", "Search code")));
 
-        assertThat(catalog.snapshot().invoke(new ToolName("semantic_search_code"), Map.of("query", "fees")).asStructuredValue())
+        assertThat(catalog.snapshot().invoke(invocation(), new ToolName("semantic_search_code"), Map.of("query", "fees")).asStructuredValue())
                 .isEqualTo(Map.of(
                         "isError", true,
                         "result", Map.of("code", "TOOL_PROTOCOL_ERROR", "message", "The tool returned an invalid response.")));

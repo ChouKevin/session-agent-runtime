@@ -300,7 +300,7 @@ class ConfiguredModelSessionPostgresIT {
 
     private static ToolCatalog catalog() {
         ToolBinding lookup = new ToolBinding(new ToolDefinition(new ToolName("lookup"), "Look up a fee", Map.of()),
-                arguments -> new ToolOutput(false, Map.of("result", "fee is 9")));
+                (context, arguments) -> new ToolOutput(false, Map.of("result", "fee is 9")));
         return () -> new ToolSnapshot(List.of(lookup));
     }
 

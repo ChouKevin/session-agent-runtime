@@ -82,8 +82,24 @@ SLACK_BOT_USER_ID=Bot使用者ID
 - App-level token 要有 `connections:write`，啟用 Socket Mode。
 - Bot 至少有 `app_mentions:read`、`chat:write` 並訂閱 `app_mention`，把 bot 加入目標頻道。
 - 不帶 mention 的 thread 續聊／DM 需要相應 message events 與 scopes：`message.channels` / `channels:history`、`message.groups` / `groups:history`、`message.im` / `im:history`、`message.mpim` / `mpim:history`。只開需要的對話範圍；新增 scopes 後依 Slack 要求重新安裝／授權。
+- Markdown/CSV 附件與長回答的 `answer.md` 另需 bot `files:write`。這是既有 app 的權限變更，需明確核准並依 Slack 要求 reinstall／重新授權；Runtime 更新或本地 fake smoke 不代表已授權，不偷偷改 token。此功能不要求 `files:read`。
 - 可用 `auth.test` 驗證 token 並取得 `user_id`，回報只保留狀態與 ID，不輸出 token、headers 或 Socket URL。
 - 在已綁定 thread 使用 `@bot stop` 或 `@bot 停止工作`；停止當時該 thread 未完成工作，不影響後來新提交。採合作式取消，已發生的工具副作用不會回滾。
+
+一般回答以原文 native `markdown` block 呈現；超過 10,000 UTF-16 units／Unicode
+code points 時，整份原文 UTF-8 存為 `answer.md`，搭配固定通知，不解析、拆分、
+修補 Markdown 或另呼叫模型摘要。Markdown／附件不受支援或權限不足會明確
+delivery failure，不靜默改純文字或截斷。
+
+`createMarkdownReport`／`createCsv` 只對有受支援附件 route 的正常工作開放，
+不對 compaction 開放；工具結果 `SAVED_PENDING_DELIVERY` 不是 Slack 已送達。
+CSV 原字串留在 audit；輸出加 UTF-8 BOM、CRLF、全欄引號／雙引號 escaping，
+公式開頭欄位加 apostrophe 並在工具結果揭露，不能保證所有試算表匯入模式皆安全。
+
+Artifact、長回答 bytes、upload stages 與敏感 upload capability 存 PostgreSQL，
+繼承對話／備份的存取及保留政策；本功能無 TTL／自動刪除或 public UUID URL。
+`FINALIZING` 發生不明結果會保留 `UNCONFIRMED` 並顯示 delivery failure，
+不自動再次 finalize、重新配置檔案或重跑模型；人工核對前不要重設狀態強制 retry。
 
 ## MCP 與 logging
 

@@ -42,6 +42,10 @@ import com.java.system.sessionagent.conversation.port.out.StaleWorkClaimExceptio
 import com.java.system.sessionagent.tool.port.ToolCatalog;
 import com.java.system.sessionagent.tool.port.ToolOutput;
 import com.java.system.sessionagent.tool.port.ToolSnapshot;
+import com.java.system.sessionagent.tool.port.ToolInvocation;
+import com.java.system.sessionagent.tool.port.ToolExecutionContext;
+import com.java.system.sessionagent.tool.port.ToolExecutionAuthority;
+import java.util.UUID;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.slf4j.spi.LoggingEventBuilder;
@@ -156,7 +160,7 @@ public final class JobProcessor implements MessageJobPort {
                 appendRuntime(claim, guard, MODEL_UNAVAILABLE, ConversationStore.JobUpdate.COMPLETE, resultTracker);
                 return;
             }
-            try (ToolSnapshot tools = toolCatalog.snapshot()) {
+            try (ToolSnapshot tools = toolCatalog.snapshot(claim.sessionId().value(), claim.messageJobId().value())) {
                 ReservationState reservation = new ReservationState();
                 ContextState context = contextState(claim, historyView, continuations, tools, activeModelDescriptor, conversationModel);
                 if (context.requiresCompaction()) {
@@ -549,6 +553,7 @@ public final class JobProcessor implements MessageJobPort {
         // Keep attempt-local observations reachable if a storage safe point unwinds this batch.
         resultTracker.pendingToolBatch = Optional.of(new PendingToolBatch(messages, checkpoint));
         boolean cancelled = false;
+        int toolOrdinal = 0;
         for (ToolRequest request : reply.requests()) {
             if (!guard.confirmOwnership()) {
                 return List.of();
@@ -568,7 +573,8 @@ public final class JobProcessor implements MessageJobPort {
             messages.add(cancelled
                     ? new ConversationStore.ToolObservationData(request.toolCallId(), request.toolName().value(),
                             ToolOutput.runtimeFailure(JobCancellation.TOOL_CODE, JobCancellation.TOOL_MESSAGE).asStructuredValue())
-                    : executeTool(claim, ordinal, tools, request));
+                    : executeTool(claim, ordinal, toolOrdinal, tools, request));
+            toolOrdinal++;
         }
         return List.copyOf(messages);
     }
@@ -576,14 +582,20 @@ public final class JobProcessor implements MessageJobPort {
     private ConversationStore.ToolObservationData executeTool(
             MessageWorkClaim claim,
             int ordinal,
+            int toolOrdinal,
             ToolSnapshot tools,
             ToolRequest request) {
         long executionStartedAt = System.nanoTime();
         ToolOutput output;
         String outcome;
         try {
-            output = tools.invoke(request.toolName(), request.arguments());
+            ToolInvocation invocation = new ToolInvocation(new ToolExecutionContext(UUID.fromString(claim.sessionId().value()),
+                    UUID.fromString(claim.messageJobId().value()), ordinal, toolOrdinal),
+                    new ToolExecutionAuthority(claim.workerId(), claim.claimNumber()));
+            output = tools.invoke(invocation, request.toolName(), request.arguments());
             outcome = output.isError() ? "FAILURE" : "SUCCESS";
+        } catch (StaleWorkClaimException | JobCancellationRequestedException failure) {
+            throw failure;
         } catch (RuntimeException failure) {
             output = ToolOutput.runtimeFailure("TOOL_PROTOCOL_ERROR", "The tool could not be executed.");
             outcome = "FAILURE";
@@ -591,7 +603,8 @@ public final class JobProcessor implements MessageJobPort {
         Duration duration = elapsedSince(executionStartedAt);
         telemetry.tool(request.toolName().value(), outcome, duration);
         logToolExecution(claim, ordinal, request, outcome, duration);
-        return new ConversationStore.ToolObservationData(request.toolCallId(), request.toolName().value(), output.asStructuredValue());
+        return new ConversationStore.ToolObservationData(request.toolCallId(), request.toolName().value(),
+                output.asStructuredValue(), output.artifactReceipt());
     }
 
     private boolean handleModelFailure(

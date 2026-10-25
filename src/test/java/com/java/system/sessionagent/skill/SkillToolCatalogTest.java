@@ -1,5 +1,6 @@
 package com.java.system.sessionagent.skill;
 
+import static com.java.system.sessionagent.tool.TestToolInvocation.invocation;
 import com.java.system.sessionagent.skill.adapter.filesystem.FileSystemSkillLibrary;
 import com.java.system.sessionagent.skill.adapter.tool.SkillToolCatalog;
 import com.java.system.sessionagent.skill.configuration.SkillProperties;
@@ -40,16 +41,16 @@ class SkillToolCatalogTest {
             assertThat(definition.description()).contains("demo", "Example instructions", "skill://demo")
                     .doesNotContain("PRIVATE_BODY", root.toString());
             assertThat(definition.inputSchema()).isEqualTo(Map.of("type", "object", "properties", Map.of("uri", Map.of("type", "string")), "required", List.of("uri"), "additionalProperties", false));
-            ToolOutput output = snapshot.invoke(new ToolName("readSkill"), Map.of("uri", "skill://demo"));
+            ToolOutput output = snapshot.invoke(invocation(), new ToolName("readSkill"), Map.of("uri", "skill://demo"));
             assertThat(output.isError()).isFalse();
             Map<?, ?> result = (Map<?, ?>) output.result();
             assertThat(result.get("content")).isEqualTo(body);
             assertThat(result).hasSize(3);
-            ToolOutput failure = snapshot.invoke(new ToolName("readSkill"), Map.of("uri", "skill://missing"));
+            ToolOutput failure = snapshot.invoke(invocation(), new ToolName("readSkill"), Map.of("uri", "skill://missing"));
             assertThat(failure.isError()).isTrue();
             assertThat(failure.result()).isEqualTo(Map.of("code", "SKILL_NOT_FOUND"));
             for (Map<String, Object> arguments : List.of(Map.<String, Object>of(), Map.<String, Object>of("uri", 42), Map.<String, Object>of("uri", "skill://demo", "extra", true))) {
-                assertThat(snapshot.invoke(new ToolName("readSkill"), arguments).isError()).isTrue();
+                assertThat(snapshot.invoke(invocation(), new ToolName("readSkill"), arguments).isError()).isTrue();
             }
         }
     }

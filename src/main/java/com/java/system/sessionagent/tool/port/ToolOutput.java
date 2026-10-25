@@ -6,8 +6,14 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Set;
+import java.util.Optional;
 
-public record ToolOutput(boolean isError, Object result) {
+public record ToolOutput(boolean isError, Object result,
+                         Optional<ArtifactReceipt> artifactReceipt) {
+
+    public ToolOutput(boolean isError, Object result) {
+        this(isError, result, Optional.empty());
+    }
 
     private static final Set<String> RUNTIME_FAILURE_CODES = Set.of(
             "TOOL_TIMEOUT",

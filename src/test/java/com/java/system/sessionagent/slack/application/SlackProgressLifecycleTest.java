@@ -12,6 +12,7 @@ import com.java.system.sessionagent.slack.domain.SlackUpdateRequest;
 import com.java.system.sessionagent.slack.port.out.SlackDeliveryStore;
 import com.java.system.sessionagent.slack.port.out.SlackProgressStore;
 import com.java.system.sessionagent.slack.port.out.SlackWebApi;
+import com.java.system.sessionagent.slack.TextSlackWebApi;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Optional;
@@ -34,7 +35,7 @@ class SlackProgressLifecycleTest {
         Mockito.when(progressStore.refresh(claim)).thenReturn(Optional.of(new SlackProgressUpdate(1,
                 new SlackUpdateRequest("C1", "notice-ts", "model waiting"), false, Instant.now(), "1.000001",
                 Optional.of("https://example.slack.com/archives/C1/p1000001"))));
-        SlackWebApi api = new SlackWebApi() {
+        SlackWebApi api = new TextSlackWebApi() {
             @Override
             public String post(SlackPostRequest request) {
                 assertThat(request.text()).isEqualTo("Committed answer");
@@ -59,7 +60,7 @@ class SlackProgressLifecycleTest {
         SlackDeliveryPart part = new SlackDeliveryPart(0, "Committed answer");
         Mockito.when(answers.claimNext(Mockito.anyString(), Mockito.any(), Mockito.anyInt()))
                 .thenReturn(Optional.of(answer)).thenReturn(Optional.empty());
-        Mockito.when(answers.nextPart(Mockito.eq(answer), Mockito.any(), Mockito.any()))
+        Mockito.when(answers.nextPart(Mockito.eq(answer), Mockito.any()))
                 .thenReturn(Optional.of(part)).thenReturn(Optional.empty());
         Mockito.when(answers.markPartSent(answer, part, "answer-ts")).thenAnswer(invocation -> {
             answerAcknowledged.countDown();

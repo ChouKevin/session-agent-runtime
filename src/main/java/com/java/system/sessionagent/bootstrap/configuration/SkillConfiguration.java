@@ -13,6 +13,11 @@ import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import java.util.List;
+import javax.sql.DataSource;
+import com.java.system.sessionagent.artifact.application.ArtifactToolCatalog;
+import com.java.system.sessionagent.artifact.port.ArtifactStore;
+import com.java.system.sessionagent.slack.adapter.postgres.SlackAttachmentRoute;
+import com.java.system.sessionagent.slack.configuration.SlackProperties;
 
 @Configuration(proxyBeanMethods = false)
 @EnableConfigurationProperties(SkillProperties.class)
@@ -23,7 +28,9 @@ public class SkillConfiguration {
     }
 
     @Bean
-    ToolCatalog toolCatalog(SkillLibrary library, McpConnectionManager manager, ObjectMapper objectMapper) {
-        return new CompositeToolCatalog(List.of(new McpToolCatalog(manager, objectMapper), new SkillToolCatalog(library)));
+    ToolCatalog toolCatalog(SkillLibrary library, McpConnectionManager manager, ObjectMapper objectMapper,
+                            ArtifactStore artifactStore, DataSource dataSource, SlackProperties properties) {
+        ToolCatalog ordinary = new CompositeToolCatalog(List.of(new McpToolCatalog(manager, objectMapper), new SkillToolCatalog(library)));
+        return new ArtifactToolCatalog(ordinary, artifactStore, new SlackAttachmentRoute(dataSource, properties));
     }
 }

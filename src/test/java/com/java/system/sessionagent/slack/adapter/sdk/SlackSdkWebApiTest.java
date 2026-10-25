@@ -13,6 +13,7 @@ import com.slack.api.methods.MethodsClient;
 import com.slack.api.methods.SlackApiException;
 import com.slack.api.methods.request.chat.ChatPostMessageRequest;
 import com.slack.api.methods.response.chat.ChatPostMessageResponse;
+import com.slack.api.util.http.SlackHttpClient;
 import com.slack.api.model.ErrorResponseMetadata;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
@@ -181,11 +182,13 @@ class SlackSdkWebApiTest {
         server.start();
 
         AtomicReference<SlackConfig> configuredClient = new AtomicReference<>();
+        AtomicReference<SlackHttpClient> configuredHttp = new AtomicReference<>();
         try (MockedStatic<Slack> staticSlack = Mockito.mockStatic(Slack.class, Mockito.CALLS_REAL_METHODS)) {
-            staticSlack.when(() -> Slack.getInstance(Mockito.any(SlackConfig.class))).thenAnswer(invocation -> {
+            staticSlack.when(() -> Slack.getInstance(Mockito.any(SlackConfig.class), Mockito.any(SlackHttpClient.class))).thenAnswer(invocation -> {
                 SlackConfig config = invocation.getArgument(0);
                 config.setMethodsEndpointUrlPrefix(methodsEndpoint(server));
                 configuredClient.set(config);
+                configuredHttp.set(invocation.getArgument(1));
                 return invocation.callRealMethod();
             });
             try (SlackSdkWebApi webApi = new SlackSdkWebApi(properties())) {
@@ -199,6 +202,8 @@ class SlackSdkWebApiTest {
         assertThat(config).isNotNull();
         assertThat(config.isStatsEnabled()).isFalse();
         assertThat(config.getHttpClientCallTimeoutMillis()).isEqualTo(25_000);
+        assertThat(configuredHttp.get().getOkHttpClient().retryOnConnectionFailure()).isFalse();
+        assertThat(configuredHttp.get().getOkHttpClient().followRedirects()).isFalse();
         assertThat(paths).containsExactly("/chat.postMessage");
     }
 
