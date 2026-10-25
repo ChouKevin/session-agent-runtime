@@ -445,6 +445,22 @@ public interface PostgresConversationMapper extends BaseMapper<PostgresConversat
 
     record ReservationRow(int totalOrdinal, int executionOrdinal) {}
 
+    @Update("""
+            update message_job
+            set cache_usage_known_calls = cache_usage_known_calls + case when #{known} then 1 else 0 end,
+                cache_usage_input_tokens = cache_usage_input_tokens + #{inputTokens},
+                cache_usage_cached_input_tokens = cache_usage_cached_input_tokens + #{cachedInputTokens},
+                cache_usage_last_ordinal = #{ordinal}
+            where message_job_id = #{messageJobId}
+              and cache_usage_last_ordinal < #{ordinal} and #{ordinal} <= model_calls
+            """)
+    int recordModelUsage(
+            @Param("messageJobId") UUID messageJobId,
+            @Param("ordinal") int ordinal,
+            @Param("known") boolean known,
+            @Param("inputTokens") long inputTokens,
+            @Param("cachedInputTokens") long cachedInputTokens);
+
     @Select("""
             select job.execution_mode, job.control_stage, job.ordinary_calls, job.intent_attempted, job.wrap_attempted,
                 job.follow_up_intent, job.user_message_sequence, message.created_at, detail.participant_id, detail.message

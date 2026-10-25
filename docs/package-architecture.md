@@ -424,6 +424,22 @@ validated. Ordinary final answers, including JSON-looking text, remain unparsed 
 V11 backfills ordinary usage from existing total calls without inferring historical waiting
 state. Drain old workers before migration: mixed old/new workers are unsupported.
 
+V12 adds durable, provider-neutral per-job cache accounting without backfilling old
+jobs: existing rows retain NULL accounting, while new jobs start with zero counters.
+`ConversationStore.recordModelUsage` records a sequential reserved-call observation
+under the live worker/claim/lease fence, checks ownership again before commit, and
+allows an in-flight response to be counted after cancellation is requested. Its
+ordinal watermark makes duplicate or older observations no-ops; unreserved future
+ordinals cannot mutate accounting. Missing/invalid usage advances the watermark
+without known-token sums, so unknown reservations remain in the request denominator.
+SQL/arithmetic failures roll back and propagate to the caller; this store does not
+isolate optional-write failures from application processing.
+
+`JobCacheReport` distinguishes no calls, unavailable usage, partial known-subset
+usage, complete usage, and complete zero-input usage. Ratios use summed cached
+input divided by summed input, rounded to six decimals with HALF_UP; zero input
+has no ratio. Only DONE/CANCELLED reports are FINAL, independently of completeness.
+
 Spring AI retries are disabled with `spring.ai.retry.max-attempts=1`. Retrying transient provider failures is owned by the runtime's conversation-job loop, which preserves the already-counted model call and avoids duplicate history. With a direct provider connection, each reservation corresponds to a provider request; when a gateway retries internally, it does not bound the gateway's underlying provider attempts.
 
 When a known storage failure stops an admitted tool batch before append begins,

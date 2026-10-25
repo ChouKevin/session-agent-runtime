@@ -1,5 +1,7 @@
 package com.java.system.sessionagent.storage.adapter.postgres;
 
+import com.java.system.sessionagent.conversation.domain.CacheTokenUsage;
+import com.java.system.sessionagent.conversation.domain.ModelCallObservation;
 import com.java.system.sessionagent.conversation.domain.IntentRequest;
 import com.java.system.sessionagent.conversation.domain.IntentResult;
 
@@ -69,6 +71,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
@@ -121,6 +124,154 @@ class PostgresMessageJobPostgresIT {
     @AfterEach
     void clean() {
         flyway().clean();
+    }
+
+    @Test
+    void cache_accounting_is_idempotent_and_preserves_unknown_reservations_across_reclaim_and_restart() {
+        ConversationStore store = store();
+        receive(store, new IncomingMessage("cache", "alice", "cache-source", "investigate"));
+        MessageWorkClaim original = store.claimNext("worker", Duration.ofMinutes(1)).orElseThrow();
+        assertThat(store.reserveModelCall(original, ModelCallPurpose.EXECUTION, 10, NOW))
+                .isEqualTo(new ModelCallReservationResult.Reserved(1, 1));
+        store.recordModelUsage(original, new ModelCallObservation(1, Optional.of(new CacheTokenUsage(20_000, 10_000))));
+        store.recordModelUsage(original, new ModelCallObservation(1, Optional.of(new CacheTokenUsage(99_000, 99_000))));
+        assertThat(store.reserveModelCall(original, ModelCallPurpose.EXECUTION, 10, NOW))
+                .isEqualTo(new ModelCallReservationResult.Reserved(2, 2));
+        store.recordModelUsage(original, new ModelCallObservation(2, Optional.empty()));
+        store.recordModelUsage(original, new ModelCallObservation(2, Optional.of(new CacheTokenUsage(5_000, 5_000))));
+        assertThat(cacheAccounting(original)).containsExactly(1L, 20_000L, 10_000L, 2L);
+        assertThat(store.reserveModelCall(original, ModelCallPurpose.COMPACTION, 10, NOW))
+                .isEqualTo(new ModelCallReservationResult.Reserved(3, 3));
+        store.recordModelUsage(original, new ModelCallObservation(3, Optional.of(new CacheTokenUsage(25_000, 15_000))));
+        store.recordModelUsage(original, new ModelCallObservation(2, Optional.of(new CacheTokenUsage(5_000, 5_000))));
+
+        jdbcTemplate.update("update message_job set locked_until = clock_timestamp() - interval '1 millisecond' where message_job_id = ?",
+                UUID.fromString(original.messageJobId().value()));
+        ConversationStore restarted = store();
+        MessageWorkClaim recovered = restarted.claimNext("replacement", Duration.ofMinutes(1)).orElseThrow();
+        restarted.recordModelUsage(recovered, new ModelCallObservation(3, Optional.of(new CacheTokenUsage(25_000, 15_000))));
+
+        assertThat(restarted.readJob(recovered.messageJobId()).orElseThrow().modelCallCount()).isEqualTo(3);
+        assertThat(cacheAccounting(recovered)).containsExactly(2L, 45_000L, 25_000L, 3L);
+    }
+
+    @Test
+    void live_cancellation_allows_accounting_but_expired_superseded_and_terminal_claims_cannot_write() {
+        ConversationStore store = store();
+        receive(store, new IncomingMessage("cache-fence", "alice", "cache-fence-source", "investigate"));
+        MessageWorkClaim original = store.claimNext("worker", Duration.ofMinutes(1)).orElseThrow();
+        store.reserveModelCall(original, ModelCallPurpose.EXECUTION, 10, NOW);
+        jdbcTemplate.update("update message_job set locked_until = clock_timestamp() - interval '1 millisecond' where message_job_id = ?",
+                UUID.fromString(original.messageJobId().value()));
+        ModelCallObservation observation = new ModelCallObservation(1, Optional.of(new CacheTokenUsage(100, 60)));
+        assertThatThrownBy(() -> store.recordModelUsage(original, observation))
+                .isExactlyInstanceOf(StaleWorkClaimException.class);
+        assertThat(cacheAccounting(original)).containsExactly(0L, 0L, 0L, 0L);
+        MessageWorkClaim recovered = store.claimNext("replacement", Duration.ofMinutes(1)).orElseThrow();
+        assertThatThrownBy(() -> store.recordModelUsage(original, observation))
+                .isExactlyInstanceOf(StaleWorkClaimException.class);
+        store.requestCancellation(recovered.messageJobId());
+        store.recordModelUsage(recovered, observation);
+        assertThat(cacheAccounting(recovered)).containsExactly(1L, 100L, 60L, 1L);
+
+        store.recordModelUsage(recovered, new ModelCallObservation(2, Optional.of(new CacheTokenUsage(500, 500))));
+        assertThat(cacheAccounting(recovered)).containsExactly(1L, 100L, 60L, 1L);
+        store.append(recovered, new ConversationStore.MessageBatch(
+                List.of(new ConversationStore.RuntimeData(JobCancellation.CODE, JobCancellation.MESSAGE)),
+                ConversationStore.JobUpdate.CANCEL, ConversationStore.CompletionDisposition.NONE), NOW);
+        assertThatThrownBy(() -> store.recordModelUsage(recovered, observation))
+                .isExactlyInstanceOf(StaleWorkClaimException.class);
+        assertThat(cacheAccounting(recovered)).containsExactly(1L, 100L, 60L, 1L);
+    }
+
+    private List<Long> cacheAccounting(MessageWorkClaim claim) {
+        return jdbcTemplate.queryForObject("""
+                select cache_usage_known_calls, cache_usage_input_tokens,
+                       cache_usage_cached_input_tokens, cache_usage_last_ordinal
+                from message_job where message_job_id = ?
+                """, (resultSet, row) -> List.of(resultSet.getLong(1), resultSet.getLong(2),
+                        resultSet.getLong(3), resultSet.getLong(4)), UUID.fromString(claim.messageJobId().value()));
+    }
+
+    @Test
+    void cache_usage_migration_preserves_untracked_jobs_and_enforces_accounting_shape() {
+        flyway().clean();
+        Flyway.configure().dataSource(dataSource()).cleanDisabled(false).target("11").load().migrate();
+        ConversationStore store = store();
+        MessageReceipt legacy = receive(store, new IncomingMessage("legacy-cache", "alice", "legacy-cache-source", "investigate"));
+        MessageWorkClaim claim = store.claimNext("worker", Duration.ofMinutes(1)).orElseThrow();
+        store.reserveModelCall(claim, ModelCallPurpose.EXECUTION, 10, NOW);
+        flyway().migrate();
+        store.recordModelUsage(claim, new ModelCallObservation(1, Optional.of(new CacheTokenUsage(100, 60))));
+
+        assertThat(jdbcTemplate.queryForObject("""
+                select cache_usage_known_calls is null and cache_usage_input_tokens is null
+                    and cache_usage_cached_input_tokens is null and cache_usage_last_ordinal is null
+                from message_job where message_job_id = ?
+                """, Boolean.class, UUID.fromString(legacy.messageJobId().value()))).isTrue();
+        MessageReceipt fresh = receive(store, new IncomingMessage("fresh-cache", "alice", "fresh-cache-source", "investigate"));
+        UUID freshId = UUID.fromString(fresh.messageJobId().value());
+        assertThat(jdbcTemplate.queryForObject("""
+                select cache_usage_known_calls = 0 and cache_usage_input_tokens = 0
+                    and cache_usage_cached_input_tokens = 0 and cache_usage_last_ordinal = 0
+                from message_job where message_job_id = ?
+                """, Boolean.class, freshId)).isTrue();
+        List<String> invalidShapes = List.of(
+                "cache_usage_known_calls = null",
+                "cache_usage_known_calls = -1",
+                "cache_usage_known_calls = 1",
+                "cache_usage_last_ordinal = 1",
+                "cache_usage_input_tokens = -1",
+                "cache_usage_cached_input_tokens = -1",
+                "cache_usage_cached_input_tokens = 1");
+        for (String invalidShape : invalidShapes) {
+            assertThatThrownBy(() -> jdbcTemplate.update(
+                    "update message_job set " + invalidShape + " where message_job_id = ?", freshId))
+                    .isInstanceOf(DataIntegrityViolationException.class);
+        }
+    }
+
+    @Test
+    void cache_usage_overflow_rolls_back_optional_write_without_swallowing_the_failure() {
+        ConversationStore store = store();
+        receive(store, new IncomingMessage("overflow-cache", "alice", "overflow-cache-source", "investigate"));
+        MessageWorkClaim claim = store.claimNext("worker", Duration.ofMinutes(1)).orElseThrow();
+        store.reserveModelCall(claim, ModelCallPurpose.EXECUTION, 10, NOW);
+        store.recordModelUsage(claim, new ModelCallObservation(1, Optional.of(new CacheTokenUsage(Long.MAX_VALUE, 1))));
+        store.reserveModelCall(claim, ModelCallPurpose.EXECUTION, 10, NOW);
+
+        assertThatThrownBy(() -> store.recordModelUsage(claim,
+                new ModelCallObservation(2, Optional.of(new CacheTokenUsage(1, 1)))))
+                .isInstanceOf(ConversationStoreFailure.class);
+        assertThat(cacheAccounting(claim)).containsExactly(1L, Long.MAX_VALUE, 1L, 1L);
+        store.recordModelUsage(claim, new ModelCallObservation(2, Optional.empty()));
+        assertThat(cacheAccounting(claim)).containsExactly(1L, Long.MAX_VALUE, 1L, 2L);
+    }
+
+    @Test
+    void cache_usage_final_fence_rolls_back_when_lease_expires_during_the_write() {
+        ConversationStore store = store();
+        receive(store, new IncomingMessage("final-fence-cache", "alice", "final-fence-cache-source", "investigate"));
+        MessageWorkClaim claim = store.claimNext("worker", Duration.ofMinutes(1)).orElseThrow();
+        store.reserveModelCall(claim, ModelCallPurpose.EXECUTION, 10, NOW);
+        jdbcTemplate.execute("""
+                create function expire_cache_usage_claim() returns trigger language plpgsql as $$
+                begin
+                    new.locked_until = clock_timestamp() - interval '1 millisecond';
+                    return new;
+                end;
+                $$
+                """);
+        jdbcTemplate.execute("""
+                create trigger expire_cache_usage_claim before update of cache_usage_last_ordinal on message_job
+                for each row execute function expire_cache_usage_claim()
+                """);
+
+        assertThatThrownBy(() -> store.recordModelUsage(claim,
+                new ModelCallObservation(1, Optional.of(new CacheTokenUsage(100, 60)))))
+                .isExactlyInstanceOf(StaleWorkClaimException.class);
+        assertThat(cacheAccounting(claim)).containsExactly(0L, 0L, 0L, 0L);
+        assertThat(store.isCancellationRequested(claim)).isFalse();
     }
 
     @Test

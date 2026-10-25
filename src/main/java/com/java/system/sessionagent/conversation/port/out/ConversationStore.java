@@ -6,6 +6,7 @@ import com.java.system.sessionagent.conversation.domain.WaitingChoice;
 import com.java.system.sessionagent.conversation.domain.FollowUpIntent;
 import com.java.system.sessionagent.conversation.domain.ModelCallPurpose;
 import com.java.system.sessionagent.conversation.domain.ModelCallReservationResult;
+import com.java.system.sessionagent.conversation.domain.ModelCallObservation;
 import com.java.system.sessionagent.skill.domain.SkillResource;
 import com.java.system.sessionagent.skill.domain.SkillReadResult;
 import com.java.system.sessionagent.conversation.domain.IncomingMessage;
@@ -117,6 +118,8 @@ public interface ConversationStore {
 
     ModelCallReservationResult reserveModelCall(
             MessageWorkClaim claim, ModelCallPurpose purpose, int maxExecutionCalls, Instant now);
+
+    void recordModelUsage(MessageWorkClaim claim, ModelCallObservation observation);
 
     JobControl resolveFollowUp(MessageWorkClaim claim, WaitingChoice expected, FollowUpIntent intent, Instant now);
 

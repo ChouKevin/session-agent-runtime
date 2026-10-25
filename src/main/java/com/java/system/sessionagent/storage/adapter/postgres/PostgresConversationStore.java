@@ -9,6 +9,8 @@ import com.java.system.sessionagent.conversation.domain.WaitingChoice;
 import com.java.system.sessionagent.conversation.domain.FollowUpIntent;
 import com.java.system.sessionagent.conversation.domain.ModelCallPurpose;
 import com.java.system.sessionagent.conversation.domain.ModelCallReservationResult;
+import com.java.system.sessionagent.conversation.domain.ModelCallObservation;
+import com.java.system.sessionagent.conversation.domain.CacheTokenUsage;
 import com.java.system.sessionagent.conversation.domain.SkillCommand;
 import com.java.system.sessionagent.conversation.domain.SkillCommandState;
 import com.java.system.sessionagent.conversation.domain.SkillMessage;
@@ -591,6 +593,22 @@ public final class PostgresConversationStore implements ConversationStore {
                     purpose.name(), purpose.ordinary(), timestamp(now)).getFirst();
             requireLiveClaim(claim);
             return new ModelCallReservationResult.Reserved(reserved.totalOrdinal(), reserved.executionOrdinal());
+        });
+    }
+
+    @Override
+    public void recordModelUsage(MessageWorkClaim claim, ModelCallObservation observation) {
+        MessageWorkClaim requiredClaim = Objects.requireNonNull(claim, "Message work claim must not be null");
+        ModelCallObservation requiredObservation = Objects.requireNonNull(observation, "Model call observation must not be null");
+        Optional<CacheTokenUsage> usage = requiredObservation.cacheUsage();
+        long inputTokens = usage.isPresent() ? usage.orElseThrow().inputTokens() : 0;
+        long cachedInputTokens = usage.isPresent() ? usage.orElseThrow().cachedInputTokens() : 0;
+        inTransaction(() -> {
+            requireLiveClaim(requiredClaim);
+            mapper.recordModelUsage(messageJobId(requiredClaim), requiredObservation.totalOrdinal(), usage.isPresent(),
+                    inputTokens, cachedInputTokens);
+            requireLiveClaim(requiredClaim);
+            return true;
         });
     }
 
