@@ -103,6 +103,10 @@ SLACK_BOT_USER_ID=Bot使用者ID
 - 可用 `auth.test` 驗證 token 並取得 `user_id`，回報只保留狀態與 ID，不輸出 token、headers 或 Socket URL。
 - 在已綁定 thread 使用 `@bot stop` 或 `@bot 停止工作`；停止當時該 thread 未完成工作，不影響後來新提交。採合作式取消，已發生的工具副作用不會回滾。
 
+一般 reply 只會在已綁定 thread 續聊；未綁定 thread 即使 mention bot 也不會
+建立 session。完整 root／reply、文字正規化與忽略條件見
+[Slack intake 契約](../../../../docs/http-api.md#slack-socket-mode-optional)。
+
 一般回答以原文 native `markdown` block 呈現；超過 10,000 UTF-16 units／Unicode
 code points 時，整份原文 UTF-8 存為 `answer.md`，搭配固定通知，不解析、拆分、
 修補 Markdown 或另呼叫模型摘要。Markdown／附件不受支援或權限不足會明確
@@ -204,3 +208,102 @@ HTTP 使用 `/skill:inventory-java-mq 問題`；Slack 使用
 「技能已載入」只證明該次 bytes 已提交，不證明模型遵守指引或報表正確。
 Prompt skill 不是 validator；來源歸屬、coverage 與欄位對應仍須獨立驗收。
 驗收見 [verification.md](verification.md#java-mq-業務-skill-驗收)。
+
+## Generic MCP connection reference
+
+Configure zero or more named connections under `session-agent.mcp.connections`. A connection name is portable (`[A-Za-z][A-Za-z0-9-]{0,31}`); discovered tools are exposed as `{connectionName}_{rawToolName}`. The URL is the exact absolute streamable-HTTP endpoint, including any non-default path.
+
+For the host deployment, follow the [MCP setup and acceptance runbook](mcp.md). It includes two independent read-only `java-code-intelligence` readers, private systemd credentials, disabling/rotation, and model-to-tool history verification. Gateway routing does not import OMP MCP configuration or skills. Discovery and direct MCP success do not by themselves prove model-generated tool arguments are compatible.
+
+```yaml
+session-agent:
+  mcp:
+    connections:
+      catalog:
+        enabled: true
+        url: ${SESSION_AGENT_MCP_CATALOG_URL}
+        headers:
+          Authorization: ${SESSION_AGENT_MCP_CATALOG_AUTHORIZATION}
+```
+
+Headers are optional. Omit the header entry when a provider does not require it; otherwise source the value from the environment as shown, rather than committing a credential. Runtime defaults are a 60-second catalog refresh, 30-second request timeout, reconnect backoff from 1 to 60 seconds, and a 5-second shutdown timeout.
+
+Docker Compose starts with zero MCP connections when `SESSION_AGENT_MCP_CONFIGURATION_JSON` is unset. To configure one through Compose, set that environment variable to the equivalent generic configuration, for example `{"session-agent":{"mcp":{"connections":{"catalog":{"enabled":true,"url":"https://host/custom/mcp"}}}}}`. Supply any optional header values through the deployment environment or secret manager; the exact URL and headers are passed to Runtime without provider-specific behavior.
+
+Startup is safe with no configured connections or when every configured server is unavailable. Each connection reconnects and refreshes independently, so a failed provider does not hide tools from an available provider. The `mcp` module exposes `GET /actuator/mcpConnections` with safe per-connection diagnostics: state (`DISABLED`, `CONNECTING`, `AVAILABLE`, `DEGRADED`, `UNAVAILABLE`, or `STOPPED`), discovered tool count, and when applicable a safe failure code/message. It never exposes endpoint URLs, headers, tokens, raw provider responses, or exception details.
+
+## Model adapter and Gateway boundaries
+
+The build pins Spring AI **2.1.0-RC1**, a release candidate/pre-release rather than
+a stable release. The upgrade retains the existing Google and OpenAI adapters;
+availability of Responses API support in the dependency does not enable it in this
+runtime or add native Codex OAuth login/refresh.
+
+Spring AI's ordered message parts are captured as opaque, route-bound continuation
+state during a tool turn. This preserves reasoning, per-part Google thought
+signatures, and OpenAI-compatible extra tool-call properties on replay, including
+assistant text alongside tool calls. Provider response metadata is not the replay
+contract. The continuation remains private to the model adapter and is removed
+when the job finishes; permanent provider-neutral history is unchanged. Runtime
+still owns sequential tool execution and atomic history commits, not Spring AI
+memory or an advisor-managed tool loop.
+
+Before replacing an M1 runtime with RC1, drain in-flight/retry jobs through
+completion. RC1 does not replay the old Google metadata-only continuation format;
+already completed conversation history needs no migration. The local fake-HTTP
+smoke verifies Runtime sends explicit `strict: false`, keeps optional tool-schema
+fields optional, commits/replays the tool observation, and stores the final
+response. It does not verify a gateway's downstream translation; the gateway
+compatibility requirement below still applies.
+
+`src/main/resources/models.yml` is the bundled model configuration imported by the default `application.yml`. It contains a Google entry and an inactive OpenAI fragment for direct-provider/container deployments. The OMP deployment skill instead selects a complete external `application.yml` with `SPRING_CONFIG_LOCATION`, importing its own `models.yml` without retaining the unused Google entry. Model credentials are environment placeholders only; do not put a key in configuration committed to a repository.
+
+To deploy OpenAI alongside the existing Google entry, edit `src/main/resources/models.yml` to enable the OpenAI fragment, provide both credentials through the deployment environment, and rebuild the image. The entry must have complete, explicit capacities. For example, the non-secret shape is:
+
+```yaml
+session-agent:
+  model:
+    default-model: openai-primary
+    models:
+      openai-primary:
+        provider: openai
+        model-id: gpt-5-mini
+        api-key: ${OPENAI_API_KEY:}
+        context-window-tokens: 400000
+        max-output-tokens: 16384
+        timeout: 30s
+        base-url: https://api.openai.com/v1
+```
+
+For Docker Compose, set `OPENAI_API_KEY` in the untracked `docker/.env` (and retain `GOOGLE_API_KEY` while the Google entry is configured). The OpenAI adapter uses Chat Completions with `store=false`; it does not use the Responses API. A configured entry with a missing key, capacity, or default-key mapping fails at startup rather than selecting a different model. Enabling an entry in bundled `models.yml` requires an image rebuild; selecting among already configured entries through the session API does not require a restart and affects only subsequently accepted messages.
+
+Codex OAuth is not a native Runtime authentication mode. The `openai` adapter can
+use an external OpenAI-compatible gateway through `base-url`; in that deployment,
+`api-key` is the gateway's bearer credential, while the gateway owns Codex OAuth
+login, refresh, and provider-protocol conversion. An OAuth access token is not a
+drop-in replacement for an OpenAI API key. Keep these provider details outside
+the conversation and MCP contracts.
+
+The currently pinned host-local OMP gateway does not run the OMP agent loop or add
+its agent prompt, skills, or conversation history. It translates the caller's
+messages/tools into the Codex protocol, manages OAuth and transport, and can apply
+protocol/history normalization and internal retries. It is not a byte-for-byte
+relay. Runtime's `modelCallCount` counts requests to that gateway, not all
+underlying Codex attempts.
+
+**Gateway compatibility requirement:** unpatched OMP 18.12.6 drops tool
+`strict: false` while translating Chat Completions into the provider protocol.
+The deployed workaround is a native OMP source build with that conversion fixed,
+not a different agent or proxy implementation. Explicit `false`/`true` must survive,
+and omitted Chat Completions strictness must retain its non-strict default.
+Use a verified fixed build or an upstream release containing the fix; do not replace
+it with an unpatched binary merely because both report the same OMP version.
+Record the source revision/patch and executable checksum, and rerun the
+[MCP model-to-tool acceptance](mcp.md)
+after changing the Gateway. A local patched build is not an official upstream release.
+
+For this pinned Codex route, the gateway does not forward the OpenAI
+`max_tokens`/`max_completion_tokens`, temperature, or top-p settings. Configuring
+Runtime `max-output-tokens` is therefore not a guaranteed provider-side output
+cap on this route. Recheck these boundaries when upgrading or replacing OMP;
+this feature does not change gateway behavior.

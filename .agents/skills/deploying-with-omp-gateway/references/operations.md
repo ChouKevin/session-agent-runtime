@@ -2,7 +2,7 @@
 
 ## 先辨識既有部署
 
-先在主機查看 Runtime unit、artifact 連結、config location，以及 Docker Compose labels／volume mounts；敏感值只在本機處理，不回傳完整 environment、`docker inspect` 或 systemd properties。記錄 Runtime SHA/checksum、OMP 版本與 PostgreSQL image identity。
+先在主機查看 Runtime unit、artifact 連結、config location，以及 Docker Compose labels／volume mounts；敏感值只在本機處理，不回傳完整 environment、`docker inspect` 或 systemd properties。記錄 Runtime SHA/checksum、OMP 版本、source revision／patch、實際 Gateway service executable 的 SHA-256 checksum 與 PostgreSQL image identity。
 
 先取得只含位置／身分的資料，不輸出秘密：
 
@@ -78,6 +78,8 @@ journalctl --user -u session-agent-runtime --since '5 minutes ago' --no-pager
 正常停機：先停止 Runtime，再視需求停止 gateway／broker；資料庫可保留運行。需要停止資料庫時用 `"${PC[@]}" stop postgres`。**不使用 `down --volumes`、`docker volume rm` 或 Flyway clean。** systemd `enable` 與 user linger 不保證 Docker Desktop 在主機開機時已運行。
 
 ## 更新 Runtime（不更新 OMP）
+
+更新前確認既有 Gateway 符合 [安裝前置條件](install.md#1-前置檢查)：使用已驗證的 native strictness 修正版 build，或包含同一修正的 upstream release。未修正的 OMP 18.12.6 會遺失 tool `strict: false`；明確 `false`／`true` 必須保留，省略時維持 Chat Completions 的 non-strict 預設。同一版本字串不代表同一 build，須保留 source revision／patch 與實際 executable checksum，不能覆蓋成未修正 binary。缺少相容性／provenance 證據時停止切換並回報，不在 Runtime update 中自行重建或升級 Gateway。Gateway 若另經授權更換，須再經 live 授權完成 [模型 → MCP → history 驗收](mcp.md#經授權的模型--mcp--history-實測)；health、catalog 或 discovery 不替代工具參數與持久化 observations 驗收。
 
 ### 1. 準備候選版本，不碰目前 artifact
 
@@ -216,3 +218,46 @@ Runtime update 不等於 OMP update。使用者另行要求更新 OMP 時，採�
   正常 ack 後 badge 消失，不刪 operational rows 來製造成功顯示。
 - 回滾前確認 schema 與 binary 相容性；必要時只能按已驗證備份復原 DB。
   不因 jar 可切回就假定 V11 可由舊 worker 安全處理。保留原 DB volume。
+
+## Database contract and Docker alternative
+
+The following Docker commands are an alternative to the host deployment, not an additional Runtime instance. Run them from the repository root; do not reuse host-deployment ports or change an existing Compose project or volume.
+
+The shipped database contract is a fresh schema applied through ordered Flyway migrations V1 through V11. V5 adds durable job progress and safe failure codes; historical terminal failures are backfilled only from an allowlisted final runtime event, not an earlier recoverable failure. Existing working rows may initially have no phase until reclaimed. V6 adds durable cancellation requests and the `CANCELLED` terminal state without rewriting existing history or progress. V7 adds durable Slack stop-command receipts and `STOP` delivery notices. V8 adds skill commands; V9 adds Slack-owned per-question progress and workspace cooldown persistence. V10 adds durable artifacts and Slack file-upload delivery state. V11 adds durable continuation/handoff control, ordinary-call accounting, waiting choices, and skill-load receipts with Slack notifications. Compatibility with removed pre-release schemas is not supported. Do not reset or delete the current database or its data as part of starting this version. The Compose service binds the runtime HTTP port to loopback only. Required local credentials are intentionally not committed.
+
+Conversations and tool results are retained indefinitely. This POC adds no TTL or automatic cleanup. The OMP deployment skill documents operator-run database backup and schema-aware rollback; it does not add automatic backup scheduling or guarantee lossless restoration. Existing temporary continuation cleanup and Docker/host log retention remain unchanged.
+
+## Docker JSON logs
+
+Runtime emits one JSON object per line to both `docker compose logs` and a rolling host file. The active file is always `session-agent-runtime.log`; archives are named `session-agent-runtime.YYYY-MM-DD.N.log.gz`. Runtime rolls at 100 MB, keeps seven days, and caps retained archives at 500 MB. Docker's independent `json-file` driver remains at 100 MB with five files.
+
+Initialize the local deployment configuration and prepare the bind directory for the non-root runtime UID/GID (10001). The default is the repository `logs/` directory:
+
+```bash
+./docker/runtime.sh init
+# To persist a dedicated absolute host path into a newly created docker/.env:
+SESSION_AGENT_LOG_DIR=/srv/session-agent-runtime/logs ./docker/runtime.sh init
+```
+
+`init` never overwrites an existing `docker/.env`; edit that file to provide `SESSION_AGENT_POSTGRES_PASSWORD` and any optional model, Slack, MCP, port, or log settings. The helper may ask for `sudo` only while preparing the host log directory. It can be invoked from any working directory.
+
+Manage the complete Compose project through the same helper:
+
+```bash
+./docker/runtime.sh start    # validate, build, and run detached
+./docker/runtime.sh status
+./docker/runtime.sh restart  # down, rebuild, and start
+./docker/runtime.sh stop     # preserves the PostgreSQL named volume
+```
+
+Follow container output and the active host file independently:
+
+```bash
+./docker/runtime.sh logs
+# Default bind path, from the repository root:
+tail -F logs/session-agent-runtime.log
+# When SESSION_AGENT_LOG_DIR is set in docker/.env:
+tail -F /srv/session-agent-runtime/logs/session-agent-runtime.log
+```
+
+The helper does not contain a data-reset command, and `stop` never passes `--volumes`; PostgreSQL data remains in the project-scoped named volume. The host directory is intentionally Git-ignored and keeps a stable active filename so a future Filebeat or Elastic Agent input can tail it. This POC does not deploy an ELK stack or a shipper. JSON lifecycle events contain only stable event names and safe correlation/outcome fields; Runtime never emits conversation text, Slack/model credentials, tool arguments/results, provider continuation data, or raw exception details in its lifecycle events.

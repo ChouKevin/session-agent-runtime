@@ -742,11 +742,14 @@ public final class PostgresConversationStore implements ConversationStore {
             if (requiredBatch.usageCheckpoint().isPresent() && (!cancelled || responseSequence.isPresent())) {
                 ConversationStore.UsageCheckpointData checkpoint = requiredBatch.usageCheckpoint().orElseThrow();
                 SessionSequence boundary = responseSequence.orElseThrow();
-                mapper.insertUsageCheckpoint(sessionId, boundary.value(), checkpoint.model().routeId().value(),
-                        checkpoint.model().modelId(), checkpoint.selection().model(), checkpoint.selection().fingerprint(),
-                        checkpoint.modelCallOrdinal(), checkpoint.promptTokens(),
-                        checkpoint.completionTokens(), checkpoint.totalTokens(), checkpoint.requestShapeFingerprint(),
-                        checkpoint.compactGeneration(), timestamp(requiredCreatedAt));
+                // Allocation holds the session row lock: no intake can enter between this proof and commit.
+                if (boundary.value() == checkpoint.requestBoundary().value() + 1) {
+                    mapper.insertUsageCheckpoint(sessionId, boundary.value(), checkpoint.model().routeId().value(),
+                            checkpoint.model().modelId(), checkpoint.selection().model(), checkpoint.selection().fingerprint(),
+                            checkpoint.modelCallOrdinal(), checkpoint.promptTokens(),
+                            checkpoint.completionTokens(), checkpoint.totalTokens(), checkpoint.requestShapeFingerprint(),
+                            checkpoint.compactGeneration(), timestamp(requiredCreatedAt));
+                }
             }
             if (!cancelled && requiredBatch.continuation().isPresent()) {
                 SessionSequence assistantSequence = continuationSequence.orElseThrow();

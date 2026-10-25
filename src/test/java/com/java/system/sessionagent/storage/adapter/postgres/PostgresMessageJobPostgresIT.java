@@ -312,7 +312,7 @@ class PostgresMessageJobPostgresIT {
         assertThat(store.append(claim, new ConversationStore.MessageBatch(
                 List.of(new ConversationStore.AssistantData("must not be committed")), ConversationStore.JobUpdate.COMPLETE,
                 Optional.empty(), Optional.of(new ConversationStore.UsageCheckpointData(
-                        TEST_SELECTION, descriptor, 1, 20, 10, 30, shape, 0)), ConversationStore.CompletionDisposition.ANSWER), NOW))
+                        TEST_SELECTION, descriptor, 1, 20, 10, 30, shape, 0, new SessionSequence(1))), ConversationStore.CompletionDisposition.ANSWER), NOW))
                 .isEqualTo(JobStatus.CANCELLED);
         assertThat(store().loadHistory(receipt.sessionId())).extracting(SessionMessage::role)
                 .containsExactly(MessageRole.USER, MessageRole.RUNTIME);
@@ -1336,7 +1336,8 @@ class PostgresMessageJobPostgresIT {
 
         store.append(claim, new ConversationStore.MessageBatch(List.of(new ConversationStore.AssistantData("done")),
                 ConversationStore.JobUpdate.COMPLETE, Optional.empty(), Optional.of(
-                        new ConversationStore.UsageCheckpointData(original, descriptor, 1, 20, 10, 30, shape, 0)), ConversationStore.CompletionDisposition.ANSWER), NOW);
+                        new ConversationStore.UsageCheckpointData(original, descriptor, 1, 20, 10, 30, shape, 0,
+                                new SessionSequence(1))), ConversationStore.CompletionDisposition.ANSWER), NOW);
 
         assertThat(store.loadUsageCheckpoint(receipt.sessionId(), original, descriptor, shape, 0)).isPresent();
         assertThat(store.loadUsageCheckpoint(receipt.sessionId(), changed, descriptor, shape, 0)).isEmpty();

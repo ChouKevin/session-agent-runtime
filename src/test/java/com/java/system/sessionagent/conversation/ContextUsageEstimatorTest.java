@@ -23,8 +23,12 @@ import com.java.system.sessionagent.tool.domain.ToolName;
 import com.java.system.sessionagent.tool.port.ToolDefinition;
 import org.junit.jupiter.api.Test;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -93,6 +97,43 @@ class ContextUsageEstimatorTest {
 
         assertThat(withCheckpoint.basis()).isEqualTo(ContextEstimate.Basis.FULL_ESTIMATE);
         assertThat(withCheckpoint.tokens()).isEqualTo(withoutCheckpoint.tokens());
+    }
+
+    @Test
+    void rejects_legacy_checkpoints_without_request_coverage_proof() throws NoSuchAlgorithmException {
+        ContextUsageEstimator estimator = new ContextUsageEstimator();
+        ContextUsageProjection projection = projection(List.of());
+        String legacyFingerprint = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
+                .digest("system:21:Runtime system prompt;eligibility:eligibility"
+                        .getBytes(StandardCharsets.UTF_8)));
+        ContextUsageCheckpoint legacy = new ContextUsageCheckpoint(projection.model(), 1, new SessionSequence(2),
+                70, 30, 100, legacyFingerprint, 0, Instant.EPOCH);
+
+        ContextEstimate estimate = estimator.estimate(projection, Optional.of(legacy));
+
+        assertThat(estimate.basis()).isEqualTo(ContextEstimate.Basis.FULL_ESTIMATE);
+        assertThat(estimate.tokens()).isEqualTo(estimator.estimate(projection, Optional.empty()).tokens());
+    }
+
+    @Test
+    void an_older_safe_checkpoint_counts_large_user_before_a_later_response_as_trailing_history() {
+        ContextUsageEstimator estimator = new ContextUsageEstimator();
+        ContextUsageProjection base = projection(List.of());
+        SessionMessage first = base.history().getFirst();
+        ContextUsageProjection projection = new ContextUsageProjection(base.model(), base.systemPrompt(), List.of(),
+                List.of(first, base.history().get(1),
+                        new UserMessage(first.sessionId(), new SessionSequence(3), Optional.of(new MessageJobId("intervening")),
+                                Instant.EPOCH, MessageRole.USER, "alice", "x".repeat(40_000)),
+                        new AssistantMessage(first.sessionId(), new SessionSequence(4), Optional.of(new MessageJobId("later")),
+                                Instant.EPOCH, MessageRole.ASSISTANT, "later response")),
+                0, Optional.empty(), base.eligibilityFingerprint());
+        ContextUsageCheckpoint older = new ContextUsageCheckpoint(base.model(), 1, new SessionSequence(2),
+                70, 30, 100, estimator.requestShapeFingerprint(base), 0, Instant.EPOCH);
+
+        ContextEstimate estimate = estimator.estimate(projection, Optional.of(older));
+
+        assertThat(estimate.basis()).isEqualTo(ContextEstimate.Basis.PROVIDER_PLUS_TRAILING_ESTIMATE);
+        assertThat(estimate.tokens()).isGreaterThanOrEqualTo(10_100);
     }
 
     @Test

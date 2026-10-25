@@ -6,7 +6,9 @@
 
 需要 Linux/WSL、可用的 systemd user manager、Java 21、Maven、Python 3、Docker Compose v2，以及已安裝並完成模型 provider 登入的 OMP。OMP 安裝／登入由操作者透過核准的發行來源完成；不要替使用者選擇新帳號、匯入 OAuth 檔或自動升級。
 
-本方案已使用 OMP **18.12.6** 驗證；其他版本先核對 `omp auth-broker serve --help`、`omp auth-gateway serve --help` 與 OMP `auth-broker-gateway` 文件。模型 catalog 仍是動態資料。
+本方案使用的是修正過的 native OMP source build，不是未修正的 **18.12.6** 發行 binary；只看 `omp --version` 不能證明相容。未修正的 18.12.6 會在 Chat Completions → provider protocol 轉換時遺失 tool `strict: false`。前置條件是已驗證的修正版 build，或包含同一修正的 upstream release：明確 `false`／`true` 必須保留，省略 strictness 時仍須保持 Chat Completions 的 non-strict 預設。保存 source revision／patch 與實際 service executable 的 SHA-256 checksum；本機 patched build 不是官方 upstream release。不要因版本字串相同就替換成未修正 binary，也不在此安裝流程隱含重建或升級 Gateway。完整邊界見 [模型與 Gateway 邊界](configuration.md#model-adapter-and-gateway-boundaries)。
+
+其他版本仍須核對 `omp auth-broker serve --help`、`omp auth-gateway serve --help` 與 OMP `auth-broker-gateway` 文件；模型 catalog 是動態資料。首次啟用或更換 Gateway 後，取得明確 live 授權並完成 [模型 → MCP → history 驗收](mcp.md#經授權的模型--mcp--history-實測)；health、`/v1/models` 或 discovery 成功不能替代工具參數及持久化 observations 驗收。未獲授權時明確回報此邊界未驗證。
 
 在 repo root 的 Bash 執行；後續同一 shell 使用這些變數：
 
@@ -127,7 +129,7 @@ printf '%s\n' "$REV" > "$DEPLOY_ROOT/runtime-revision"
 omp --version > "$DEPLOY_ROOT/omp-version"
 ```
 
-`verify` 會產生 executable jar；integration tests 需要 Docker，但不使用部署資料庫或模型額度。固定 Runtime SHA 並記錄 OMP 版本，不能把重建中的 `target/` 當正式服務 artifact。
+`verify` 會產生 executable jar；integration tests 需要 Docker，但不使用部署資料庫或模型額度。固定 Runtime SHA 並記錄 OMP 版本、source revision／patch 與實際 Gateway executable checksum，不能把重建中的 `target/` 當正式服務 artifact，也不能以 OMP 版本字串代替 build provenance。
 
 ## 4. 啟動 PostgreSQL 與 OMP
 

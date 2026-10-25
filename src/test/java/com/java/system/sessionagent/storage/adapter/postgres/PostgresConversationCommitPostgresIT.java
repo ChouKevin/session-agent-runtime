@@ -32,6 +32,8 @@ import com.java.system.sessionagent.conversation.domain.AssistantToolCallsMessag
 import com.java.system.sessionagent.conversation.domain.ContextUsageEstimator;
 import com.java.system.sessionagent.conversation.domain.ContextUsageProjection;
 import com.java.system.sessionagent.conversation.domain.ContextHistoryView;
+import com.java.system.sessionagent.conversation.domain.ContextEstimate;
+import com.java.system.sessionagent.conversation.domain.ContextCompactionRequest;
 import com.java.system.sessionagent.conversation.domain.ModelRequest;
 import com.java.system.sessionagent.conversation.domain.ModelSelection;
 import com.java.system.sessionagent.conversation.domain.ModelUsage;
@@ -52,6 +54,9 @@ import com.java.system.sessionagent.model.adapter.springai.HistoryProjector;
 import com.java.system.sessionagent.model.adapter.springai.InvalidConversationHistoryException;
 import com.java.system.sessionagent.tool.port.ToolCatalog;
 import com.java.system.sessionagent.tool.port.ToolSnapshot;
+import com.java.system.sessionagent.tool.port.ToolBinding;
+import com.java.system.sessionagent.tool.port.ToolCapability;
+import com.java.system.sessionagent.tool.port.ToolDefinition;
 import com.java.system.sessionagent.tool.port.SkillReadReceipt;
 import com.java.system.sessionagent.tool.port.ToolOutput;
 import com.java.system.sessionagent.tool.port.ToolInvocation;
@@ -63,6 +68,8 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
@@ -77,6 +84,7 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.Timestamp;
 import java.util.UUID;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -236,7 +244,8 @@ class PostgresConversationCommitPostgresIT {
                 new ConversationStore.ToolObservationData(new ToolCallId("current"), "second", Map.of("result", "actual")),
                 new ConversationStore.RuntimeData("MODEL_UNAVAILABLE", "superseded failure")),
                 ConversationStore.JobUpdate.KEEP_WORKING, Optional.of(continuation), Optional.of(
-                        new ConversationStore.UsageCheckpointData(TEST_SELECTION, descriptor, 2, 20, 10, 30, shape, 0)),
+                        new ConversationStore.UsageCheckpointData(TEST_SELECTION, descriptor, 2, 20, 10, 30, shape, 0,
+                                new SessionSequence(3))),
                 Optional.of(JobFailure.MODEL_UNAVAILABLE), ConversationStore.CompletionDisposition.NONE), NOW))
                 .isEqualTo(JobStatus.CANCELLED);
 
@@ -401,6 +410,73 @@ class PostgresConversationCommitPostgresIT {
         });
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"model", "tool"})
+    void counts_user_arriving_after_request_snapshot_before_response_commit_when_deciding_compaction(String arrivalPhase) {
+        ConversationStore store = store();
+        MessageReceipt receipt = receive(store, new IncomingMessage("checkpoint-race", "alice", "first", "hello"));
+        MessageWorkClaim claim = store.claimNext("worker", Duration.ofMinutes(1)).orElseThrow();
+        ModelDescriptor descriptor = new ModelDescriptor(new ModelRouteId("test"), "bounded", 12_000);
+        String interveningMessage = "x".repeat(40_000);
+        List<String> calls = new ArrayList<>();
+        Runnable intake = () -> receive(store,
+                new IncomingMessage("checkpoint-race", "alice", "intervening", interveningMessage));
+        ToolCatalog catalog = () -> new ToolSnapshot(List.of(new ToolBinding(
+                new ToolDefinition(new ToolName("opaque"), "opaque", Map.of()),
+                (context, arguments) -> {
+                    if (arrivalPhase.equals("tool")) {
+                        intake.run();
+                    }
+                    return new ToolOutput(false, Map.of("value", "observed"));
+                }, ToolCapability.ORDINARY)));
+        AtomicInteger answers = new AtomicInteger();
+        ConversationModel model = new ConversationModel() {
+            @Override public IntentResult classifyIntent(IntentRequest request, ModelCallReservation reservation) {
+                throw new AssertionError("Unexpected intent request");
+            }
+            @Override public ModelRouteId routeId() { return descriptor.routeId(); }
+            @Override public ModelDescriptor descriptor() { return descriptor; }
+            @Override public String systemPrompt() { return "system"; }
+            @Override public String summarize(ContextCompactionRequest request, ModelCallReservation reservation) {
+                calls.add("summary");
+                assertThat(request.history()).filteredOn(UserMessage.class::isInstance)
+                        .extracting(message -> ((UserMessage) message).message()).contains(interveningMessage);
+                reservation.reserve();
+                return "summary including intervening user";
+            }
+            @Override public ModelCallResult respond(ModelRequest request, ModelCallReservation reservation, Consumer<ModelUsage> observer) {
+                calls.add("answer");
+                reservation.reserve();
+                if (answers.incrementAndGet() == 1) {
+                    assertThat(request.history()).hasSize(1);
+                    if (arrivalPhase.equals("model")) {
+                        intake.run();
+                    }
+                    return new ModelCallResult(new ModelReply.UseTools(Optional.empty(), List.of(
+                            new ToolRequest(new ToolCallId("lookup"), new ToolName("opaque"), Map.of()))),
+                            Optional.empty(), new ModelUsage(50, 20, 70, true));
+                }
+                return new ModelCallResult(new ModelReply.Text("done"), Optional.empty());
+            }
+        };
+        JobProcessor processor = new JobProcessor(store, TestConfiguredModels.withModel(model), catalog,
+                new FileSystemSkillLibrary(new SkillProperties()), Clock.fixed(NOW, ZoneOffset.UTC), 3,
+                new com.java.system.sessionagent.conversation.application.MessageJobRetryPolicy(3, Duration.ofSeconds(1)),
+                new com.java.system.sessionagent.conversation.port.out.NoOpConversationTelemetry());
+
+        assertThat(processor.process(claim, () -> true)).isEqualTo(MessageJobProcessingResult.COMPLETED);
+
+        assertThat(calls).containsExactly("answer", "summary", "answer");
+        assertThat(store().loadCompaction(receipt.sessionId())).hasValueSatisfying(compaction -> {
+            assertThat(compaction.estimateBeforeTokens()).isGreaterThanOrEqualTo(10_000);
+            assertThat(compaction.coveredThrough().value()).isEqualTo(4);
+        });
+        assertThat(store().loadHistory(receipt.sessionId())).extracting(SessionMessage::role)
+                .containsExactly(MessageRole.USER, MessageRole.USER, MessageRole.ASSISTANT_TOOL_CALLS,
+                        MessageRole.TOOL, MessageRole.ASSISTANT);
+        assertThat(store.readJob(receipt.messageJobId()).orElseThrow().status()).isEqualTo(JobStatus.DONE);
+    }
+
     @Test
     void persists_available_model_usage_with_the_committed_response_boundary() {
         ConversationStore store = store();
@@ -453,6 +529,14 @@ class PostgresConversationCommitPostgresIT {
                     assertThat(checkpoint.promptTokens()).isEqualTo(50);
                     assertThat(checkpoint.completionTokens()).isEqualTo(20);
                     assertThat(checkpoint.totalTokens()).isEqualTo(70);
+                    ContextUsageProjection projection;
+                    try (ToolSnapshot tools = new ToolSnapshot(List.of())) {
+                        projection = new ContextUsageProjection(descriptor, model.systemPrompt(), List.of(), history,
+                                0, Optional.empty(), estimator.eligibilityFingerprint(new ContextHistoryView(
+                                restartedStore.loadContextHistory(receipt.sessionId())).eligibilityFingerprint(), tools));
+                    }
+                    assertThat(estimator.estimate(projection, Optional.of(checkpoint)).basis())
+                            .isEqualTo(ContextEstimate.Basis.PROVIDER_PLUS_TRAILING_ESTIMATE);
                 });
     }
 
@@ -559,7 +643,7 @@ class PostgresConversationCommitPostgresIT {
                 new ConversationStore.ToolObservationData(new ToolCallId("call-2"), "mcp_entries", Map.of("isError", false, "result", Map.of()))),
                 ConversationStore.JobUpdate.KEEP_WORKING, java.util.Optional.of(continuation), java.util.Optional.of(
                         new ConversationStore.UsageCheckpointData(claim.modelSelection(), descriptor, 1, 50, 20, 70,
-                                "a".repeat(64), 0)), ConversationStore.CompletionDisposition.NONE), NOW)).isInstanceOf(RuntimeException.class);
+                                "a".repeat(64), 0, new SessionSequence(1))), ConversationStore.CompletionDisposition.NONE), NOW)).isInstanceOf(RuntimeException.class);
 
         assertThat(jdbcTemplate.queryForObject("select count(*) from session_message", Integer.class)).isEqualTo(1);
         assertThat(jdbcTemplate.queryForObject("select count(*) from assistant_message", Integer.class)).isZero();

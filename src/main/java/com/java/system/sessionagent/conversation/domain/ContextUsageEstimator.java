@@ -24,7 +24,8 @@ public final class ContextUsageEstimator {
 
     public String requestShapeFingerprint(ContextUsageProjection projection) {
         Assert.notNull(projection, "Context usage projection must not be null");
-        return sha256(serializedRequestShape(projection) + "eligibility:" + projection.eligibilityFingerprint());
+        return sha256("coverage:adjacent-audit-response-v1|" + serializedRequestShape(projection)
+                + "eligibility:" + projection.eligibilityFingerprint());
     }
 
     public ContextEstimate estimate(ContextUsageProjection projection, Optional<ContextUsageCheckpoint> checkpoint) {

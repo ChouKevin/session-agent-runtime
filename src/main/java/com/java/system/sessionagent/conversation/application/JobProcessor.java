@@ -239,7 +239,8 @@ public final class JobProcessor implements MessageJobPort {
                 if (reply instanceof ModelReply.Text text) {
                     appendResponse(claim, guard, List.of(new ConversationStore.AssistantData(text.message())),
                             ConversationStore.JobUpdate.COMPLETE, Optional.empty(), checkpoint(result, claim.modelSelection(), activeModelDescriptor, ordinal,
-                                    requestShapeFingerprint, context.compaction().map(value -> value.generation()).orElse(0L)), resultTracker);
+                                    requestShapeFingerprint, context.compaction().map(value -> value.generation()).orElse(0L),
+                                    history.messages()), resultTracker);
                     return;
                 }
                 ModelReply.UseTools useTools = (ModelReply.UseTools) reply;
@@ -249,7 +250,7 @@ public final class JobProcessor implements MessageJobPort {
                 }
                 Optional<ConversationStore.UsageCheckpointData> usageCheckpoint = checkpoint(result, claim.modelSelection(),
                         activeModelDescriptor, ordinal, requestShapeFingerprint,
-                        context.compaction().map(value -> value.generation()).orElse(0L));
+                        context.compaction().map(value -> value.generation()).orElse(0L), history.messages());
                 List<ConversationStore.MessageData> messages = toolBatch(claim, guard, ordinal, useTools, tools,
                         usageCheckpoint, resultTracker);
                 if (!guard.stillOwned()) {
@@ -302,12 +303,13 @@ public final class JobProcessor implements MessageJobPort {
             ModelSelection selection,
             ModelDescriptor descriptor,
             int ordinal,
-            String requestShapeFingerprint, long compactGeneration) {
+            String requestShapeFingerprint, long compactGeneration, List<SessionMessage> auditHistory) {
         if (!result.usage().available() || Objects.isNull(descriptor) || !org.springframework.util.StringUtils.hasText(requestShapeFingerprint)) {
             return Optional.empty();
         }
         return Optional.of(new ConversationStore.UsageCheckpointData(selection, descriptor, ordinal, result.usage().promptTokens(),
-                result.usage().completionTokens(), result.usage().totalTokens(), requestShapeFingerprint, compactGeneration));
+                result.usage().completionTokens(), result.usage().totalTokens(), requestShapeFingerprint, compactGeneration,
+                auditHistory.getLast().sequence()));
     }
 
     private ContextState contextState(

@@ -2,8 +2,12 @@ package com.java.system.sessionagent.bootstrap.configuration;
 
 import com.java.system.sessionagent.mcp.configuration.McpConnectionProperties;
 import org.junit.jupiter.api.Test;
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.WebApplicationType;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
+import org.springframework.boot.context.logging.LoggingApplicationListener;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
+import org.springframework.context.ConfigurableApplicationContext;
 import org.springframework.context.annotation.Configuration;
 
 import java.net.URI;
@@ -18,6 +22,41 @@ class RuntimePropertiesTest {
 
     private final ApplicationContextRunner contextRunner = new ApplicationContextRunner()
             .withUserConfiguration(McpPropertiesConfiguration.class);
+
+    @Test
+    void starts_with_bundled_config_data_and_no_mcp_connections() {
+        SpringApplication application = bundledConfigApplication();
+
+        try (ConfigurableApplicationContext context = application.run(
+                "--spring.config.location=classpath:application.yml")) {
+            McpConnectionProperties properties = context.getBean(McpConnectionProperties.class);
+
+            assertThat(properties.connections()).isEmpty();
+        }
+    }
+
+    @Test
+    void binds_named_mcp_connections_over_bundled_config_data() {
+        SpringApplication application = bundledConfigApplication();
+
+        try (ConfigurableApplicationContext context = application.run(
+                "--spring.config.location=classpath:application.yml",
+                "--session-agent.mcp.connections.reader.url=https://reader.example/custom/mcp",
+                "--session-agent.mcp.connections.reader.headers.Authorization=Bearer test-token",
+                "--session-agent.mcp.connections.billing.enabled=false",
+                "--session-agent.mcp.connections.billing.url=https://billing.example/mcp")) {
+            McpConnectionProperties properties = context.getBean(McpConnectionProperties.class);
+
+            assertThat(properties.connections()).containsOnlyKeys("reader", "billing");
+            assertThat(properties.connections().get("reader").enabled()).isTrue();
+            assertThat(properties.connections().get("reader").url())
+                    .isEqualTo(URI.create("https://reader.example/custom/mcp"));
+            assertThat(properties.connections().get("reader").headers())
+                    .containsExactly(Map.entry("Authorization", "Bearer test-token"));
+            assertThat(properties.connections().get("billing").enabled()).isFalse();
+            assertThat(properties.connections().get("billing").url()).isEqualTo(URI.create("https://billing.example/mcp"));
+        }
+    }
 
     @Test
     void binds_zero_connections_with_safe_operational_defaults() {
@@ -80,6 +119,15 @@ class RuntimePropertiesTest {
         assertThatIllegalArgumentException().isThrownBy(() -> new McpConnectionProperties(
                 Map.of(), Duration.ZERO, Duration.ofSeconds(30), Duration.ofSeconds(1),
                 Duration.ofSeconds(60), Duration.ofSeconds(5)));
+    }
+
+    private static SpringApplication bundledConfigApplication() {
+        SpringApplication application = new SpringApplication(McpPropertiesConfiguration.class);
+        application.setWebApplicationType(WebApplicationType.NONE);
+        // Binding tests do not own the production container's /app/logs location.
+        application.setListeners(application.getListeners().stream()
+                .filter(listener -> !(listener instanceof LoggingApplicationListener)).toList());
+        return application;
     }
 
     @Configuration(proxyBeanMethods = false)

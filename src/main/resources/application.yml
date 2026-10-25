@@ -11,7 +11,6 @@ session-agent:
     max-file-bytes: 65536
     max-skills: 128
   mcp:
-    connections: {}
     refresh-interval: ${SESSION_AGENT_MCP_REFRESH_INTERVAL:60s}
     request-timeout: ${SESSION_AGENT_MCP_REQUEST_TIMEOUT:30s}
     initial-backoff: ${SESSION_AGENT_MCP_INITIAL_BACKOFF:1s}

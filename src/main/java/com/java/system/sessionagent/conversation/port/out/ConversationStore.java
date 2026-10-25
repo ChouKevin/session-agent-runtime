@@ -241,7 +241,8 @@ public interface ConversationStore {
     }
 
     record UsageCheckpointData(ModelSelection selection, ModelDescriptor model, int modelCallOrdinal, long promptTokens, long completionTokens,
-                               long totalTokens, String requestShapeFingerprint, long compactGeneration) {
+                               long totalTokens, String requestShapeFingerprint, long compactGeneration,
+                               SessionSequence requestBoundary) {
         public UsageCheckpointData {
             Assert.notNull(selection, "Usage checkpoint model selection must not be null");
             Assert.notNull(model, "Usage checkpoint model must not be null");
@@ -250,6 +251,7 @@ public interface ConversationStore {
                     "Usage checkpoint token counts must not be negative");
             Assert.hasText(requestShapeFingerprint, "Usage checkpoint request shape fingerprint must not be blank");
             Assert.isTrue(compactGeneration >= 0, "Usage checkpoint compact generation must not be negative");
+            Assert.notNull(requestBoundary, "Usage checkpoint request boundary must not be null");
         }
     }
 

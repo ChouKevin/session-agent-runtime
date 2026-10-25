@@ -84,32 +84,17 @@ PostgreSQL compares the successful artifact output, original arguments, invocati
 ordinal, tool identity and job ownership while associating the actual TOOL event.
 Release requires an ANSWER disposition and belongs only to that completed job;
 WAITING/clarification never release artifacts or transfer prior-job ownership.
-Encoding preserves Markdown UTF-8 without a parser. CSV remains string data in the
-tool audit while the export adds BOM/CRLF, quotes/escapes fields, and prefixes
-formula-leading cells with an apostrophe; the tool observation discloses the
-spreadsheet-safe transformation rather than promising universal spreadsheet safety.
-Storage/upload byte identity does not guarantee external download identity. Slack
-may serve a CSV without its stored UTF-8 BOM; raw hash/length differences and parsed
-content equivalence must be recorded separately, not reported as byte-exact success.
+Encoding, file bounds, and release semantics are specified in the
+[artifact contract](#durable-markdown-reports-and-csv-exports).
 Creation has no Slack side effect and no model-supplied channel/path/capability.
 
 `JobHandoffCoordinator` owns the bounded control protocol, not a second tool loop.
 `JobControl` separates persisted execution mode/stage, exact initiating user and
-waiting generation from committed conversation history. Ordinary execution and
-compaction debit the configured allowance; total request ordinals additionally
-include one-shot INTENT and WRAP_UP reservations. No-tools control requests
-explicitly clear adapter callbacks. A final allowed text answer completes; a final
-tool response is discarded before execution/history, followed by one wrap request.
-Lost/invalid control results fail closed rather than granting permissions or retrying.
-
-Semantic decisions are persisted under the fenced claim before changing tools.
-CONTINUE/NEW_QUESTION use normal mode; DELIVER restricts advertisement and invocation
-to trusted REPORT_GENERATION bindings; CLARIFY preserves the observed wait without
-tools. `ToolSnapshot.restrictedTo` transfers single-owner cleanup. Capability
-metadata is local composition authority, never inferred from MCP names or schemas.
-`CompletionDisposition.WAITING` commits its assistant response and wait generation
-atomically. V11 backfills ordinary counts conservatively; mixed old/new workers
-are unsupported and rollout must drain before migration.
+waiting generation from committed conversation history. Semantic decisions persist
+under the fenced claim before changing tools. `ToolSnapshot.restrictedTo` transfers
+single-owner cleanup; capability metadata is local composition authority, never
+inferred from MCP names or schemas. The [handoff contract](#limits-retries-and-recovery)
+defines allowance, waiting, and recovery behavior.
 
 `SkillLoadObserver` and `SkillReadReceipt` belong to the neutral tool port.
 Filesystem results remain in the skill adapter; storage finalizes attempts in the
@@ -237,6 +222,25 @@ matching, not body token estimation, invalidating provider checkpoints after an
 admission change. Summary candidates and retained suffixes come from the same
 eligible history snapshot; SKILL alone is not a response boundary.
 
+Provider usage checkpoints additionally require coverage proof at response commit.
+The worker carries the last **audit** sequence from the exact history snapshot used
+for its request, not the last logically admitted message. In the append transaction,
+sequence allocation locks the session row; storage writes a checkpoint only when
+the assistant response immediately follows that snapshot boundary. A USER arriving
+during either the model call or sequential tool execution therefore prevents that
+response's checkpoint from hiding the intervening message. The history and complete
+tool batch still commit normally. Pending/rejected skill audit events may
+conservatively prevent reuse, while admission changes retain their separate
+eligibility fingerprint protection.
+
+Request-shape fingerprints are versioned for this coverage contract, so checkpoints
+written before the proof existed are ignored without altering deployed migrations.
+With no matching checkpoint, usage falls back to a full estimate; an older proven
+checkpoint remains reusable because every later admitted event is in its estimated
+suffix. Normal adjacent responses still reuse provider totals, with tool observations
+and other later events estimated after the assistant boundary. No schema migration,
+history rewrite, or retry/skill-admission change is needed.
+
 The library is configured explicitly through `session-agent.skills.roots` (empty
 by default), `max-file-bytes` (65536), and `max-skills` (128). Bootstrap scans
 direct child `SKILL.md` frontmatter once; normal request tool descriptions contain
@@ -260,7 +264,8 @@ Only operator-managed shared roots belong at this boundary. Service accounts and
 container mounts should be read-only, including references; all Runtime users can
 request those files. There is no shell execution, automatic home/repository skill
 discovery, or implicit import of this repository's maintenance/deployment skills.
-The [README example](../README.md) describes the on-disk definition and command.
+The [skill configuration guide](../.agents/skills/deploying-with-omp-gateway/references/configuration.md#runtime-本地-skills選用預設停用)
+describes the on-disk definition and command.
 
 ## Test responsibilities and locations
 
@@ -326,3 +331,83 @@ browser/human Socket evidence are distinct acceptance boundaries.
 Neither command should require a live model or MCP server. Keep live model,
 deployed MCP, and real Slack behavior explicitly authorized and outside the
 default fake-backed suite.
+
+## Conversation execution contract
+
+One submitted user message starts one ordered job. A job can make one or more model calls. A model call either returns assistant text or requests tools. Within the ordinary allowance, the runtime executes admitted calls sequentially in the model-provided order, then atomically appends one `ASSISTANT_TOOL_CALLS` event followed by all paired `TOOL` observations in one batch; those observations are supplied to the next model call. Tool calls returned on the last allowed ordinary request are neither executed nor appended; the bounded handoff below takes precedence.
+
+The runtime exposes registered tools to the model but does not interpret a provider's input schema or tool output. One ordinary tool failure is recorded as that tool's observation and does not prevent later requests in the same batch.
+
+The general conversation prompt asks for question-focused answers that explain the
+outcome and reasoning before supporting evidence. Commit SHAs, full source paths,
+line citations, and tool procedures are omitted by default unless requested or
+needed for understanding; relevant uncertainty and version limitations remain
+explicit. This is presentation guidance only: exact tool identifiers, required
+source/version verification, opaque MCP data, and complete audit history are unchanged.
+
+### Durable Markdown reports and CSV exports
+
+On normal jobs with a configured supported attachment route, `createMarkdownReport(title, content)`
+and `createCsv(title, columns, rows)` save durable PostgreSQL artifacts. They do not upload files or
+claim delivery; their result is `SAVED_PENDING_DELIVERY`. The first route adapter recognizes
+accepted Slack jobs with an original persisted thread binding while Slack is configured.
+HTTP jobs without that route do not expose the creation tools. Compaction, intent classification, and boundary wrap-up requests have no tools.
+
+Markdown bytes are exact UTF-8, without parsing. CSV accepts string headers and rectangular string
+rows, writes a UTF-8 BOM, CRLF, quotes every field, and doubles embedded quotes. Cells whose first
+non-whitespace character is `=`, `+`, `-`, or `@`, or which begin with tab/CR/LF, receive an apostrophe
+prefix. Results disclose this spreadsheet-safe transformation; it is not a universal guarantee for
+all import behaviors. Original input remains in the tool-call audit.
+Runtime storage and the bytes passed to the Slack upload adapter are distinct from
+Slack-hosted downloads: Slack may omit a CSV's UTF-8 BOM when serving a download.
+Record raw hashes and lengths at each boundary; equivalent parsed CSV is not proof
+of byte-identical download preservation.
+
+Limits are 1 MiB serialized bytes per generated file, 10 files / 5 MiB per job, 100 CSV columns,
+10,000 CSV data rows, and 120 Unicode code points per title. Filenames are immutable UUIDs with
+`.md` or `.csv`; titles never select paths. Stable invocation replay returns the same artifact;
+changed input for that identity is rejected. Only artifacts tied to their exact successful
+tool observation in the atomic assistant/tool batch can be released, and release requires an
+explicit delivered-answer completion. Waiting questions and clarifications never release artifacts.
+Paused-job artifacts stay private; a later report-only job creates its own artifacts from retained
+evidence and can release only those owned by that job. Staged orphans and cancelled/failed jobs remain unpublishable.
+Artifacts inherit conversation retention; this feature adds neither public UUID downloads nor
+automatic deletion. Attachment upload/delivery is a separate adapter responsibility.
+
+## Limits, retries, and recovery
+
+`session-agent.model.max-model-calls-per-message` bounds ordinary execution and context-compaction requests for one user message. Its environment form is `SESSION_AGENT_MAX_MODEL_CALLS_PER_MESSAGE`; the default remains 12. Failed ordinary attempts and retries consume this allowance. Every actual provider request is reserved before sending and also increments the existing total `modelCallCount`; intent and wrap-up have separate one-shot reservations, not additional investigation allowance.
+
+A direct text answer on the last allowed ordinary request completes normally. A tool response
+on that request executes **zero** tools and appends neither the assistant calls nor fabricated
+tool observations. Exhaustion enters durable `WRAP_UP`: at most one no-tools request briefly
+describes confirmed progress and gaps and asks whether to continue investigating or organize
+the evidence. The transient directive contains no counts and is not committed to history.
+The question and durable session waiting generation commit atomically with job completion.
+Waiting is not a running job. A failed, invalid, tool-bearing, or oversized wrap response uses
+a safe deterministic waiting notice; recovery after a reserved but lost request never requeries it.
+Cancellation takes precedence and cannot publish a waiting prompt or release artifacts.
+
+When the next ordered job executes against a pending choice, one no-tools semantic intent
+request classifies that job's exact initiating user message, even if later users are already
+queued in history. `CONTINUE` consumes the observed waiting generation and opens a fresh
+ordinary allowance. `DELIVER` consumes it and persists report-only mode: only trusted local
+report-generation bindings are advertised and invokable, never MCP or skill reads, and
+unknown/uncovered areas must be disclosed. `NEW_QUESTION` consumes it and starts a normal
+task without automatically resuming the old investigation. `CLARIFY` publishes its question
+without tools and preserves the source generation. Invalid/failed/lost intent results fail
+closed with a clarification notice, not permission. Decisions persist before execution.
+An accepted explicit `/skill:name` starts a new task and clears waiting atomically with its
+committed skill resolution; a rejected command preserves waiting.
+
+Report-only work uses the same bounded ordinary loop and may create a report, observe its
+receipt, then answer; exhaustion still hands off without releasing a partial report.
+Control JSON (`intent` and optional CLARIFY-only `clarification`) is internal and strictly
+validated. Ordinary final answers, including JSON-looking text, remain unparsed plain text.
+
+V11 backfills ordinary usage from existing total calls without inferring historical waiting
+state. Drain old workers before migration: mixed old/new workers are unsupported.
+
+Spring AI retries are disabled with `spring.ai.retry.max-attempts=1`. Retrying transient provider failures is owned by the runtime's conversation-job loop, which preserves the already-counted model call and avoids duplicate history. With a direct provider connection, each reservation corresponds to a provider request; when a gateway retries internally, it does not bound the gateway's underlying provider attempts.
+
+Tool execution has no runtime deduplication layer. A read-only tool can run again if the process crashes after execution and before its observation batch commits. Any future side-effecting tool must provide idempotency at its adapter or external-service boundary.

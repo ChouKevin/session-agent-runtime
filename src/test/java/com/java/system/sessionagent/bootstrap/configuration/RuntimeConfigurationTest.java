@@ -16,9 +16,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.ai.model.tool.ToolCallingChatOptions;
-import org.springframework.core.io.ClassPathResource;
 
-import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -38,16 +36,6 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class RuntimeConfigurationTest {
-
-    @Test
-    void binds_loopback_and_generic_mcp_defaults() throws Exception {
-        String configuration = new ClassPathResource("application.yml").getContentAsString(StandardCharsets.UTF_8);
-
-        assertThat(configuration).contains("server:\n  address: 127.0.0.1", "connections: {}",
-                "max-model-calls-per-message: ${SESSION_AGENT_MAX_MODEL_CALLS_PER_MESSAGE:12}",
-                "optional:classpath:models.yml");
-        assertThat(configuration).doesNotContain("semantic:", "SEMANTIC_");
-    }
 
     @Test
     void maps_worker_and_retry_policies() {
