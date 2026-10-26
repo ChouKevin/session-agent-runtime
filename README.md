@@ -29,6 +29,7 @@ validation. Ordinary final answers are plain text without a Runtime-owned schema
 | --- | --- |
 | HTTP endpoints, history shapes, cancellation, Slack delivery semantics | [HTTP API and Slack delivery](docs/http-api.md) |
 | Modules, dependency rules, execution contracts, checkpoint accounting, test ownership | [Package architecture](docs/package-architecture.md) |
+| New host: deployment choices, OAuth login, cross-host access, client tokens, credential rotation | [Gateway deployment and credentials](docs/gateway-deployment.md) |
 | Host installation with native OMP Gateway | [Installation](.agents/skills/deploying-with-omp-gateway/references/install.md) |
 | Models, MCP, Slack, and trusted Runtime skills | [Configuration](.agents/skills/deploying-with-omp-gateway/references/configuration.md) |
 | Update, backup, rollback, Docker alternative, and logs | [Operations](.agents/skills/deploying-with-omp-gateway/references/operations.md) |

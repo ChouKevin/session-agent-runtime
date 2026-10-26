@@ -2,6 +2,8 @@
 
 以下以 `$DEPLOY_ROOT=$HOME/.local/share/session-agent-runtime` 為例；先用已安裝的 unit 確認真正的 config location。設定只留在主機，repo 的 assets 是無秘密範本。
 
+部署模式、OAuth 登入、共用 gateway 的跨主機連線與帳號 allowlist 統一見 [Gateway 部署與憑證管理](../../../../docs/gateway-deployment.md)。本頁負責 Runtime 的模型與整合設定；不要把 provider OAuth token 填入 gateway 的 `api-key`。
+
 ## 模型格式
 
 `models.yml`：

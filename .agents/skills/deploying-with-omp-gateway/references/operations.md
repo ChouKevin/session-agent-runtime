@@ -1,5 +1,7 @@
 # 操作：更新、備份、回滾與啟停
 
+憑證到期、OAuth 失效恢復與 token 撤銷／輪換見 [憑證維運流程](../../../../docs/gateway-deployment.md#6-撤銷輪換與故障處理)。版本確認見 [版本判讀](../../../../docs/gateway-deployment.md#7-驗證與版本判讀)；更新 Git checkout 不等於更新已部署的 Runtime。
+
 ## 先辨識既有部署
 
 先在主機查看 Runtime unit、artifact 連結、config location，以及 Docker Compose labels／volume mounts；敏感值只在本機處理，不回傳完整 environment、`docker inspect` 或 systemd properties。記錄 Runtime SHA/checksum、OMP 版本、source revision／patch、實際 Gateway service executable 的 SHA-256 checksum 與 PostgreSQL image identity。

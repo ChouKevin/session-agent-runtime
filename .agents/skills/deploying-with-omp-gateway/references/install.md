@@ -2,9 +2,11 @@
 
 只適用全新部署。既有服務走 [更新流程](operations.md)，不可用範本覆寫私有設定、改 Compose project name 或另建 volume。此方案不啟動 repo `docker/compose.yaml` 的 Runtime container，也不使用 `docker/runtime.sh start/restart`。
 
+第一次在其他 host 啟用時，先讀 [部署方式與憑證管理](../../../../docs/gateway-deployment.md)：確認要獨立部署整套服務、共用既有 gateway，或直接使用 provider API。本頁只描述同機 Runtime＋gateway＋broker；共用 gateway 不需在 Runtime host 登入 OAuth，也不應照抄本頁的本機 OMP units。
+
 ## 1. 前置檢查
 
-需要 Linux/WSL、可用的 systemd user manager、Java 21、Maven、Python 3、Docker Compose v2，以及已安裝並完成模型 provider 登入的 OMP。OMP 安裝／登入由操作者透過核准的發行來源完成；不要替使用者選擇新帳號、匯入 OAuth 檔或自動升級。
+需要 Linux/WSL、可用的 systemd user manager、Java 21、Maven、Python 3、Docker Compose v2，以及已安裝並完成模型 provider 登入的 OMP。登入位置與指令見 [OAuth 登入流程](../../../../docs/gateway-deployment.md#2-獨立部署安裝與-oauth-登入)；由操作者透過核准的發行來源安裝，明確選擇授權帳號，不自動匯入 OAuth 檔或升級。
 
 本方案使用的是修正過的 native OMP source build，不是未修正的 **18.12.6** 發行 binary；只看 `omp --version` 不能證明相容。未修正的 18.12.6 會在 Chat Completions → provider protocol 轉換時遺失 tool `strict: false`。前置條件是已驗證的修正版 build，或包含同一修正的 upstream release：明確 `false`／`true` 必須保留，省略 strictness 時仍須保持 Chat Completions 的 non-strict 預設。保存 source revision／patch 與實際 service executable 的 SHA-256 checksum；本機 patched build 不是官方 upstream release。不要因版本字串相同就替換成未修正 binary，也不在此安裝流程隱含重建或升級 Gateway。完整邊界見 [模型與 Gateway 邊界](configuration.md#model-adapter-and-gateway-boundaries)。
 
@@ -173,7 +175,7 @@ with os.fdopen(fd, "w") as output:
 '
 ```
 
-不使用 `--regenerate`，否則已啟動的 gateway 不會自動接受新 bearer。若需要隔離多個應用，另外依 OMP 文件配置受限 client token；本單機範例的 bearer 可存取 gateway 已開放的模型，私有檔案存取權即信任邊界。
+不使用 `--regenerate`，否則已啟動的 gateway 不會自動接受新 bearer。本單機範例的 bearer 可存取 gateway 已開放的模型，私有檔案存取權即信任邊界；它不是帳號受限的 client token。多 host／多應用請改用 [專屬 client token 流程](../../../../docs/gateway-deployment.md#5-每個-runtime-使用專屬-client-token)，其啟用不會自動撤銷原共用 bearer。
 
 ## 5. 檢查模型並啟動 Runtime
 
