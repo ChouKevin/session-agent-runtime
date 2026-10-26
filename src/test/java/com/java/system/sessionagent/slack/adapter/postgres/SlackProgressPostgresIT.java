@@ -42,7 +42,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
-import org.testcontainers.postgresql.PostgreSQLContainer;
+import com.java.system.sessionagent.support.PostgresTestDatabase;
+import org.junit.jupiter.api.AfterAll;
 
 import java.sql.SQLException;
 import java.time.Clock;
@@ -61,7 +62,12 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 class SlackProgressPostgresIT {
-    private static final PostgreSQLContainer POSTGRES = new PostgreSQLContainer("postgres:17-alpine");
+    private static final PostgresTestDatabase POSTGRES = PostgresTestDatabase.create();
+
+    @AfterAll
+    static void closeDatabase() {
+        POSTGRES.close();
+    }
     private DriverManagerDataSource dataSource;
     private JdbcTemplate jdbc;
     private SlackPostgresDeliveryStore delivery;
@@ -71,7 +77,7 @@ class SlackProgressPostgresIT {
     @BeforeEach
     void migrate() {
         POSTGRES.start();
-        dataSource = new DriverManagerDataSource(POSTGRES.getJdbcUrl(), POSTGRES.getUsername(), POSTGRES.getPassword());
+        dataSource = POSTGRES.dataSource();
         Flyway flyway = Flyway.configure().dataSource(dataSource).cleanDisabled(false).load();
         flyway.clean();
         flyway.migrate();

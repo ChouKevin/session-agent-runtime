@@ -77,7 +77,8 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
-import org.testcontainers.postgresql.PostgreSQLContainer;
+import com.java.system.sessionagent.support.PostgresTestDatabase;
+import org.junit.jupiter.api.AfterAll;
 
 import java.time.Clock;
 import java.time.Duration;
@@ -110,7 +111,12 @@ class PostgresMessageJobPostgresIT {
 
     private static final Instant NOW = Instant.parse("2026-08-31T10:00:01Z");
     private static final ModelSelection TEST_SELECTION = new ModelSelection("test", "v1:test");
-    private static final PostgreSQLContainer POSTGRES = new PostgreSQLContainer("postgres:17-alpine");
+    private static final PostgresTestDatabase POSTGRES = PostgresTestDatabase.create();
+
+    @AfterAll
+    static void closeDatabase() {
+        POSTGRES.close();
+    }
 
     private JdbcTemplate jdbcTemplate;
 
@@ -654,6 +660,9 @@ class PostgresMessageJobPostgresIT {
         try {
             transaction.executeWithoutResult(status -> {
                 store.requestCancellation(receipt.messageJobId());
+                // Freeze an observation before the competing backend exists: polling must
+                // refresh pg_stat_activity even while this cancellation transaction stays open.
+                jdbcTemplate.queryForObject("select count(*) from pg_stat_activity", Integer.class);
                 result.set(executor.submit(() -> store.append(claim, new ConversationStore.MessageBatch(
                         List.of(new ConversationStore.AssistantData("late final response")),
                         ConversationStore.JobUpdate.COMPLETE, ConversationStore.CompletionDisposition.ANSWER), NOW)));
@@ -1566,6 +1575,7 @@ class PostgresMessageJobPostgresIT {
     private void awaitDatabaseLockWaiter(String queryFragment) {
         long deadline = System.nanoTime() + Duration.ofSeconds(10).toNanos();
         while (System.nanoTime() < deadline) {
+            jdbcTemplate.execute("select pg_stat_clear_snapshot()");
             int waiting = Objects.requireNonNull(jdbcTemplate.queryForObject("""
                     select count(*)
                     from pg_stat_activity
@@ -1586,7 +1596,7 @@ class PostgresMessageJobPostgresIT {
     }
 
     private DriverManagerDataSource dataSource() {
-        return new DriverManagerDataSource(POSTGRES.getJdbcUrl(), POSTGRES.getUsername(), POSTGRES.getPassword());
+        return POSTGRES.dataSource();
     }
 
     private Flyway flyway() {

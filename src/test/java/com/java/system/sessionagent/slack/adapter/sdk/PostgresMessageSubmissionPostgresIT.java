@@ -72,7 +72,8 @@ import org.junit.jupiter.api.TestInstance;
 import org.slf4j.LoggerFactory;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
-import org.testcontainers.postgresql.PostgreSQLContainer;
+import com.java.system.sessionagent.support.PostgresTestDatabase;
+import org.junit.jupiter.api.AfterAll;
 
 import java.time.Clock;
 import java.time.Instant;
@@ -100,14 +101,19 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class PostgresMessageSubmissionPostgresIT {
 
-    private static final PostgreSQLContainer POSTGRES = new PostgreSQLContainer("postgres:17-alpine");
+    private static final PostgresTestDatabase POSTGRES = PostgresTestDatabase.create();
+
+    @AfterAll
+    static void closeDatabase() {
+        POSTGRES.close();
+    }
 
     private DriverManagerDataSource dataSource;
 
     @BeforeEach
     void migrate() {
         POSTGRES.start();
-        dataSource = new DriverManagerDataSource(POSTGRES.getJdbcUrl(), POSTGRES.getUsername(), POSTGRES.getPassword());
+        dataSource = POSTGRES.dataSource();
         flyway().clean();
         flyway().migrate();
     }

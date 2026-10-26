@@ -54,7 +54,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
-import org.testcontainers.postgresql.PostgreSQLContainer;
+import com.java.system.sessionagent.support.PostgresTestDatabase;
+import org.junit.jupiter.api.AfterAll;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -66,7 +67,12 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class ArtifactStorePostgresIT {
-    private static final PostgreSQLContainer POSTGRES = new PostgreSQLContainer("postgres:17-alpine");
+    private static final PostgresTestDatabase POSTGRES = PostgresTestDatabase.create();
+
+    @AfterAll
+    static void closeDatabase() {
+        POSTGRES.close();
+    }
     private static final ModelSelection MODEL = new ModelSelection("test", "v1:test");
     private DriverManagerDataSource dataSource;
     private JdbcTemplate jdbc;
@@ -171,7 +177,7 @@ class ArtifactStorePostgresIT {
     @BeforeEach
     void migrate() {
         POSTGRES.start();
-        dataSource = new DriverManagerDataSource(POSTGRES.getJdbcUrl(), POSTGRES.getUsername(), POSTGRES.getPassword());
+        dataSource = POSTGRES.dataSource();
         flyway().clean();
         flyway().migrate();
         jdbc = new JdbcTemplate(dataSource);

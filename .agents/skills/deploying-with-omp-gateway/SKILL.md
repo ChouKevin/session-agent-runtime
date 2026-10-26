@@ -7,7 +7,7 @@ description: Use when installing, configuring, updating, checking, or rolling ba
 
 ## 原則與適用範圍
 
-本專案目前優先採用 **主機 Java 21 Runtime + 主機 OMP broker/gateway + Docker PostgreSQL**。OMP 是外部依賴；Runtime 只使用 OpenAI-compatible Chat Completions 與 gateway bearer，不持有 provider OAuth 憑證。Gateway 不會替 Runtime 執行 OMP agent loop、skills 或 MCP 工具。
+本專案目前優先採用 **主機 Java 21 Runtime + 主機 OMP broker/gateway + 共用 local-postgres**。先重用既有相容的 PostgreSQL，不由 repo lifecycle 管理資料庫。OMP 是外部依賴；Runtime 只使用 OpenAI-compatible Chat Completions 與 gateway bearer，不持有 provider OAuth 憑證。Gateway 不會替 Runtime 執行 OMP agent loop、skills 或 MCP 工具。
 
 此 skill 是操作參考，不是會自動安裝的程式。路徑皆相對本 skill 目錄；終端命令的 `$REPO` 指 checkout，`$DEPLOY_ROOT` 指私有部署目錄。不把私有設定複製回 repo。
 
@@ -26,10 +26,12 @@ description: Use when installing, configuring, updating, checking, or rolling ba
 
 ## 預設配置
 
-- Runtime `127.0.0.1:8090`；gateway `127.0.0.1:4000`；broker `127.0.0.1:8765`；PostgreSQL `127.0.0.1:15432`。
+- Runtime `127.0.0.1:8090`；gateway `127.0.0.1:4000`；broker `127.0.0.1:8765`；共用 standalone Docker PostgreSQL 17 `local-postgres` 在 `127.0.0.1:5432`。本機實體 volume 仍是 `gamecenter-local-postgres-data`，不是 Compose 管理的 volume。
 - 模型範例 `openai-codex/gpt-6.1-sol`，`reasoning-effort: medium`；可用性與容量須以該 gateway 的 `/v1/models` 核對。
 - 外部完整 `application.yml` 配合 `SPRING_CONFIG_LOCATION`，不合併 bundled Google model profile。
 - systemd user services；私有目錄 `700`、環境檔 `600`；repo 僅保存不含憑證的範本。
+- `session_agent`／owner `session_agent` 與 `gamecenter_local`／owner `gamecenter` 分離；Runtime 使用非 cluster-superuser 的應用 role。私有 `runtime.env` 提供 datasource；缺少憑證時停止並回報，只有明確授權才 provisioning，不自行另建容器或使用 cluster superuser。
+- 本機 PG 測試使用 `bash scripts/test-postgres-local.sh` 及獨立受限 test role，每 class 建立並清除唯一 DB；不重置應用 DB、不停止共用服務。完整環境與可攜 CI 路徑見 [verification.md](references/verification.md)。
 - Runtime skills 預設停用，僅讀操作者明確設定的共享 roots；不自動匯入 OMP 或本 repo 的維護 skills。本部署指南不能當作 Runtime 業務 skill 掛載；不授權 shell 執行。
 
 ## 常見錯誤與停止條件
@@ -37,6 +39,8 @@ description: Use when installing, configuring, updating, checking, or rolling ba
 | 情況 | 行動 |
 |---|---|
 | 發現既有部署、相同 port 或 volume | 先識別 owner；不覆寫、不另建同用途資料庫 |
+| 缺少共用 DB 的應用／測試憑證 | 回報 blocker 或取得明確 provisioning 授權；不自動轉遠端、開第二個 PostgreSQL 或使用 cluster superuser |
+| 想用 repo `docker/runtime.sh start/restart` 更新主機服務 | 這是明確 opt-in 的獨立全套 Compose，不是共用 DB 操作；主機服務使用 systemd |
 | Google API key 空白錯誤 | 檢查完整外部 config location；只改 import/default 不等於移除原 model map |
 | 主機嘗試寫 `/app/logs` | 使用 host logging 範本，不任意建立容器路徑 |
 | `mcp.connections` 空字串綁定錯誤 | 沒有 MCP 時省略 `connections`，不要寫 `connections: {}` |

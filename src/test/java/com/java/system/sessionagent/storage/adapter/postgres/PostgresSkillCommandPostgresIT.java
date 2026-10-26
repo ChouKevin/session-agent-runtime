@@ -45,7 +45,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
-import org.testcontainers.postgresql.PostgreSQLContainer;
+import com.java.system.sessionagent.support.PostgresTestDatabase;
+import org.junit.jupiter.api.AfterAll;
 
 import java.time.Clock;
 import java.time.Duration;
@@ -67,7 +68,12 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.withSettings;
 
 class PostgresSkillCommandPostgresIT {
-    private static final PostgreSQLContainer POSTGRES = new PostgreSQLContainer("postgres:17-alpine");
+    private static final PostgresTestDatabase POSTGRES = PostgresTestDatabase.create();
+
+    @AfterAll
+    static void closeDatabase() {
+        POSTGRES.close();
+    }
     private static final ModelSelection SELECTION = new ModelSelection("test", "v1:test");
     private static final SkillResource RESOURCE = new SkillResource("skill://review/SKILL.md", "a".repeat(64), "# Current bytes\nReview carefully.");
     private DriverManagerDataSource dataSource;
@@ -77,7 +83,7 @@ class PostgresSkillCommandPostgresIT {
     @BeforeEach
     void fresh_schema() {
         POSTGRES.start();
-        dataSource = new DriverManagerDataSource(POSTGRES.getJdbcUrl(), POSTGRES.getUsername(), POSTGRES.getPassword());
+        dataSource = POSTGRES.dataSource();
         flyway().clean();
         flyway().migrate();
         jdbc = new JdbcTemplate(dataSource);

@@ -42,9 +42,9 @@ spring:
     deserialization:
       fail-on-unknown-properties: true
   datasource:
-    url: jdbc:postgresql://127.0.0.1:15432/session_agent
-    username: session_agent
-    password: ${SESSION_AGENT_POSTGRES_PASSWORD}
+    url: ${SESSION_AGENT_DATASOURCE_URL:jdbc:postgresql://127.0.0.1:5432/session_agent}
+    username: ${SESSION_AGENT_DATASOURCE_USERNAME:session_agent}
+    password: ${SESSION_AGENT_DATASOURCE_PASSWORD}
   ai:
     retry:
       max-attempts: 1

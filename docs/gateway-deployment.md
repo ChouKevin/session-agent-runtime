@@ -10,7 +10,18 @@
 | 新 host 只部署 Runtime，共用既有 gateway | 不需要安裝 OMP 或複製 OAuth 憑證 | 下方跨主機連線 → 專屬 client token → [模型設定](../.agents/skills/deploying-with-omp-gateway/references/configuration.md) |
 | Runtime 直接連支援的模型 provider | 不需要 OMP；需要該 provider 的 API 憑證 | [模型 adapter 與設定邊界](../.agents/skills/deploying-with-omp-gateway/references/configuration.md#model-adapter-and-gateway-boundaries) |
 
-新主機仍須準備 Java 21、資料庫、外部 Runtime 設定及所需 MCP／Slack 設定。共用 gateway 不代表共用 Runtime 資料庫或啟動第二個相同 Slack Socket consumer。
+新主機仍須準備 Java 21、資料庫、外部 Runtime 設定及所需 MCP／Slack 設定。共用 gateway 不代表共用 Runtime 資料庫或啟動第二個相同 Slack Socket consumer。資料庫選擇與 gateway 選擇獨立：先重用既有相容的本機 PostgreSQL；缺少應用憑證時回報 blocker 或取得明確 provisioning 授權，不自動啟動另一個 DB、改連遠端或給 Runtime cluster-superuser 憑證。
+
+目前本機主機模式使用 standalone Docker PostgreSQL 17 `local-postgres`，
+`127.0.0.1:5432`，實體 legacy volume `gamecenter-local-postgres-data` 不變。
+`gamecenter_local`／owner `gamecenter` 與 `session_agent`／owner `session_agent`
+分離；Runtime 透過私有 `~/.local/share/session-agent-runtime/runtime.env`
+的 `SESSION_AGENT_DATASOURCE_URL`／`USERNAME`／`PASSWORD`（後兩者完整名稱為
+`SESSION_AGENT_DATASOURCE_USERNAME`／`SESSION_AGENT_DATASOURCE_PASSWORD`）
+供外部 YAML placeholders 讀取。目錄700、secret env600，不提交秘密。
+Runtime 啟停不啟停共用 DB；repo `docker/runtime.sh start/restart` 僅供明確
+opt-in 的獨立全套 Docker 模式，不能用於此主機更新或重新採用 shared volume。
+備份、隔離 restore 與保留來源 rollback 見 [操作指南](../.agents/skills/deploying-with-omp-gateway/references/operations.md#回滾)。
 
 ## 2. 獨立部署：安裝與 OAuth 登入
 
@@ -22,7 +33,7 @@
    ```
 
    依互動流程選擇經授權的帳號。已有 broker 或遠端憑證架構時先確認來源，不另建或覆寫。不要從 repo 複製 `agent.db`，也不要自動匯入別人的 OAuth dump。
-3. 依 [安裝指南](../.agents/skills/deploying-with-omp-gateway/references/install.md) 建立私有目錄、PostgreSQL、systemd units 與 Runtime model profiles。
+3. 依 [安裝指南](../.agents/skills/deploying-with-omp-gateway/references/install.md) 建立私有目錄、確認既有共用 PostgreSQL 的受限應用 owner 憑證、安裝 systemd units 與 Runtime model profiles；這不是另建資料庫容器的授權。
 4. 檢查 gateway `/healthz`、帶 bearer 的 `/v1/models` 及 Runtime health。真實模型與 Slack 測試另外取得授權，見 [驗證指南](../.agents/skills/deploying-with-omp-gateway/references/verification.md)。
 
 本地 shell 與 service 的環境可能不同。Gateway unit 的 `OMP_AUTH_BROKER_URL` 不會自動進入登入 shell；CLI 顯示 `not_configured` 不足以證明執行中的 gateway 壞掉。狀態檢查須使用該服務相同的 broker URL、profile 及憑證來源，不輸出完整 environment。

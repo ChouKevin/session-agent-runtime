@@ -90,7 +90,9 @@ factory，保留實際 intake／worker／Web API，並明確標示 synthetic ing
 私有 `runtime.env`：
 
 ```dotenv
-SESSION_AGENT_POSTGRES_PASSWORD=由本機產生的資料庫密碼
+SESSION_AGENT_DATASOURCE_URL=jdbc:postgresql://127.0.0.1:5432/session_agent
+SESSION_AGENT_DATASOURCE_USERNAME=session_agent
+SESSION_AGENT_DATASOURCE_PASSWORD=既有Runtime應用owner的私有密碼
 SLACK_APP_TOKEN=由Slack產生的App層級token
 SLACK_BOT_TOKEN=由Slack產生的Bot token
 SLACK_BOT_USER_ID=Bot使用者ID

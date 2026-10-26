@@ -98,7 +98,8 @@ import org.slf4j.LoggerFactory;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import org.springframework.dao.DataIntegrityViolationException;
-import org.testcontainers.postgresql.PostgreSQLContainer;
+import com.java.system.sessionagent.support.PostgresTestDatabase;
+import org.junit.jupiter.api.AfterAll;
 
 import java.sql.Connection;
 import java.sql.PreparedStatement;
@@ -126,7 +127,12 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class SlackDeliveryPostgresIT {
 
-    private static final PostgreSQLContainer POSTGRES = new PostgreSQLContainer("postgres:17-alpine");
+    private static final PostgresTestDatabase POSTGRES = PostgresTestDatabase.create();
+
+    @AfterAll
+    static void closeDatabase() {
+        POSTGRES.close();
+    }
     private static final Instant NOW = Instant.parse("2026-09-06T00:00:00Z");
 
     private DriverManagerDataSource dataSource;
@@ -136,7 +142,7 @@ class SlackDeliveryPostgresIT {
     @BeforeEach
     void migrate() {
         POSTGRES.start();
-        dataSource = new DriverManagerDataSource(POSTGRES.getJdbcUrl(), POSTGRES.getUsername(), POSTGRES.getPassword());
+        dataSource = POSTGRES.dataSource();
         flyway().clean();
         flyway().migrate();
         jdbcTemplate = new JdbcTemplate(dataSource());

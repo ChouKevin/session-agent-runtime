@@ -9,10 +9,66 @@ curl --fail --max-time 10 http://127.0.0.1:8765/v1/healthz
 curl --fail --max-time 10 http://127.0.0.1:4000/healthz
 curl --fail --max-time 10 http://127.0.0.1:8090/actuator/health
 curl --fail --max-time 10 http://127.0.0.1:8090/actuator/mcpConnections
-ss -ltn 'sport = :8090 or sport = :4000 or sport = :8765 or sport = :15432'
+ss -ltn 'sport = :8090 or sport = :4000 or sport = :8765 or sport = :5432'
+docker ps --filter ancestor=postgres:17-alpine --format '{{.Names}}\t{{.Ports}}'
+docker exec local-postgres pg_isready -h 127.0.0.1 -p 5432 -U session_agent -d session_agent -t 5
 ```
 
 預期 Runtime `status: UP`；listener 均為 loopback。MCP 未設定時 `connections` 為空是正常狀態，不代表 OMP 工具已接入。首次啟動用有上限的等待，逾時檢查 journal，不無限重試。
+
+本機 persistent PostgreSQL 預期只有 `local-postgres`，loopback5432；辨識其他
+image/tag 的 DB 時另查看安全的 container name/image/ports，不以 ancestor filter
+當完整盤點。`pg_isready` 是 bounded readiness，不證明 owner 密碼正確。確認
+實體 volume `gamecenter-local-postgres-data` 未變，retired source 保持停止且
+restart=no；不因查驗而啟停服務或建立新 DB。私有檔／備份不要輸出內容。
+
+## 本機 PostgreSQL 測試與可攜 CI
+
+本機使用 repo launcher，不直接以未指定環境的 PG profile 啟動 Testcontainers：
+
+```bash
+bash scripts/test-postgres-local.sh
+```
+
+它只讀 `~/.local/share/local-postgres/session-agent-tests.env`（可用
+`SESSION_AGENT_TEST_POSTGRES_ENV_FILE` 指定另一個已授權檔），要求 regular、
+非 symlink、目前使用者 owned、mode600；父目錄使用700。這是**明確信任的
+shell-safe assignments**，launcher 會 source 它且關閉 tracing，不是 Runtime
+systemd env 的通用 parser。不要 source／cat 私有檔或使用 `bash -x`。
+管理者核准 provisioning 後以安全 editor 填寫這四個欄位：
+
+```dotenv
+SESSION_AGENT_TEST_POSTGRES_MODE=shared
+SESSION_AGENT_TEST_POSTGRES_ADMIN_URL=jdbc:postgresql://127.0.0.1:5432/postgres
+SESSION_AGENT_TEST_POSTGRES_USERNAME=session_agent_test_admin
+SESSION_AGENT_TEST_POSTGRES_PASSWORD=
+```
+
+空密碼不是可執行設定；缺少有效檔案／憑證就回報 blocker，launcher 不 fallback。
+Test role 是 LOGIN CREATEDB、NOSUPERUSER NOCREATEROLE NOREPLICATION
+NOBYPASSRLS，無 application role membership；應用 DB 的 PUBLIC CONNECT
+已撤銷，owner CONNECT 保留，test role 不可連入 `session_agent` 或
+`gamecenter_local`。此授權邊界須由 provisioning 管理者確認，不在測試時升權。
+每 class 的 fixture 建立 UUID-based 唯一 DB，Flyway／測試只使用該 DB；
+cleanup 只終止／刪除自己擁有的 test DB，不清應用資料、不關共用 PostgreSQL。
+Launcher 執行 Java21 Maven `-Ppostgres-it verify`（包含 ordinary phase）。
+授權的 clean gate 可先以 Java21 執行 `mvn --batch-mode --no-transfer-progress clean`
+再跑 launcher；launcher 不接受 positional arguments。
+
+**只有明確選擇 portable CI 環境**才使用 disposable Testcontainers，需 Docker，
+且不能繼承 shared credentials：
+
+```bash
+env -u SESSION_AGENT_TEST_POSTGRES_ADMIN_URL \
+  -u SESSION_AGENT_TEST_POSTGRES_USERNAME -u SESSION_AGENT_TEST_POSTGRES_PASSWORD \
+  SESSION_AGENT_TEST_POSTGRES_MODE=container \
+  JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64 \
+  mvn --batch-mode --no-transfer-progress -Ppostgres-it verify
+```
+
+這不是 shared 連線失敗的補救，也不授權在 consolidated host 啟動第二個 DB。
+普通 `mvn test` 仍是 fake-backed、不需 DB。報告 ordinary／PG counts、owned DB
+清除與未觸及應用資料的實際證據，不能把 health 或文件改動當測試已通過。
 
 有 MCP 時依 [MCP 操作指南](mcp.md) 逐一驗證 `state`／`toolCount`，再經授權檢查模型產生的 calls 與持久化 observations。下方一般模型 smoke 明確禁止 tools，不能作為 MCP 驗收。
 
@@ -136,10 +192,11 @@ Slack Java SDK 執行；外部 HTTP 指向 loopback fake，Socket intake 用既�
    真正中斷工作的 recovery 可新增正常模型 request，須與 progress 分開計數。
 5. 保存模型 HTTP requests、公開 history、delivery parts 與 progress rows 的對照，
    證明 status 不進模型／history，且沒有 tool arguments、SHA 或內部錯誤內容。
-   證據放 Git 外私有位置；移除 launcher source／compiled scaffolds 並停止 fake
-   HTTP、Runtime、Testcontainers。完整 gate 為 Java 21 的
-   `mvn --batch-mode --no-transfer-progress -Ppostgres-it clean verify`，需報告完整
-   ordinary phase 與 PG phase counts；不只挑 progress tests。
+   證據放 Git 外私有位置；移除 launcher source／compiled scaffolds 並停止自己
+   的 fake HTTP、隔離 Runtime；不停止共用 local-postgres。完整 gate 為 Java21
+   的上述 shared launcher（授權 clean 時先 `mvn clean`），需報告完整 ordinary
+   phase 與 PG phase counts；不只挑 progress tests。只有 portable CI 才清理其
+   自己建立的 Testcontainers。
 
 預設 poll 2s、同狀態 refresh 30s、workspace progress API spacing 2s；跨 replicas
 共用 durable gate，backlog 與 Retry-After 可延遲。這是「最後確認」，不是模型遠端

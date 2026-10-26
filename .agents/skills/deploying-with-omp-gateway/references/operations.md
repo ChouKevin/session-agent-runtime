@@ -4,18 +4,18 @@
 
 ## 先辨識既有部署
 
-先在主機查看 Runtime unit、artifact 連結、config location，以及 Docker Compose labels／volume mounts；敏感值只在本機處理，不回傳完整 environment、`docker inspect` 或 systemd properties。記錄 Runtime SHA/checksum、OMP 版本、source revision／patch、實際 Gateway service executable 的 SHA-256 checksum 與 PostgreSQL image identity。
+先在主機查看 Runtime unit、artifact 連結、config location，以及資料庫身分／volume mounts；敏感值只在本機處理，不回傳完整 environment、`docker inspect` 或 systemd properties。記錄 Runtime SHA/checksum、OMP 版本、source revision／patch、實際 Gateway service executable 的 SHA-256 checksum 與 PostgreSQL image identity。
 
 先取得只含位置／身分的資料，不輸出秘密：
 
 ```bash
 systemctl --user show session-agent-runtime \
   -p FragmentPath -p DropInPaths -p WorkingDirectory -p EnvironmentFiles
-docker ps -a --filter label=com.docker.compose.service=postgres \
+docker ps -a --filter name=local-postgres \
   --format '{{.Names}}\t{{.Status}}\t{{.Ports}}'
-# POSTGRES_CONTAINER 設成已確認屬於這個 Runtime 的容器名稱。
-docker inspect "$POSTGRES_CONTAINER" --format \
-  'project={{index .Config.Labels "com.docker.compose.project"}} working_dir={{index .Config.Labels "com.docker.compose.project.working_dir"}} config_files={{index .Config.Labels "com.docker.compose.project.config_files"}} env_file={{index .Config.Labels "com.docker.compose.project.environment_file"}}'
+# 本機預設；其他 host 先確認實際服務身分，不直接照抄。
+POSTGRES_CONTAINER=local-postgres
+docker inspect "$POSTGRES_CONTAINER" --format 'image={{.Config.Image}} restart={{.HostConfig.RestartPolicy.Name}}'
 docker inspect "$POSTGRES_CONTAINER" --format \
   '{{range .Mounts}}{{if eq .Destination "/var/lib/postgresql/data"}}type={{.Type}} name={{.Name}} source={{.Source}}{{end}}{{end}}'
 ```
@@ -41,35 +41,24 @@ for key in ('SPRING_CONFIG_LOCATION', 'SPRING_CONFIG_IMPORT', 'LOGGING_CONFIG', 
 PY
 ```
 
-`config_files` 保留原順序。Compose 不一定記錄 env-file label；本 repo 的 `docker/runtime.sh` 固定使用 `$REPO/docker/.env`，其他啟動來源須確認其原始 environment file。缺少來源資訊時停止，不猜密碼或另產新 env。模型 bearer 可能位於既有 `runtime.env`；查檔時只確認 key 是否存在，保留原來源。
+主機部署的有效 datasource 來自私有 `$HOME/.local/share/session-agent-runtime/runtime.env`，由外部 `application.yml` placeholders 讀取。保留實際來源與密碼；不因更新範本而改值。模型 bearer 可能也位於既有 `runtime.env`，查檔只確認 key 是否存在，不顯示完整檔。
 
-本文件的命令針對 [install.md](install.md) 建立的部署：
+本文件的主機命令使用已確認的 standalone Docker 服務，不用 Compose：
 
 ```bash
 set -euo pipefail
 export DEPLOY_ROOT="$HOME/.local/share/session-agent-runtime"
-PC=(env -u SESSION_AGENT_POSTGRES_PASSWORD docker compose -p session-agent-runtime --env-file "$DEPLOY_ROOT/runtime.env" \
-    -f "$DEPLOY_ROOT/postgres.compose.yaml")
+POSTGRES_CONTAINER=local-postgres
 ```
 
-如果該檔案不存在，或既有 PostgreSQL 使用不同 project／volume，**停止套用預設命令**，從該服務的實際 Compose files/project 還原 `PC`。例如舊部署可能使用 repo 的 `docker/compose.yaml` 加本機 override，且 project 不是 `session-agent-runtime`。改 project name 會建立不同 volume，不能將空資料庫當作升級成功。不要執行 `docker/runtime.sh restart`，它會啟動另一個 container Runtime。
+本機 PostgreSQL 17 是 `local-postgres`，loopback `5432`，實體 legacy volume `gamecenter-local-postgres-data`。不得將它改名或交由 Compose 採用。`gamecenter_local`／owner `gamecenter` 與 `session_agent`／owner `session_agent` 分離；Runtime role 非 cluster superuser。以下 container-local SQL／dump 明確指定 Runtime owner `-U session_agent`，不使用 cluster 管理 role；本機 socket 認證方式須先確認。若其他 host 不支援此方式，使用其核准的 owner-only libpq secret／passfile 注入，不能為省事升權或把密碼放命令列。`pg_isready` 僅證明可接受連線，不證明密碼正確；Runtime health 與 owner 的 TCP 驗證另計。
 
-例如已確認 project 為 `docker`、使用 repo Compose 加既有 override：
-
-```bash
-# REPO、EXISTING_OVERRIDE、EXISTING_COMPOSE_ENV 均取自已確認的既有部署。
-# 原本由 repo helper 啟動時，EXISTING_COMPOSE_ENV="$REPO/docker/.env"。
-PC=(env -u SESSION_AGENT_POSTGRES_PASSWORD docker compose -p docker \
-    --env-file "$EXISTING_COMPOSE_ENV" -f "$REPO/docker/compose.yaml" -f "$EXISTING_OVERRIDE")
-test "$("${PC[@]}" ps -aq postgres)" = "$(docker inspect --format '{{.Id}}' "$POSTGRES_CONTAINER")"
-```
-
-執行任何 lifecycle 操作前，確認此命令選到原容器，且其 data mount 與記錄的原 volume 一致。若既有部署刻意透過 shell 密碼覆寫，先在受限檔案中整理相同有效值，確認與現有資料庫吻合後才採用 `env -u`；不要直接套用不同密碼的 env file。
+若服務、mount 或憑證來源不相符，停止並辨識，不推測舊 Compose project、套回 override 或重建 volume。repo `docker/runtime.sh start/restart` 是明確 opt-in 的獨立全套容器部署，不是此主機服務的更新命令。
 
 ## 日常啟停
 
 ```bash
-"${PC[@]}" up -d --wait postgres
+docker exec "$POSTGRES_CONTAINER" pg_isready -h 127.0.0.1 -p 5432 -U session_agent -d session_agent -t 5
 systemctl --user start session-agent-omp-broker session-agent-omp-gateway session-agent-runtime
 systemctl --user status session-agent-runtime --no-pager
 journalctl --user -u session-agent-runtime --since '5 minutes ago' --no-pager
@@ -77,7 +66,7 @@ journalctl --user -u session-agent-runtime --since '5 minutes ago' --no-pager
 
 只重啟 Runtime：`systemctl --user restart session-agent-runtime`。先協調停止新訊息並等待工作完成；不要因為 queue 暫時為零就宣稱後續沒有新訊息。
 
-正常停機：先停止 Runtime，再視需求停止 gateway／broker；資料庫可保留運行。需要停止資料庫時用 `"${PC[@]}" stop postgres`。**不使用 `down --volumes`、`docker volume rm` 或 Flyway clean。** systemd `enable` 與 user linger 不保證 Docker Desktop 在主機開機時已運行。
+正常停機：先停止 Runtime，再視需求停止 gateway／broker；**共用資料庫繼續運行，不隨 repo 啟停**。資料庫維護需另行協調所有 consumers 並取得授權，不是 Runtime 部署步驟。**不使用 `down --volumes`、`docker volume rm`、共享 DB reset 或 Flyway clean。** systemd `enable` 與 user linger 不保證 Docker Desktop 在主機開機時已運行。
 
 ## 更新 Runtime（不更新 OMP）
 
@@ -99,7 +88,7 @@ git -C "$REPO" worktree add --detach "$BUILD_ROOT/source" "$REV"
   export JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64
   export PATH="$JAVA_HOME/bin:$PATH"
   mvn --batch-mode --no-transfer-progress test
-  mvn --batch-mode --no-transfer-progress -Ppostgres-it verify
+  bash scripts/test-postgres-local.sh
 )
 test ! -e "$DEPLOY_ROOT/releases/$REV.jar"
 install -m 600 "$BUILD_ROOT/source/target/session-agent-runtime-0.0.1-SNAPSHOT.jar" \
@@ -114,9 +103,9 @@ sha256sum "$DEPLOY_ROOT/releases/$REV.jar"
 與使用者協調停止 HTTP／Slack 新提交；Runtime 目前沒有通用的 maintenance/intake-disable API。可在本機查詢工作與投遞數，不讀對話內容：
 
 ```bash
-"${PC[@]}" exec -T postgres psql -U session_agent -d session_agent -Atc \
+docker exec "$POSTGRES_CONTAINER" psql -X -v ON_ERROR_STOP=1 -U session_agent -d session_agent -Atc \
   "select status,count(*) from message_job where status in ('PENDING','WORKING','RETRY') group by status;"
-"${PC[@]}" exec -T postgres psql -U session_agent -d session_agent -Atc \
+docker exec "$POSTGRES_CONTAINER" psql -X -v ON_ERROR_STOP=1 -U session_agent -d session_agent -Atc \
   "select status,count(*) from slack_delivery where status in ('PENDING','WORKING','RETRY') group by status;"
 ```
 
@@ -139,9 +128,9 @@ umask 077
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 BACKUP="$DEPLOY_ROOT/backups/$STAMP"
 mkdir -m 700 "$BACKUP"
-"${PC[@]}" exec -T postgres pg_dump -U session_agent -d session_agent -Fc > "$BACKUP/database.dump"
+docker exec "$POSTGRES_CONTAINER" pg_dump -U session_agent -d session_agent -Fc > "$BACKUP/database.dump"
 # 驗證 archive 可解析；不是完整 restore drill 的替代品。
-"${PC[@]}" exec -T postgres pg_restore --list < "$BACKUP/database.dump" > "$BACKUP/database.contents"
+docker exec -i "$POSTGRES_CONTAINER" pg_restore --list < "$BACKUP/database.dump" > "$BACKUP/database.contents"
 sha256sum "$BACKUP/database.dump" > "$BACKUP/database.sha256"
 install -m 600 "$DEPLOY_ROOT/session-agent-runtime.jar" "$BACKUP/runtime.jar"
 for name in application.yml models.yml logback.xml runtime.env gateway.env; do
@@ -174,10 +163,16 @@ systemctl --user start session-agent-runtime
 先協調停新提交、排空並停止新 Runtime。**換回舊 jar 不會撤銷 Flyway migration。**
 
 - 若已證明舊程式與目前 schema 相容：保留目前資料庫，還原備份的程式／所需 config，驗證後再啟動。
-- 若 schema 不相容或無證據：先保持服務停止，取得資料還原與可能資料損失的明確授權。將舊備份還原到**新的隔離資料庫／volume**，驗證後讓舊 Runtime 指向它；保留目前資料庫供對帳，不直接清空。
+- 若 schema 不相容或無證據：先保持服務停止，取得資料還原與可能資料損失的明確授權。先備份目前 target（含切換後寫入），再由核准的管理者提供**新的隔離資料庫**，以專用 owner restore 舊 custom dump，驗證 schema、資料 fingerprints／counts、sequence 與 owner TCP 連線後才讓舊 Runtime 指向它。保留目前資料庫供對帳，不直接清空共用 DB、不 reset volume；restore drill 不連 GameCenter 或正式 Runtime DB。
 - 備份之後的資料可能不在還原庫內；Slack 已送出的訊息與工具副作用不會回滾。重新處理／重播前必須對帳。
 
 不提供自動破壞性回滾命令，也不在未驗證資料相容性時宣稱回滾完成。
+
+### 本機 5432 cutover 的保留來源
+
+`retired-session-agent-postgres-15432` 已停止且 restart=`no`，原 `docker_session-agent-postgres` volume 只作 rollback 保留；不是第二個日常 DB。舊 private override 已移至受限備份，不再是 live 部署入口。Migration 備份位於 `$HOME/.local/share/local-postgres/backups/20261026-220504`（目錄700、檔案600），包含原 runtime env、dump 與 fingerprints；不提交或顯示內容。
+
+若要回到保留來源，先停止 Runtime、保存目前 5432 target 的 fresh backup，評估兩邊 divergence。**取得使用者對回到舊資料狀態的明確決策後**，才恢復該備份的 runtime env（600）、啟動已確認的 retired source、讓 Runtime 指回來源並驗證；來源不包含 cutover 後 target 寫入，不能宣稱無損回滾。不自動合併 divergent writes、不刪任一 DB／volume、不停止仍供 GameCenter 使用的 local-postgres；restart policy 只有決定永久 rollback 才另行恢復。
 
 ## OMP 更新是獨立操作
 
@@ -223,7 +218,7 @@ Runtime update 不等於 OMP update。使用者另行要求更新 OMP 時，採�
 
 ## Database contract and Docker alternative
 
-The following Docker commands are an alternative to the host deployment, not an additional Runtime instance. Run them from the repository root; do not reuse host-deployment ports or change an existing Compose project or volume.
+The following Docker commands are an **explicit opt-in standalone full-stack deployment**, not the default host workflow or an additional Runtime instance. Run them from the repository root only after choosing this mode; do not reuse host-deployment ports or change an existing Compose project or volume. The helper always operates on `docker/compose.yaml` and `docker/.env`: `start` builds/starts Runtime and its own PostgreSQL, `restart` takes the entire project down and rebuilds it, and `stop` takes the entire project down. It does not manage or reuse standalone `local-postgres`; do not point its named volume at `gamecenter-local-postgres-data`. On the consolidated host, use systemd operations above, not this helper.
 
 The shipped database contract is a fresh schema applied through ordered Flyway migrations V1 through V11. V5 adds durable job progress and safe failure codes; historical terminal failures are backfilled only from an allowlisted final runtime event, not an earlier recoverable failure. Existing working rows may initially have no phase until reclaimed. V6 adds durable cancellation requests and the `CANCELLED` terminal state without rewriting existing history or progress. V7 adds durable Slack stop-command receipts and `STOP` delivery notices. V8 adds skill commands; V9 adds Slack-owned per-question progress and workspace cooldown persistence. V10 adds durable artifacts and Slack file-upload delivery state. V11 adds durable continuation/handoff control, ordinary-call accounting, waiting choices, and skill-load receipts with Slack notifications. Compatibility with removed pre-release schemas is not supported. Do not reset or delete the current database or its data as part of starting this version. The Compose service binds the runtime HTTP port to loopback only. Required local credentials are intentionally not committed.
 

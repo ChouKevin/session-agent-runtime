@@ -6,7 +6,7 @@
 
 ## 1. 前置檢查
 
-需要 Linux/WSL、可用的 systemd user manager、Java 21、Maven、Python 3、Docker Compose v2，以及已安裝並完成模型 provider 登入的 OMP。登入位置與指令見 [OAuth 登入流程](../../../../docs/gateway-deployment.md#2-獨立部署安裝與-oauth-登入)；由操作者透過核准的發行來源安裝，明確選擇授權帳號，不自動匯入 OAuth 檔或升級。
+需要 Linux/WSL、可用的 systemd user manager、Java 21、Maven、Python 3、Docker，以及已安裝並完成模型 provider 登入的 OMP。先確認既有相容的本機 PostgreSQL 與非 superuser 應用 role；不要求為主機模式建立 Compose project。登入位置與指令見 [OAuth 登入流程](../../../../docs/gateway-deployment.md#2-獨立部署安裝與-oauth-登入)；由操作者透過核准的發行來源安裝，明確選擇授權帳號，不自動匯入 OAuth 檔或升級。
 
 本方案使用的是修正過的 native OMP source build，不是未修正的 **18.12.6** 發行 binary；只看 `omp --version` 不能證明相容。未修正的 18.12.6 會在 Chat Completions → provider protocol 轉換時遺失 tool `strict: false`。前置條件是已驗證的修正版 build，或包含同一修正的 upstream release：明確 `false`／`true` 必須保留，省略 strictness 時仍須保持 Chat Completions 的 non-strict 預設。保存 source revision／patch 與實際 service executable 的 SHA-256 checksum；本機 patched build 不是官方 upstream release。不要因版本字串相同就替換成未修正 binary，也不在此安裝流程隱含重建或升級 Gateway。完整邊界見 [模型與 Gateway 邊界](configuration.md#model-adapter-and-gateway-boundaries)。
 
@@ -24,12 +24,11 @@ export PATH="$JAVA_HOME/bin:$PATH"
 java -version
 /usr/bin/java -version
 mvn -version
-docker compose version
 docker info >/dev/null
 systemctl --user show-environment >/dev/null
 command -v omp
 omp --version
-ss -ltn 'sport = :8090 or sport = :4000 or sport = :8765 or sport = :15432'
+ss -ltn 'sport = :8090 or sport = :4000 or sport = :8765 or sport = :5432'
 wait_http() {
   python3 - "$1" <<'PY'
 import json
@@ -56,7 +55,9 @@ PY
 
 `JAVA_HOME` 範例適用 Debian/Ubuntu；其他系統改成已安裝的 Java 21。服務範本使用 `/usr/bin/java`，若不是 Java 21，修改安裝後 unit 的 `ExecStart` 為已確認的絕對路徑。OMP unit 使用 `%h/.local/bin/omp`，若 `command -v omp` 不相符，也須調整兩個 OMP units。
 
-若任一 port 已使用、部署目錄已存在或同名 user service 已安裝，先識別既有部署；不要覆寫或終止未知服務。Docker Desktop 的 bridge 在 VM 內，不能假設其 gateway IP 能在 WSL 綁定。所有服務維持 loopback。
+若 Runtime／gateway／broker port 已使用、部署目錄已存在或同名 user service 已安裝，先識別既有部署；不要覆寫或終止未知服務。5432 已使用時先辨識並重用相容的共用 DB，不將它視為必須排除的 port conflict。Docker Desktop 的 bridge 在 VM 內，不能假設其 gateway IP 能在 WSL 綁定。所有服務維持 loopback。
+
+本機共用服務是 standalone Docker `local-postgres`（PostgreSQL 17），`127.0.0.1:5432`，實體 legacy volume `gamecenter-local-postgres-data`。`gamecenter_local` 由 `gamecenter` 擁有，`session_agent` 由非 superuser、NOCREATEDB、NOCREATEROLE 的 `session_agent` 擁有；不得混用角色。先向既有私有憑證來源取得 Runtime owner 的有效值。缺少資料庫、角色或憑證時回報 blocker，或取得明確的 provisioning 授權再由管理者建立應用 DB／受限 role；不把 cluster superuser 憑證交給 Runtime，不啟動第二個 PostgreSQL、不自動改連遠端。本頁不授權 provisioning 或修改其他應用權限。
 
 ## 2. 建立私有部署目錄及環境檔
 
@@ -65,26 +66,17 @@ PY
 ```bash
 test ! -e "$DEPLOY_ROOT"
 install -d -m 700 "$DEPLOY_ROOT" "$DEPLOY_ROOT/releases" "$DEPLOY_ROOT/backups"
-for name in application.yml models.yml logback.xml postgres.compose.yaml; do
+for name in application.yml models.yml logback.xml; do
   install -m 600 "$SKILL/assets/$name" "$DEPLOY_ROOT/$name"
 done
-python3 - <<'PY'
-import os
-import secrets
-from pathlib import Path
-source = Path(os.environ['SKILL']) / 'assets/runtime.env.example'
-target = Path(os.environ['DEPLOY_ROOT']) / 'runtime.env'
-text = source.read_text().replace('SESSION_AGENT_POSTGRES_PASSWORD=',
-                                 'SESSION_AGENT_POSTGRES_PASSWORD=' + secrets.token_hex(32), 1)
-fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-with os.fdopen(fd, 'w') as output:
-    output.write(text)
-PY
+install -m 600 "$SKILL/assets/runtime.env.example" "$DEPLOY_ROOT/runtime.env"
 ```
 
 以本機 editor 填入 `runtime.env` 的 Slack 三個欄位；不在聊天、shell history、Git 或 log 顯示憑證。三個全空代表停用 Slack，部分填入會啟動失敗。`SLACK_BOT_USER_ID` 是 bot user ID，不是名稱或 App ID。憑證格式與事件訂閱見 [configuration.md](configuration.md)。
 
-`runtime.env` 是 systemd EnvironmentFile 與 Compose dotenv 的共同子集：一行一個 `NAME=value`；範例的 token/password 都使用不含空白、引號、`$` 或換行的值。不使用 `export`、命令替換，也不 `source` 這個檔案。若要使用含特殊字元的外部秘密，先分離各工具的編碼與 secret 注入方式，不能假設解析規則相同。
+以私有 editor 填入 `SESSION_AGENT_DATASOURCE_PASSWORD`，沿用既有 `session_agent` owner 憑證；URL 預設 `jdbc:postgresql://127.0.0.1:5432/session_agent`。既有部署的有效來源為 `$DEPLOY_ROOT/runtime.env`，實際 `application.yml` 透過 datasource placeholders 讀取它；不要以 repo 範本覆蓋既有檔案或另產密碼。
+
+`runtime.env` 是 systemd EnvironmentFile：一行一個 `NAME=value`；本範例以不含空白、引號、`$` 或換行的單行 secret 為範圍。不使用 `export`、命令替換，也不 `source` 這個檔案。若既有秘密含特殊字元，沿用已驗證的 systemd secret 編碼／注入方式，不任意改密碼。此檔不再提供 PostgreSQL Compose 初始化憑證。
 
 若要交付 Markdown/CSV 附件或自動長回答 `answer.md`，先核准 app 的
 `files:write` scope 與 Slack 要求的 reinstall／重新授權，再另行核准 live 檢查。
@@ -122,7 +114,7 @@ special file，regular-file 檢查與 no-follow open 不等於 timeout 防護。
 REV="$(git -C "$REPO" rev-parse HEAD)"
 # 若有未提交的產品變更，先處理版本追蹤，不把它偽稱為 REV。
 mvn --batch-mode --no-transfer-progress test
-mvn --batch-mode --no-transfer-progress -Ppostgres-it verify
+bash scripts/test-postgres-local.sh
 install -m 600 "$REPO/target/session-agent-runtime-0.0.1-SNAPSHOT.jar" \
   "$DEPLOY_ROOT/releases/$REV.jar"
 sha256sum "$DEPLOY_ROOT/releases/$REV.jar"
@@ -131,17 +123,14 @@ printf '%s\n' "$REV" > "$DEPLOY_ROOT/runtime-revision"
 omp --version > "$DEPLOY_ROOT/omp-version"
 ```
 
-`verify` 會產生 executable jar；integration tests 需要 Docker，但不使用部署資料庫或模型額度。固定 Runtime SHA 並記錄 OMP 版本、source revision／patch 與實際 Gateway executable checksum，不能把重建中的 `target/` 當正式服務 artifact，也不能以 OMP 版本字串代替 build provenance。
+`verify` 會產生 executable jar；本機 integration tests 使用獨立 test role 與每 class 唯一 DB，不使用部署資料庫或模型額度。先依 [verification.md](verification.md#本機-postgresql-測試與可攜-ci) 準備 mode600 的私有 test env；缺失即停止、不 fallback。固定 Runtime SHA 並記錄 OMP 版本、source revision／patch 與實際 Gateway executable checksum，不能把重建中的 `target/` 當正式服務 artifact，也不能以 OMP 版本字串代替 build provenance。
 
-## 4. 啟動 PostgreSQL 與 OMP
+## 4. 檢查共用 PostgreSQL 並啟動 OMP
 
-Fresh install 使用固定 Compose project `session-agent-runtime`；日後所有操作保持相同 project、compose file 與 volume。所有 Compose 命令移除呼叫端的同名 password 環境變數，避免 shell 覆寫 `--env-file`，造成資料庫初始化密碼與 Runtime 不一致。
+資料庫必須已由其 owner 管理且可用；Runtime 安裝不啟停它、不採用既有 volume 為 Compose volume。若以下 probe 失敗，停止並調查已確認的服務，不執行 repo helper 或重建 DB。
 
 ```bash
-env -u SESSION_AGENT_POSTGRES_PASSWORD docker compose -p session-agent-runtime --env-file "$DEPLOY_ROOT/runtime.env" \
-  -f "$DEPLOY_ROOT/postgres.compose.yaml" config --quiet
-env -u SESSION_AGENT_POSTGRES_PASSWORD docker compose -p session-agent-runtime --env-file "$DEPLOY_ROOT/runtime.env" \
-  -f "$DEPLOY_ROOT/postgres.compose.yaml" up -d --wait postgres
+docker exec local-postgres pg_isready -h 127.0.0.1 -p 5432 -U session_agent -d session_agent -t 5
 
 install -d -m 700 "$HOME/.config/systemd/user"
 for unit in session-agent-omp-broker session-agent-omp-gateway session-agent-runtime; do

@@ -85,9 +85,17 @@ Run PostgreSQL integration tests for migrations, repositories, transactions, or
 history ordering changes:
 
 ```bash
-JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64 \
-mvn --batch-mode --no-transfer-progress -Ppostgres-it verify
+bash scripts/test-postgres-local.sh
 ```
+
+The local launcher reads current-user-owned mode600
+`~/.local/share/local-postgres/session-agent-tests.env`, explicitly selects shared
+loopback5432, and uses a dedicated restricted test role with per-class unique
+databases. Missing credentials are a blocker; do not start another PostgreSQL,
+reset application DBs, use cluster-superuser runtime credentials, or stop the
+shared `local-postgres` service. The explicit portable CI/Testcontainers path and
+credential contract are in the deployment skill's
+[verification guide](.agents/skills/deploying-with-omp-gateway/references/verification.md#本機-postgresql-測試與可攜-ci).
 
 Do not add a default test that consumes model quota. Real-model and deployed MCP
 behavior must remain explicitly authorized integration work.

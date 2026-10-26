@@ -42,8 +42,8 @@ instructions, **not** a library to mount as Runtime business skills.
 
 ## Build and test
 
-Prerequisites: Java 21 and Maven. PostgreSQL integration tests additionally require
-Docker for Testcontainers. Run from the repository root:
+Prerequisites: Java 21 and Maven. Local PostgreSQL integration tests reuse the
+shared loopback service with dedicated private test credentials. Run from the repository root:
 
 ```bash
 JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64 \
@@ -55,9 +55,15 @@ quota nor a live MCP server. For persistence, migration, transaction, or history
 changes, run:
 
 ```bash
-JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64 \
-mvn --batch-mode --no-transfer-progress -Ppostgres-it verify
+bash scripts/test-postgres-local.sh
 ```
+
+The launcher requires `~/.local/share/local-postgres/session-agent-tests.env`
+(current-user owned, mode600), explicit `shared` mode, and the restricted test
+role—not application or cluster-superuser credentials. Each test class owns a
+unique disposable database; application databases are not reset. Missing/invalid
+configuration fails without container fallback. See [test setup and explicit
+portable CI mode](.agents/skills/deploying-with-omp-gateway/references/verification.md#本機-postgresql-測試與可攜-ci).
 
 The build uses Spring AI 2.1.0-RC1, a pre-release. Real model, deployed MCP, and
 Slack acceptance are separate, explicitly authorized operations—not ordinary tests.
@@ -69,8 +75,19 @@ same ports or change an existing database's Compose project/volume identity.
 
 ### Host Runtime with native OMP Gateway
 
-The preferred deployment is a host Java Runtime, native OMP Auth Gateway, and
-Docker PostgreSQL. Follow the [installation guide](.agents/skills/deploying-with-omp-gateway/references/install.md)
+The preferred deployment is a host Java Runtime, native OMP Auth Gateway, and the
+existing standalone Docker PostgreSQL 17 `local-postgres` on `127.0.0.1:5432`.
+Its physical legacy volume remains `gamecenter-local-postgres-data`.
+Runtime uses `session_agent` owned by the non-superuser `session_agent` role;
+GameCenter uses separate `gamecenter_local`/`gamecenter`. Runtime datasource values
+come from private `~/.local/share/session-agent-runtime/runtime.env` through
+external YAML placeholders. Keep directories700 and secret files600. Missing
+credentials are a blocker or require explicitly authorized provisioning, not a
+reason to launch another database or use cluster-superuser runtime credentials.
+Start/stop the host Runtime with systemd; never stop the shared DB as a repo
+lifecycle step or adopt its volume with Compose.
+
+Follow the [installation guide](.agents/skills/deploying-with-omp-gateway/references/install.md)
 for a new installation, or the [update procedure](.agents/skills/deploying-with-omp-gateway/references/operations.md#更新-runtime不更新-omp)
 for an existing service. Gateway forwards model requests; Java Runtime still owns
 sessions, tools, and the agent loop. Gateway does not import its skills or MCP setup.
@@ -80,7 +97,11 @@ Use a verified fixed build or a fixed upstream release, recording source revisio
 and executable checksum. A matching version string or healthy endpoint is not
 sufficient; follow the guide's model-to-tool acceptance checks.
 
-### Docker alternative
+### Explicit opt-in standalone Docker alternative
+
+This builds a separate Runtime **and its own PostgreSQL**, not a shared-DB host
+operation. `start/restart` must not be used to update the host service; `stop`
+takes down the whole Compose project. Do not attach the shared legacy volume.
 
 ```bash
 ./docker/runtime.sh init

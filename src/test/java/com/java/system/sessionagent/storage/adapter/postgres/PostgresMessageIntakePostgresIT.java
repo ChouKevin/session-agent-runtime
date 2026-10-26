@@ -14,7 +14,8 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import org.springframework.jdbc.core.JdbcTemplate;
-import org.testcontainers.postgresql.PostgreSQLContainer;
+import com.java.system.sessionagent.support.PostgresTestDatabase;
+import org.junit.jupiter.api.AfterAll;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
@@ -30,7 +31,12 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class PostgresMessageIntakePostgresIT {
-    private static final PostgreSQLContainer POSTGRES = new PostgreSQLContainer("postgres:17-alpine");
+    private static final PostgresTestDatabase POSTGRES = PostgresTestDatabase.create();
+
+    @AfterAll
+    static void closeDatabase() {
+        POSTGRES.close();
+    }
     private static final ModelSelection TEST_SELECTION = new ModelSelection("test", "v1:test");
     @BeforeEach void migrate() { POSTGRES.start(); flyway().clean(); flyway().migrate(); }
     @AfterEach void clean() { flyway().clean(); }
@@ -110,6 +116,6 @@ class PostgresMessageIntakePostgresIT {
     private static MessageReceipt receive(ConversationStore store, IncomingMessage incomingMessage) {
         return store.receive(incomingMessage, TEST_SELECTION, model -> Optional.of(TEST_SELECTION));
     }
-    private DriverManagerDataSource dataSource() { return new DriverManagerDataSource(POSTGRES.getJdbcUrl(), POSTGRES.getUsername(), POSTGRES.getPassword()); }
+    private DriverManagerDataSource dataSource() { return POSTGRES.dataSource(); }
     private Flyway flyway() { return Flyway.configure().dataSource(dataSource()).cleanDisabled(false).load(); }
 }

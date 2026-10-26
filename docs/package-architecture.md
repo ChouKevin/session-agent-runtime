@@ -307,12 +307,18 @@ Run the PostgreSQL profile when checking migrations, persistence, transaction
 boundaries, history ordering, or concurrency:
 
 ```bash
-JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64 \
-mvn --batch-mode --no-transfer-progress -Ppostgres-it verify
+bash scripts/test-postgres-local.sh
 ```
 
-For the complete clean ordinary-plus-PostgreSQL gate, use
-`JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64 mvn --batch-mode --no-transfer-progress -Ppostgres-it clean verify`.
+The local launcher reads the current-user-owned mode600 private test env at
+`~/.local/share/local-postgres/session-agent-tests.env`. Explicit shared mode uses
+the dedicated restricted test role on loopback5432, creates one unique DB per class,
+and cleans up only owned test DBs. Missing credentials fail without fallback;
+application DBs and the shared service lifecycle are not test resources.
+For the complete ordinary-plus-PostgreSQL gate, use this launcher; it runs Maven
+`-Ppostgres-it verify`. For an authorized clean gate, run Maven `clean` first,
+then the launcher. Explicit portable CI/Testcontainers mode is documented in the
+[verification guide](../.agents/skills/deploying-with-omp-gateway/references/verification.md#本機-postgresql-測試與可攜-ci).
 The ordinary phase is the full suite, not a selected subset. Integrated acceptance
 also needs a separately launched real Runtime with isolated PostgreSQL, actual
 configured-model and Slack SDK adapters pointed at local fake HTTP services, and

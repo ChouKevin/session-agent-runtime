@@ -76,7 +76,8 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
-import org.testcontainers.postgresql.PostgreSQLContainer;
+import com.java.system.sessionagent.support.PostgresTestDatabase;
+import org.junit.jupiter.api.AfterAll;
 
 import java.time.Clock;
 import java.time.Duration;
@@ -104,7 +105,12 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class PostgresConversationCommitPostgresIT {
 
-    private static final PostgreSQLContainer POSTGRES = new PostgreSQLContainer("postgres:17-alpine");
+    private static final PostgresTestDatabase POSTGRES = PostgresTestDatabase.create();
+
+    @AfterAll
+    static void closeDatabase() {
+        POSTGRES.close();
+    }
     private static final Instant NOW = Instant.parse("2026-08-31T10:00:01Z");
     private static final ModelSelection TEST_SELECTION = new ModelSelection("test", "v1:test");
 
@@ -1086,7 +1092,7 @@ class PostgresConversationCommitPostgresIT {
     }
 
     private DriverManagerDataSource dataSource() {
-        return new DriverManagerDataSource(POSTGRES.getJdbcUrl(), POSTGRES.getUsername(), POSTGRES.getPassword());
+        return POSTGRES.dataSource();
     }
 
     private Flyway flyway() {
