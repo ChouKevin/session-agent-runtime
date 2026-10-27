@@ -54,7 +54,8 @@ class PostgresTestDatabasePostgresIT {
                     Integer.class, firstName)).isZero();
             assertThat(secondJdbc.queryForObject("select count(*) from pg_database where datname = ?",
                     Integer.class, secondName)).isOne();
-            assertThatThrownBy(() -> firstJdbc.execute("select 1")).hasRootCauseInstanceOf(SQLException.class);
+            assertThatThrownBy(() -> firstJdbc.execute("select 1"))
+                    .isInstanceOf(CannotGetJdbcConnectionException.class);
         }
     }
 

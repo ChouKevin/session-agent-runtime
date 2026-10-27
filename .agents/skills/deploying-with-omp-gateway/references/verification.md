@@ -66,6 +66,11 @@ env -u SESSION_AGENT_TEST_POSTGRES_ADMIN_URL \
   mvn --batch-mode --no-transfer-progress -Ppostgres-it verify
 ```
 
+GitHub CI 的 PostgreSQL step 明確設定 `SESSION_AGENT_TEST_POSTGRES_MODE=container`，
+確保 container cleanup 測試不因環境條件而跳過。Fixture 關閉後以 JDBC 邊界的
+`CannotGetJdbcConnectionException` 驗證無法連線；shared 模式刪除 DB 與 container
+模式停止 server 的底層原因不同，不要求最深層原因為 `SQLException`。
+
 這不是 shared 連線失敗的補救，也不授權在 consolidated host 啟動第二個 DB。
 普通 `mvn test` 仍是 fake-backed、不需 DB。報告 ordinary／PG counts、owned DB
 清除與未觸及應用資料的實際證據，不能把 health 或文件改動當測試已通過。

@@ -20,6 +20,8 @@ jobs:
       - name: Unit and architecture tests
         run: mvn -q test
       - name: PostgreSQL integration tests
+        env:
+          SESSION_AGENT_TEST_POSTGRES_MODE: container
         run: mvn -q -Ppostgres-it verify
       - name: Docker contract
         run: bash src/test/shell/docker-contract-test.sh
