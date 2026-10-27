@@ -480,6 +480,19 @@ erase its usage. Durable cache accounting is independent of the existing
 request-shape and response-boundary proof used for context usage checkpoints:
 neither history/checkpoint atomicity nor tool-batch recovery semantics change.
 
+Existing ordinary-turn `model_response` lifecycle events include `cacheUsageKnown`
+and, only when known, the exact `cachedInputTokens` value (including zero).
+These fields use the same raw-normalized `ModelCallObservation.cacheUsage` as
+aggregate accounting, not the ordinary `ModelUsage` cache getter, whose provider
+defaults can lose field presence. Missing observations or missing/invalid cache
+usage emit `cacheUsageKnown=false` and omit `cachedInputTokens`; no prior turn's
+value carries forward. Cache availability is independent of the existing
+prompt/completion/total token fields. Session/job IDs and the reserved total
+`callOrdinal` retain request correlation, without logging conversation or tool
+contents. The diagnostic describes the observed response even if its optional
+accounting write fails; it is not proof of durable accounting. This does not add
+response events for intent, compaction or wrap-up calls.
+
 
 `JobCacheReport` distinguishes no calls, unavailable usage, partial known-subset
 usage, complete usage, and complete zero-input usage. Ratios use summed cached

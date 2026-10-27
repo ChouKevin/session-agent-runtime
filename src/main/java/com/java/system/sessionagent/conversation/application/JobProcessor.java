@@ -1,5 +1,6 @@
 package com.java.system.sessionagent.conversation.application;
 
+import com.java.system.sessionagent.conversation.domain.CacheTokenUsage;
 import com.java.system.sessionagent.conversation.domain.MessageWorkClaim;
 import com.java.system.sessionagent.conversation.domain.ConversationHistory;
 import com.java.system.sessionagent.conversation.domain.JobControl;
@@ -200,7 +201,10 @@ public final class JobProcessor implements MessageJobPort {
                 try {
                     result = conversationModel.respond(request, () -> reserveAndLogModelRequest(claim, guard, reservation,
                             activeModelDescriptor, request.history().size(), tools.definitions().size()),
-                            observation -> cacheUsageRecorder.record(claim, observation));
+                            observation -> {
+                                reservation.cacheUsage = observation.cacheUsage();
+                                cacheUsageRecorder.record(claim, observation);
+                            });
                     checkCancellation(claim);
                     reply = result.reply();
                     continuation = result.continuation();
@@ -238,7 +242,8 @@ public final class JobProcessor implements MessageJobPort {
                     return;
                 }
                 int ordinal = reservation.ordinal();
-                logModelResponse(claim, activeModelDescriptor, ordinal, reply, result.usage(), elapsedSince(requestStartedAt));
+                logModelResponse(claim, activeModelDescriptor, ordinal, reply, result.usage(), reservation.cacheUsage,
+                        elapsedSince(requestStartedAt));
                 if (reply instanceof ModelReply.Text text) {
                     appendResponse(claim, guard, List.of(new ConversationStore.AssistantData(text.message())),
                             ConversationStore.JobUpdate.COMPLETE, Optional.empty(), checkpoint(result, claim.modelSelection(), activeModelDescriptor, ordinal,
@@ -919,6 +924,7 @@ public final class JobProcessor implements MessageJobPort {
             int ordinal,
             ModelReply reply,
             ModelUsage usage,
+            Optional<CacheTokenUsage> cacheUsage,
             Duration duration) {
         String category = reply instanceof ModelReply.Text ? "ASSISTANT_TEXT" : "USE_TOOLS";
         LoggingEventBuilder event = LOGGER.atInfo().addKeyValue("event", "model_response")
@@ -926,7 +932,8 @@ public final class JobProcessor implements MessageJobPort {
                 .addKeyValue("messageJobId", claim.messageJobId().value())
                 .addKeyValue("callOrdinal", ordinal)
                 .addKeyValue("outcome", category)
-                .addKeyValue("durationMs", duration.toMillis());
+                .addKeyValue("durationMs", duration.toMillis())
+                .addKeyValue("cacheUsageKnown", cacheUsage.isPresent());
         if (Objects.nonNull(descriptor)) {
             event.addKeyValue("modelRouteId", descriptor.routeId().value())
                     .addKeyValue("modelId", descriptor.modelId());
@@ -935,6 +942,9 @@ public final class JobProcessor implements MessageJobPort {
             event.addKeyValue("promptTokens", usage.promptTokens())
                     .addKeyValue("completionTokens", usage.completionTokens())
                     .addKeyValue("totalTokens", usage.totalTokens());
+        }
+        if (cacheUsage.isPresent()) {
+            event.addKeyValue("cachedInputTokens", cacheUsage.orElseThrow().cachedInputTokens());
         }
         event.log("runtime_lifecycle");
     }
@@ -1080,6 +1090,7 @@ public final class JobProcessor implements MessageJobPort {
         private int ordinal;
         private int executionOrdinal;
         private ModelCallPurpose purpose = ModelCallPurpose.EXECUTION;
+        private Optional<CacheTokenUsage> cacheUsage = Optional.empty();
 
         private int executionOrdinal() {
             return executionOrdinal;
