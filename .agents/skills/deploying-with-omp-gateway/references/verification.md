@@ -283,43 +283,20 @@ workspace inbound。真人驗收另用 `@bot /skill:review 問題`，含 bound t
 reply，並確認原 stop 優先序；不註冊 slash command、不以 bot 訊息冒充真人。
 證據含對話／技能原文時留在私有 Git 外，公開回報僅列必要結果與限制。
 
-### Java MQ 業務 skill 驗收
+### 自訂 skill 的驗證邊界
 
-1. 依 [configuration.md](configuration.md#安裝-java-mq-業務-skill) 安裝核准的
-   `runtime-skills/inventory-java-mq/SKILL.md` 到獨立 operator-owned root。
-   先用既有 `FileSystemSkillLibraryTest`／native library smoke 驗證實際 metadata、
-   `read("skill://inventory-java-mq")`、name/URI、完整檔案大小、UTF-8 與 symlink
-   邊界；generic parser tests 不應固定業務 skill 的 prose。
-2. 經授權的真實模型測試使用獨立 Luna profile/session：
-   `openai-codex/gpt-6-luna`、medium reasoning、context window 272000、
-   output limit 8192。保留 production default；在第一個會發模型請求的訊息前
-   選好 profile，不以設定值冒充成功呼叫的模型 ID。有效的 skill-only selection
-   仍會請模型確認，不能當成零模型 bootstrap；可用預設已為 Luna、Socket factory
-   停用的隔離 Runtime，或無效 command 的零模型拒絕流程建立 session 後再選模型。
-3. 在已選 Luna 的 session 送 `/skill:inventory-java-mq`，確認真實
-   `SKILL` audit bytes/hash、模型確認與 Slack 已載入狀態。新 source ID 重讀才取得
-   新 body；重送同 source 不重讀。成功與失敗通知都以已提交結果為準，
-   ack 後不留永久 badge。
-   Loaded 只證明已提交 bytes，不等於模型遵循；prompt skills 不保證來源、
-   coverage、欄位對應或報表正確，必須另行核對真實讀取證據。
-4. 在未載入此 skill 的 fresh session 提問 Java MQ CSV inventory，觀察模型自主
-   `readSkill` URI、matching TOOL IDs／committed content、實際 model ID 與
-   MCP calls/observations。明確 selection 成功不等於自動 discovery 成功。
-5. 沿用 authoring baseline 的相同情境與五次 fresh-context guided samples，
-   人工閱讀每個 flagged finding：混合 Java/frontend 先分類、依缺少欄位選精確範圍、
-   預設 common/static、不主動讀完所有 profiles，未知外部注入不阻擋完整靜態盤點。
-   空字面搜尋不得變成 MQ 不存在；依賴版本、retry/DLQ 不自行擴張成新需求。
-6. 核對 CSV 的 repository/module、MQ、queue/topic、consumer、binding/routing、
-   factory、ack、concurrency/prefetch、environment scope、evidence status、
-   full source pins 與精確 locators；coverage summary 列出 excluded/unresolved。
-   外部未知與 requested coverage 未讀分開。一般完整輸出或使用者已批准的 partial
-   才能提供附件；未完成時僅提供 progress/gaps 與繼續／整理選擇。
-7. 在專用 `Jarvis-test` thread 分開驗證真人 Slack 顯示、自然語言續查／整理／
-   釐清／新問題、整理模式零 source calls，以及 CSV 儲存、實際 SDK upload 與
-   download 各自的 raw hash／長度。Slack 下載可能移除 UTF-8 BOM，即使 SDK
-   upload bytes 與儲存完全相同；記錄差異與 parsed CSV 等價性，不宣稱 byte/hash
-   preservation。local fake、wording probe、真實 Runtime/MCP 與真人 Slack 證據
-   各自回報，不互相代替；report contents、原始對話及 logs 只留私有 Git 外。
+使用操作者提供、符合 [skill 格式與安裝契約](configuration.md#runtime-本地-skills選用預設停用)
+的測試內容，驗證 metadata、name／URI、UTF-8／大小與 symlink 邊界，以及
+上述選擇、讀取、歷史、重播和復原行為。測試不固定任何業務 skill 的 prose、
+盤點欄位或特定專案資料。
+
+若需真實模型整合驗證，先取得授權並選定[隔離測試 profile](configuration.md#隔離模型驗收)，
+保留實際 response model ID 與工具／history 證據。明確載入成功不等於模型
+會自主選用；自主選用須另觀察真實 `readSkill` call 與 matching TOOL result。
+
+Skill 是否找到足夠資訊、來源是否充分及結果是否符合業務需求，由外部評估
+與內容維護流程負責；評估者據此修訂 skill，再按一般部署／重新讀取流程套用。
+Runtime 不內建該業務的品質標準，也不以載入成功宣稱業務驗收通過。
 
 ### Bounded handoff／Slack transient notice 驗收
 
@@ -338,10 +315,10 @@ reply，並確認原 stop 優先序；不註冊 slash command、不以 bot 訊�
    對應通知；快速 read 可略過 loading，但 success/failure 不可在 ack 前消失。
    記錄 selected presentation/revision與ack，後續普通progress不得保留skill badge。
    缺檔／oversize／traversal／symlink沿用既有native boundary tests，不固定業務prose。
-4. 已授權 Luna-only live：fresh automatic discovery → real readSkill與MCP → pause；
+4. 已授權的隔離模型整合驗證：fresh automatic discovery → real readSkill與MCP → pause；
    ambiguous → clarify；continue → fresh allowance；使用者批准partial → only
    report tools與誠實標示CSV；另一個fresh paused session的新問題不恢復舊任務。
-   有效skill-only另開fresh thread驗證Luna確認與load notice，不當作automatic證據。
+   有效skill-only另開fresh thread驗證模型確認與load notice，不當作automatic證據。
 
 真實 API 只能在明確 opt-in 的暫時 launcher／獨立操作執行，普通 suite 不得耗
 模型額度。保留 actual response model ID、已提交skill bytes/hash與history sequence、

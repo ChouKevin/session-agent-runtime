@@ -1,4 +1,5 @@
 # Gateway 部署與憑證管理
+[English](gateway-deployment.en.md) | [首頁](../README.zh-TW.md) | [問題索引](README.zh-TW.md)
 
 本頁是新主機部署的入口：先選部署方式，再依既有 runbook 安裝、設定與驗證。Java Runtime 不管理 OAuth、不啟動 gateway，也不讀取 OMP credential database。
 
@@ -8,7 +9,7 @@
 | --- | --- | --- |
 | 同一 host 獨立部署 Runtime、gateway、broker | Broker 需要有效的 provider 憑證；新建時由操作者登入 | 下方登入步驟 → [單機安裝](../.agents/skills/deploying-with-omp-gateway/references/install.md) |
 | 新 host 只部署 Runtime，共用既有 gateway | 不需要安裝 OMP 或複製 OAuth 憑證 | 下方跨主機連線 → 專屬 client token → [模型設定](../.agents/skills/deploying-with-omp-gateway/references/configuration.md) |
-| Runtime 直接連支援的模型 provider | 不需要 OMP；需要該 provider 的 API 憑證 | [模型 adapter 與設定邊界](../.agents/skills/deploying-with-omp-gateway/references/configuration.md#model-adapter-and-gateway-boundaries) |
+| Runtime 直接連支援的模型 provider | 不需要 OMP；需要該 provider 的 API 憑證 | [模型 keys 與直接 provider 範例](configuration.zh-TW.md#model-configuration) |
 
 新主機仍須準備 Java 21、資料庫、外部 Runtime 設定及所需 MCP／Slack 設定。共用 gateway 不代表共用 Runtime 資料庫或啟動第二個相同 Slack Socket consumer。資料庫選擇與 gateway 選擇獨立：先重用既有相容的本機 PostgreSQL；缺少應用憑證時回報 blocker 或取得明確 provisioning 授權，不自動啟動另一個 DB、改連遠端或給 Runtime cluster-superuser 憑證。
 
@@ -54,7 +55,7 @@ ssh -N -T -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 \
 
 Runtime 的 `base-url` 使用 `http://127.0.0.1:14000/v1`。先驗證 SSH host key，不停用 host-key checking。此命令是前景連線示範，正式環境需由操作者配置受監督的 tunnel service 與啟動順序；SSH 連線中斷會使模型呼叫失敗。不要把 broker port 或 OAuth DB 分享給 Runtime host。
 
-共用 gateway 的 Runtime unit **不要直接照抄單機版的 OMP service 依賴**；只部署所需 Runtime／資料庫服務，並設定實際可達的 endpoint。依賴與 EnvironmentFile 必須以部署環境為準。
+共用 gateway 的 Runtime unit **不要直接照抄單機版的 OMP service 依賴**；只部署所需 Runtime／資料庫服務，並設定實際可達的 endpoint。依賴與 `EnvironmentFile` 必須以部署環境為準。
 
 ## 4. 三層憑證與生命週期
 

@@ -26,9 +26,6 @@
 /.idea/
 *.iml
 
-# Local agent execution artifacts.
-/.superpowers/
-
 # Build output and runtime diagnostics.
 .worktrees/
 build/
@@ -36,3 +33,6 @@ reports/
 target/
 logs/
 fixtures/*/target/
+
+/.superpowers/
+/docs/superpowers/

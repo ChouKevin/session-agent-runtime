@@ -1,5 +1,7 @@
 # MCP：連線、憑證與工具驗收
 
+[問題索引](../../../../docs/README.zh-TW.md) | [English question index](../../../../docs/README.md) | [通用 MCP keys 與層級](../../../../docs/configuration.zh-TW.md#mcp-connections) ([English](../../../../docs/configuration.md#mcp-connections))
+
 ## 邊界與操作順序
 
 MCP 設定屬於 **Runtime**，不屬於 OMP Gateway。Gateway 提供模型 API；Runtime 自己發現及執行 MCP 工具。OMP 的 MCP 設定、skills、server instructions 不會因使用 Gateway 而自動成為 Runtime 的提示或工具。此文件是部署參考，不是 agent 的業務查詢 skill。
@@ -114,7 +116,7 @@ PY
 
 診斷格式為 `{"connections":{"java-source":{"state":"AVAILABLE","toolCount":10}}}`；10 是格式示例，不是固定契約。失敗時可附 `code`、`message`，不包含 URL、headers、token 或原始例外。Runtime 即使所有 MCP 不可用仍可啟動，所以 `health: UP` 不代表 MCP 成功。每個連線獨立重連，不用因一個服務失敗而重啟所有 MCP。
 
-`enabled: false` 仍需合法的 connection URL；保留 headers 時其 `${...}` 也仍須能解析。若要移除 token，應一併移除不再需要的 header 或整個 connection entry，而非留下 unresolved placeholder。移除最後一個 connection 時省略 `connections`，不要填 `connections: {}`。
+`enabled: false` 仍需合法的 connection URL；保留 headers 時其 `${...}` 也仍須能解析。若要移除 token，應一併移除不再需要的 header 或整個 connection entry，而非留下 unresolved placeholder。移除最後一個 connection 時省略 `connections`，不要填 `connections: {}`；此 omission 建議避免 loader／版本相關的 binding 問題，不是 Java constructor 拒絕實際空 map 的規則。完整定義見[通用 MCP 設定參考](../../../../docs/configuration.zh-TW.md#mcp-connections)。
 
 ## 經授權的模型 → MCP → history 實測
 
